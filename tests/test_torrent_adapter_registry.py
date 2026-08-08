@@ -1,4 +1,3 @@
-import asyncio
 import os
 import tempfile
 import unittest
@@ -249,32 +248,30 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
                 60.0,
             )
 
-    def test_indexer_defaults_preserve_the_context_budget_after_initialization(self):
+    def test_indexer_defaults_are_the_context_budgets(self):
         manager = TorrentAdapterRegistry.__new__(TorrentAdapterRegistry)
 
         with (
             patch.object(settings, "LIVE_SCRAPE_TIMEOUT", 10.0),
             patch.object(settings, "BACKGROUND_SCRAPE_TIMEOUT", 60.0),
-            patch.object(settings, "INDEXER_MANAGER_WAIT_TIMEOUT", 30),
             patch.object(settings, "SCRAPER_TIMEOUT_OVERRIDES", {}),
         ):
             self.assertEqual(
-                manager._resolve_timeout(JackettScraper, ScrapeContext.LIVE), 40.0
+                manager._resolve_timeout(JackettScraper, ScrapeContext.LIVE), 10.0
             )
             self.assertEqual(
                 manager._resolve_timeout(ProwlarrScraper, ScrapeContext.BACKGROUND),
-                90.0,
+                60.0,
             )
             self.assertEqual(
                 manager._resolve_timeout(ZileanScraper, ScrapeContext.LIVE), 10.0
             )
 
-    def test_indexer_override_replaces_the_derived_default(self):
+    def test_indexer_override_replaces_the_context_default(self):
         manager = TorrentAdapterRegistry.__new__(TorrentAdapterRegistry)
 
         with (
             patch.object(settings, "LIVE_SCRAPE_TIMEOUT", 10.0),
-            patch.object(settings, "INDEXER_MANAGER_WAIT_TIMEOUT", 30),
             patch.object(
                 settings,
                 "SCRAPER_TIMEOUT_OVERRIDES",
@@ -296,34 +293,3 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
             client = AsyncClientWrapper()
 
         self.assertEqual(client.timeout, 47.5)
-
-    async def test_adapter_timeout_is_bounded_and_cancels_work(self):
-        cancelled = asyncio.Event()
-
-        class SlowScraper(TorrentDiscoveryAdapter):
-            impersonate = None
-
-            async def scrape(self, request):
-                del request
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    cancelled.set()
-
-        adapter = SlowScraper(None, None)
-        adapter.discovery_name = "Slow"
-        adapter.discovery_timeout = 0.01
-        with (
-            patch("comet.discovery.torrent_base.metrics.observe_scraper") as observe,
-        ):
-            with self.assertRaises(TimeoutError):
-                await adapter.search(
-                    MediaQuery("tt123", "movie", title="Title"),
-                    DiscoveryContext(
-                        frozenset({"bittorrent"}),
-                        work_class=ScrapeContext.BACKGROUND,
-                    ),
-                )
-
-        self.assertTrue(cancelled.is_set())
-        observe.assert_called_once()

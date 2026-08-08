@@ -25,13 +25,6 @@ from comet.utils.parsing import (
     parse_media_id,
 )
 
-_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
-    total=20,
-    connect=5,
-    sock_connect=5,
-    sock_read=15,
-)
-
 
 def batch_parse(filenames):
     parsed_results = [parse(filename) for filename in filenames]
@@ -179,7 +172,6 @@ class StremThru:
                 **({"json": payload} if payload is not None else {}),
                 headers=self._headers(),
                 allow_redirects=False,
-                timeout=_REQUEST_TIMEOUT,
             ) as response:
                 status = response.status
                 data = orjson.loads(await response.read())

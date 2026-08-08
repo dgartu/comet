@@ -158,9 +158,6 @@ class EasynewsDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["headers"]["Accept-Encoding"], "identity")
         self.assertTrue(kwargs["headers"]["Authorization"].startswith("Basic "))
         self.assertFalse(kwargs["allow_redirects"])
-        self.assertEqual(kwargs["timeout"].total, 8)
-        self.assertEqual(kwargs["timeout"].connect, 3)
-        self.assertEqual(kwargs["timeout"].sock_read, 5)
 
     async def test_compact_easynews_rows_use_response_download_coordinates(self):
         session = _Session(

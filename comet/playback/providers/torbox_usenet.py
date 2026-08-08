@@ -15,7 +15,6 @@ from comet.core.provider_json import (
 )
 from comet.core.sources import MAX_SIGNED_BIGINT
 from comet.playback.base import (
-    REMOTE_PREPARATION_TIMEOUT_SECONDS,
     Actionability,
     BytePath,
     ProviderDescriptor,
@@ -28,9 +27,6 @@ from comet.usenet.limits import MAX_NZB_FILES, MAX_NZB_METADATA_BYTES
 
 _BASE_URL = "https://api.torbox.app/v1/api/usenet"
 _USER_URL = "https://api.torbox.app/v1/api/user/me"
-_VALIDATION_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=3, sock_read=5)
-_READ_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
-_CREATE_TIMEOUT = aiohttp.ClientTimeout(total=REMOTE_PREPARATION_TIMEOUT_SECONDS)
 _LIBRARY_PAGE_SIZE = 1_000
 _MAX_LIBRARY_ITEMS = MAX_NZB_FILES
 _REMOTE_TERMINAL = frozenset(
@@ -397,7 +393,6 @@ class TorBoxUsenetProvider:
                 _USER_URL,
                 headers=self._headers(api_key),
                 allow_redirects=False,
-                timeout=_VALIDATION_TIMEOUT,
             ) as response:
                 if response.status in {401, 403}:
                     return ProviderStatus(
@@ -426,7 +421,6 @@ class TorBoxUsenetProvider:
                 params={"offset": "0", "limit": "1", "bypass_cache": "false"},
                 headers=self._headers(api_key),
                 allow_redirects=False,
-                timeout=_VALIDATION_TIMEOUT,
             ) as response:
                 if response.status in {401, 403}:
                     return ProviderStatus(
@@ -499,7 +493,6 @@ class TorBoxUsenetProvider:
                     },
                     headers=self._headers(),
                     allow_redirects=False,
-                    timeout=_READ_TIMEOUT,
                 ) as response:
                     if response.status in {401, 403}:
                         raise TorBoxUsenetError(
@@ -637,7 +630,6 @@ class TorBoxUsenetProvider:
                 headers=self._headers(),
                 data=form,
                 allow_redirects=False,
-                timeout=_CREATE_TIMEOUT,
             ) as response:
                 upstream_limit = _create_rate_limit(response.headers)
                 if permit is not None and upstream_limit is not None:
@@ -700,7 +692,6 @@ class TorBoxUsenetProvider:
                 },
                 headers=self._headers(),
                 allow_redirects=False,
-                timeout=_READ_TIMEOUT,
             ) as response:
                 if response.status in {401, 403}:
                     raise TorBoxUsenetError(
@@ -751,7 +742,6 @@ class TorBoxUsenetProvider:
                 },
                 headers=self._headers(),
                 allow_redirects=False,
-                timeout=_READ_TIMEOUT,
             ) as response:
                 if response.status in {401, 403}:
                     raise TorBoxUsenetError(
@@ -813,7 +803,6 @@ class TorBoxUsenetProvider:
                     "Accept-Encoding": "identity",
                 },
                 allow_redirects=False,
-                timeout=_READ_TIMEOUT,
             ) as response:
                 if response.status in {401, 403}:
                     raise TorBoxUsenetError(

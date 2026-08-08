@@ -334,7 +334,6 @@ class TorBoxUsenetValidationTests(unittest.IsolatedAsyncioTestCase):
         )
         for request in (user_request, list_request):
             self.assertFalse(request["allow_redirects"])
-            self.assertEqual(request["timeout"].total, 10)
             self.assertEqual(request["headers"]["Accept-Encoding"], "identity")
 
     async def test_validation_proves_the_configured_key_and_usenet_plan(self):
@@ -427,10 +426,6 @@ class TorBoxUsenetValidationTests(unittest.IsolatedAsyncioTestCase):
             (await provider.submit_artifact(b"<nzb/>")).usenet_id,
             7,
         )
-        timeout = session.post_kwargs["timeout"]
-        self.assertEqual(timeout.total, 110)
-        self.assertIsNone(timeout.connect)
-        self.assertIsNone(timeout.sock_read)
 
     async def test_current_list_shape_proves_inactive_completed_item_ready(self):
         provider = TorBoxUsenetProvider(

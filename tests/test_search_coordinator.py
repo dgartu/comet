@@ -20,6 +20,7 @@ from comet.core.schema_migrations import (
     _ensure_usenet_schema,
 )
 from comet.core.schema_specs import SCRAPE_LOCKS_TABLE_SPEC
+from comet.core.scrape import ScrapeContext
 from comet.core.sources import (
     LocatorKind,
     LocatorPolicy,
@@ -226,7 +227,7 @@ class SearchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             ("Discovery is temporarily unavailable",),
         )
 
-    async def test_hard_deadline_cancels_pending_adapters_and_sets_the_signal(self):
+    async def test_provider_deadline_cancels_only_that_adapter(self):
         observed = asyncio.Event()
 
         class SlowAdapter:
@@ -237,19 +238,30 @@ class SearchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     if context.cancelled():
                         observed.set()
 
-        plan = _torrent_plan("slow")
+        plan = _torrent_plan("slow", "fast")
+        fast = FakeAdapter(
+            DiscoveryBatch(
+                candidates=(_torrent_candidate(),),
+                coverage=frozenset({"bittorrent"}),
+            )
+        )
 
-        result = await SearchCoordinator(
-            {"slow": SlowAdapter()},
-            hard_timeout=0.02,
-        ).search(MediaQuery("tt1", "movie"), plan, trace_id="trace-safe")
+        with patch.object(
+            discovery_manager.settings, "BACKGROUND_SCRAPE_TIMEOUT", 0.02
+        ):
+            result = await SearchCoordinator(
+                {"slow": SlowAdapter(), "fast": fast}
+            ).search(
+                MediaQuery("tt1", "movie"),
+                plan,
+                trace_id="trace-safe",
+                work_class=ScrapeContext.BACKGROUND,
+            )
 
         self.assertTrue(observed.is_set())
-        self.assertTrue(result.inflight)
-        self.assertEqual(
-            result.diagnostics,
-            ("Discovery is temporarily unavailable",),
-        )
+        self.assertFalse(result.inflight)
+        self.assertEqual(result.candidates, (_torrent_candidate(),))
+        self.assertEqual(result.diagnostics, ())
 
     async def test_result_cardinality_and_diagnostics_are_preserved(self):
         plan = _torrent_plan("indexer")
@@ -332,7 +344,6 @@ class CachedSearchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             database=self.database,
             background_task_adder=background_task_adder,
             candidate_normalizer=candidate_normalizer,
-            hard_timeout=1,
         )
 
     async def search(self, coordinator):

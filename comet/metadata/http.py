@@ -10,8 +10,6 @@ from comet.core.provider_json import (
     read_provider_json,
 )
 
-_METADATA_JSON_MAX_BYTES = 2 * 1024 * 1024
-_METADATA_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
 _BASE_HEADERS = {
     "Accept": "application/json",
     "Accept-Encoding": "identity",
@@ -38,7 +36,7 @@ async def get_metadata_json(
     *,
     headers: dict[str, str] | None = None,
 ) -> MetadataHttpResponse:
-    """Fetch one bounded JSON object without following redirects."""
+    """Fetch one JSON object without following redirects."""
     request_headers = {}
     if headers:
         request_headers.update(headers)
@@ -47,7 +45,6 @@ async def get_metadata_json(
         async with session.get(
             url,
             headers=request_headers,
-            timeout=_METADATA_TIMEOUT,
             allow_redirects=False,
         ) as response:
             status = response.status
@@ -56,10 +53,7 @@ async def get_metadata_json(
             if not is_success_status(status):
                 return MetadataHttpResponse(status, None)
             try:
-                payload = await read_provider_json(
-                    response,
-                    maximum=_METADATA_JSON_MAX_BYTES,
-                )
+                payload = await read_provider_json(response)
             except ProviderJsonError:
                 raise MetadataHttpError(
                     "metadata service returned an invalid response"

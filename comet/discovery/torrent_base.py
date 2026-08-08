@@ -73,7 +73,6 @@ class TorrentDiscoveryAdapter(ABC):
     url_setting: str | None = None
     credential_setting: str | None = None
     anime_only_setting: str | None = None
-    startup_timeout_setting: str | None = None
     impersonate: str | None = None
 
     def __init__(self, manager, session: AsyncClientWrapper, url: str | None = None):
@@ -107,14 +106,13 @@ class TorrentDiscoveryAdapter(ABC):
         outcome = "success"
         result_count = 0
         try:
-            if self.discovery_timeout is None:
-                raw_results = await self.scrape(request)
-            else:
-                async with asyncio.timeout(self.discovery_timeout):
-                    raw_results = await self.scrape(request)
+            raw_results = await self.scrape(request)
             result_count = len(raw_results)
         except TimeoutError:
             outcome = "timeout"
+            raise
+        except asyncio.CancelledError:
+            outcome = "timeout" if context.cancelled() else "error"
             raise
         except BaseException:
             outcome = "error"

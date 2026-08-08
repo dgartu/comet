@@ -144,20 +144,14 @@ class StremioAddonAdapter:
             )
         if context.cancelled():
             return DiscoveryBatch(diagnostics=("Stremio addon search was cancelled",))
-        if context.hard_deadline is None:
-            return await self._search(query, context)
-        remaining = context.hard_deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
+        if (
+            context.hard_deadline is not None
+            and asyncio.get_running_loop().time() >= context.hard_deadline
+        ):
             return DiscoveryBatch(
                 diagnostics=("Stremio addon search deadline expired",)
             )
-        try:
-            async with asyncio.timeout(remaining):
-                return await self._search(query, context)
-        except TimeoutError:
-            return DiscoveryBatch(
-                diagnostics=("Stremio addon search deadline expired",)
-            )
+        return await self._search(query, context)
 
     async def _search(
         self,

@@ -406,11 +406,6 @@ class EasynewsSearchAdapter:
                     ),
                 },
                 allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(
-                    total=8,
-                    connect=3,
-                    sock_read=5,
-                ),
             ) as response:
                 if response.status in {401, 403}:
                     raise EasynewsSearchError(

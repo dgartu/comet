@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import TypeVar
 
 from comet.core.capabilities import CapabilityPlan
+from comet.core.models import settings
 from comet.core.scrape import ScrapeContext
 from comet.core.sources import ReleaseCandidate, TransportKind
 from comet.discovery.base import DiscoveryAdapter
@@ -40,6 +41,7 @@ class _ScheduledSearch:
     provider_name: str
     branches: tuple[str, ...]
     started: float
+    cancellation: asyncio.Event
     operation: asyncio.Task
 
 
@@ -80,6 +82,30 @@ class _LocalSingleFlight:
 _local_singleflight = _LocalSingleFlight()
 
 
+def _source_timeout(adapter: DiscoveryAdapter, work_class: ScrapeContext) -> float:
+    timeout = getattr(adapter, "discovery_timeout", None)
+    if timeout is not None:
+        return timeout
+    return (
+        settings.LIVE_SCRAPE_TIMEOUT
+        if work_class is ScrapeContext.LIVE
+        else settings.BACKGROUND_SCRAPE_TIMEOUT
+    )
+
+
+async def _run_before_deadline[T](
+    operation: Awaitable[T],
+    deadline: float,
+    cancellation: asyncio.Event,
+) -> T:
+    timer = asyncio.get_running_loop().call_at(deadline, cancellation.set)
+    try:
+        async with asyncio.timeout_at(deadline):
+            return await operation
+    finally:
+        timer.cancel()
+
+
 class SearchCoordinator:
     """Runs only capability-plan reachable adapters and preserves partial success."""
 
@@ -87,7 +113,6 @@ class SearchCoordinator:
         self,
         adapters: Mapping[str, DiscoveryAdapter],
         *,
-        hard_timeout: float = 8.0,
         database=None,
         background_task_adder: Callable | None = None,
         candidate_normalizer: (
@@ -102,7 +127,6 @@ class SearchCoordinator:
         retry_ttl: float = 60.0,
     ):
         self._adapters = dict(adapters)
-        self._hard_timeout = float(hard_timeout)
         self._database = database
         self._background_task_adder = background_task_adder
         self._candidate_normalizer = candidate_normalizer
@@ -123,8 +147,6 @@ class SearchCoordinator:
         ) = None,
     ) -> DiscoveryResult:
         loop = asyncio.get_running_loop()
-        started = loop.time()
-        cancellation = asyncio.Event()
         display_names = {
             source.configuration_id: source.display_name
             for source in capability_plan.discovery
@@ -147,12 +169,16 @@ class SearchCoordinator:
                 .__name__.removesuffix("Scraper")
                 .removesuffix("Adapter")
             )
+            source_started = loop.time()
+            source_deadline = source_started + _source_timeout(adapter, work_class)
+            cancellation = asyncio.Event()
             scheduled.append(
                 _ScheduledSearch(
                     source.configuration_id,
                     provider_name[:128],
                     branches,
-                    loop.time(),
+                    source_started,
+                    cancellation,
                     asyncio.create_task(
                         self._search_source(
                             adapter,
@@ -166,7 +192,7 @@ class SearchCoordinator:
                                 and account_partition is not None
                                 and branch_fingerprints is not None
                             ),
-                            hard_deadline=started + self._hard_timeout,
+                            hard_deadline=source_deadline,
                             cancellation=cancellation,
                             trace_id=trace_id,
                             work_class=work_class,
@@ -179,21 +205,13 @@ class SearchCoordinator:
 
         tasks = [source.operation for source in scheduled]
         try:
-            _done, pending = await asyncio.wait(
-                tasks,
-                timeout=max(0.0, started + self._hard_timeout - loop.time()),
-            )
+            await asyncio.wait(tasks)
         except asyncio.CancelledError:
-            cancellation.set()
-            for task in tasks:
-                task.cancel()
+            for source in scheduled:
+                source.cancellation.set()
+                source.operation.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
-        if pending:
-            cancellation.set()
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
 
         candidates = []
         diagnostics = []
@@ -203,19 +221,23 @@ class SearchCoordinator:
             operation = source.operation
             failure_outcome = None
             failure_exception = None
-            if operation in pending or operation.cancelled():
+            if operation.cancelled():
                 response = None
                 failure_outcome = "timeout"
                 had_inflight = True
             else:
                 try:
                     response = operation.result()
+                except TimeoutError:
+                    response = None
+                    failure_outcome = "timeout"
+                    had_inflight = True
                 except Exception as exc:
                     response = None
                     failure_exception = exc
-                if failure_exception is not None:
+                if failure_outcome is None and failure_exception is not None:
                     failure_outcome = "failed"
-                else:
+                elif failure_outcome is None:
                     had_inflight = had_inflight or response.inflight
             if failure_outcome is not None:
                 had_failures = True
@@ -274,17 +296,21 @@ class SearchCoordinator:
         work_class: ScrapeContext,
     ) -> DiscoveryBatch:
         if not use_cache:
-            response = await adapter.search(
-                query,
-                _context(
-                    branches,
-                    source_configuration_id,
-                    account_partition,
-                    hard_deadline,
-                    cancellation,
-                    trace_id,
-                    work_class,
+            response = await _run_before_deadline(
+                adapter.search(
+                    query,
+                    _context(
+                        branches,
+                        source_configuration_id,
+                        account_partition,
+                        hard_deadline,
+                        cancellation,
+                        trace_id,
+                        work_class,
+                    ),
                 ),
+                hard_deadline,
+                cancellation,
             )
             return await self._normalize_batch(response)
         branch_pairs = tuple(
@@ -438,18 +464,18 @@ class SearchCoordinator:
         work_class: ScrapeContext,
         lock_key: str,
     ) -> DiscoveryBatch:
+        operation_timeout = _source_timeout(adapter, work_class)
         repository = ReleaseDiscoveryRepository(self._database)
         coverage_repository = SearchCoverageRepository(self._database)
         lock = DistributedLock(
             lock_key,
-            timeout=max(10.0, self._hard_timeout + 2.0),
             retry_interval=0.1,
             database=self._database,
         )
         loop = asyncio.get_running_loop()
         if not wait_for_lock:
             started = loop.time()
-            hard_deadline = started + self._hard_timeout
+            hard_deadline = started + operation_timeout
         wait_timeout = max(0.0, hard_deadline - loop.time()) if wait_for_lock else None
         acquired = await lock.acquire(wait_timeout=wait_timeout)
         if not acquired:
@@ -496,17 +522,25 @@ class SearchCoordinator:
                     operation=work_class.value,
                 )
                 try:
-                    response = await adapter.search(
-                        query,
-                        _context(
-                            (branch,),
-                            source_configuration_id,
-                            (None if identity.public_visibility else account_partition),
-                            hard_deadline,
-                            cancellation,
-                            trace_id,
-                            work_class,
+                    response = await _run_before_deadline(
+                        adapter.search(
+                            query,
+                            _context(
+                                (branch,),
+                                source_configuration_id,
+                                (
+                                    None
+                                    if identity.public_visibility
+                                    else account_partition
+                                ),
+                                hard_deadline,
+                                cancellation,
+                                trace_id,
+                                work_class,
+                            ),
                         ),
+                        hard_deadline,
+                        cancellation,
                     )
                     response = await self._normalize_batch(response)
                     log.info(
@@ -522,11 +556,9 @@ class SearchCoordinator:
                 finally:
                     cancellation.set()
 
-            remaining = max(0.0, hard_deadline - loop.time())
-            if remaining == 0:
+            if loop.time() >= hard_deadline:
                 return DiscoveryBatch(inflight=True)
-            async with asyncio.timeout(remaining):
-                response = await lock.run(refresh())
+            response = await lock.run(refresh())
             if branch not in response.coverage:
                 await coverage_repository.record_failure(
                     query,

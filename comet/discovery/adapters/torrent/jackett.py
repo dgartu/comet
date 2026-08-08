@@ -32,7 +32,6 @@ _REQUEST_BATCH_SIZE = 16
 
 class JackettScraper(TorrentDiscoveryAdapter):
     url_setting = "JACKETT_URL"
-    startup_timeout_setting = "INDEXER_MANAGER_WAIT_TIMEOUT"
 
     def __init__(self, manager, session, url: str):
         super().__init__(manager, session, url)

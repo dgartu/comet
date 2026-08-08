@@ -10,11 +10,6 @@ from comet.usenet.limits import MAX_NZB_DOCUMENT_BYTES
 from comet.utils.http_client import read_bounded_body
 
 GENERATE_NZB_URL = "https://members.easynews.com/2.0/api/dl-nzb"
-_GENERATE_TIMEOUT = aiohttp.ClientTimeout(
-    total=120,
-    connect=5,
-    sock_read=30,
-)
 
 
 class EasynewsNzbError(RuntimeError):
@@ -119,7 +114,6 @@ async def generate_nzb(
             data=form,
             headers=headers,
             allow_redirects=False,
-            timeout=_GENERATE_TIMEOUT,
         ) as response:
             if response.status in {401, 403}:
                 raise EasynewsNzbError(

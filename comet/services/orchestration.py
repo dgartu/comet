@@ -158,21 +158,12 @@ class TorrentResultAccumulator:
             (),
             discovery,
         )
-        hard_timeout = (
-            8.0
-            if context is ScrapeContext.LIVE
-            else max(
-                (adapter.discovery_timeout for adapter in adapters.values()),
-                default=8.0,
-            )
-        )
         branch_fingerprints = torrent_adapter_registry.branch_fingerprints(
             adapters,
             context,
         )
         discovery_result = await SearchCoordinator(
             adapters,
-            hard_timeout=hard_timeout,
             database=database,
             candidate_normalizer=self._normalize_candidates,
         ).search(

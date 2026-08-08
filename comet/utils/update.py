@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import quote
 
-import aiohttp
-
 from comet.core.build_metadata import (
     normalize_branch,
     normalize_build_date,
@@ -21,7 +19,6 @@ from comet.core.provider_json import (
 from comet.observability.context import create_detached_task
 from comet.utils.http_client import http_client_manager
 
-GITHUB_API_TIMEOUT = 10
 GITHUB_REPO = "g0ldyy/comet"
 GITHUB_DEVELOPMENT_BRANCH = "development"
 _GITHUB_RESPONSE_LIMIT = 64 * 1024
@@ -168,13 +165,11 @@ class UpdateManager:
         try:
             if normalize_branch(branch) is None:
                 raise ValueError("current branch is unavailable or invalid")
-            timeout = aiohttp.ClientTimeout(total=GITHUB_API_TIMEOUT)
             session = await http_client_manager.get_session()
             branch_path = quote(branch, safe="")
             url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/{branch_path}"
             async with session.get(
                 url,
-                timeout=timeout,
                 allow_redirects=False,
                 headers={
                     "Accept": "application/vnd.github+json",

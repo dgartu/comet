@@ -46,12 +46,13 @@ SCRAPER_TIMEOUT_OVERRIDES={"Zilean":90,"Jackett:live":20}
 ```
 
 Resolution order is context-specific scraper override, scraper override, then
-the context default. A timeout cancels only the affected adapter invocation;
-other providers continue and their results are retained.
+the context default. There is no separate fixed coordinator timeout: live and
+background searches use their resolved provider budgets. A timeout cancels only
+the affected adapter invocation; other providers continue and their results are
+retained.
 
-Without an explicit override, Jackett and Prowlarr also reserve
-`INDEXER_MANAGER_WAIT_TIMEOUT` for cold indexer-manager initialization before
-their context-specific scrape budget begins.
+Jackett and Prowlarr bound cold indexer-manager initialization with
+`INDEXER_MANAGER_WAIT_TIMEOUT`, within the provider's overall scrape budget.
 
 `HTTP_CLIENT_TIMEOUT_TOTAL` remains the timeout for one HTTP request. Scraper
 budgets cover the complete provider operation, including pagination and retries.

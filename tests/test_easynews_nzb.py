@@ -109,9 +109,6 @@ class EasynewsGeneratedNzbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, document)
         self.assertEqual(session.url, GENERATE_NZB_URL)
         self.assertFalse(session.kwargs["allow_redirects"])
-        self.assertEqual(session.kwargs["timeout"].total, 120)
-        self.assertEqual(session.kwargs["timeout"].connect, 5)
-        self.assertEqual(session.kwargs["timeout"].sock_read, 30)
         self.assertEqual(
             session.kwargs["headers"]["Content-Type"],
             "application/x-www-form-urlencoded",

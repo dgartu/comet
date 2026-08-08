@@ -61,7 +61,6 @@ class MetadataHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["headers"]["Accept"], "application/json")
         self.assertEqual(kwargs["headers"]["Accept-Encoding"], "identity")
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer opaque")
-        self.assertEqual(kwargs["timeout"].total, 15)
 
     async def test_non_success_does_not_read_or_retain_provider_body(self):
         response = _Response(302, b'{"secret":"signed-value"}')

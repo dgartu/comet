@@ -63,14 +63,11 @@ class TorrentAdapterRegistry:
         if normalized_name in overrides:
             return overrides[normalized_name]
 
-        timeout = (
+        return (
             settings.LIVE_SCRAPE_TIMEOUT
             if context == ScrapeContext.LIVE
             else settings.BACKGROUND_SCRAPE_TIMEOUT
         )
-        if scraper_class.startup_timeout_setting is not None:
-            timeout += settings.__dict__[scraper_class.startup_timeout_setting]
-        return timeout
 
     @staticmethod
     def _resolve_url_for_context(url: str, context: str):

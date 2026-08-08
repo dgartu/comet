@@ -64,9 +64,8 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         captured = {}
 
         class CaptureCoordinator:
-            def __init__(self, adapters, **kwargs):
+            def __init__(self, adapters, **_kwargs):
                 captured["adapters"] = adapters
-                captured["options"] = kwargs
 
             async def search(self, query, plan, **kwargs):
                 captured["query"] = query
@@ -104,7 +103,6 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             captured["search_options"]["work_class"],
             ScrapeContext.BACKGROUND,
         )
-        self.assertEqual(captured["options"]["hard_timeout"], 120.0)
         filter_manager.assert_not_awaited()
         self.assertEqual(manager.torrents, {})
 
@@ -179,7 +177,7 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         captured = []
 
         class CaptureAdapter:
-            discovery_timeout = 8.0
+            discovery_timeout = 23.0
 
             async def search(self, query, context):
                 captured.append((query, context))
@@ -208,6 +206,10 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             ("La vita davanti a se",),
         )
         self.assertIs(captured[0][1].work_class, ScrapeContext.LIVE)
+        self.assertGreater(
+            captured[0][1].hard_deadline - asyncio.get_running_loop().time(),
+            22.0,
+        )
 
     async def test_filter_manager_accepts_empty_results(self):
         manager = TorrentResultAccumulator(
