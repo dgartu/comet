@@ -48,6 +48,8 @@ class AppSettingsTests(unittest.TestCase):
 
         self.assertTrue(settings.INDEXER_INCLUDE_CANONICAL_TITLE)
         self.assertTrue(settings.INDEXER_INCLUDE_ORIGINAL_TITLE)
+        self.assertTrue(settings.INDEXER_PRIVATE_TORRENTS_ENABLED)
+        self.assertFalse(settings.COMETNET_PRIVATE_TORRENTS_ENABLED)
 
     def test_scraper_modes_normalize_environment_boolean_strings(self):
         settings = AppSettings(

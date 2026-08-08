@@ -1297,6 +1297,16 @@ async def _migration_active_connection_timestamps(ctx: MigrationContext):
     return True
 
 
+async def _migration_private_torrent_flag(ctx: MigrationContext):
+    await _add_column_if_missing(
+        ctx,
+        "release_candidates",
+        "is_private",
+        "is_private BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    return True
+
+
 MIGRATIONS = [
     ("2026030901_foundation", _migration_foundation),
     ("2026030902_backfill_canonical_tables", _migration_backfill_canonical_tables),
@@ -1327,4 +1337,5 @@ MIGRATIONS = [
         "2026080601_active_connection_timestamps",
         _migration_active_connection_timestamps,
     ),
+    ("2026080801_private_torrent_flag", _migration_private_torrent_flag),
 ]

@@ -39,6 +39,10 @@ def _indexer_name(value: object) -> str | None:
     return normalize_indexer_name(value)
 
 
+def is_private_indexer_type(value: object) -> bool:
+    return isinstance(value, str) and value.casefold() == "private"
+
+
 def _reject_json_constant(_value):
     raise InvalidIndexerResponse("invalid indexer JSON constant")
 
@@ -95,6 +99,17 @@ def _active_jackett_ids(root, configured_ids: list[str]) -> list[str]:
         if len(active_ids) == _MAX_ACTIVE_INDEXERS:
             break
     return active_ids
+
+
+def _private_jackett_ids(root, active_ids: list[str]) -> frozenset[str]:
+    active = {indexer_id.casefold() for indexer_id in active_ids}
+    return frozenset(
+        indexer_id.casefold()
+        for indexer in root.findall("indexer")
+        if (indexer_id := indexer.get("id"))
+        and indexer_id.casefold() in active
+        and is_private_indexer_type(indexer.findtext("type"))
+    )
 
 
 def _active_prowlarr_ids(
@@ -160,6 +175,17 @@ def _active_prowlarr_ids(
     return active_ids
 
 
+def _private_prowlarr_ids(indexers, active_ids: list[str]) -> frozenset[str]:
+    active = set(active_ids)
+    return frozenset(
+        str(indexer["id"])
+        for indexer in indexers
+        if isinstance(indexer, dict)
+        and str(indexer.get("id")) in active
+        and is_private_indexer_type(indexer.get("privacy"))
+    )
+
+
 class IndexerManager:
     def __init__(self):
         self.session: aiohttp.ClientSession | None = None
@@ -167,7 +193,9 @@ class IndexerManager:
         self.original_jackett_config = settings.JACKETT_INDEXERS.copy()
         self.original_prowlarr_config = settings.PROWLARR_INDEXERS.copy()
         self.active_jackett_config = self.original_jackett_config.copy()
-        self.active_prowlarr_config = self.original_prowlarr_config.copy()
+        self.active_prowlarr_config: list[str] = []
+        self.private_jackett_indexers: frozenset[str] = frozenset()
+        self.private_prowlarr_indexers: frozenset[str] = frozenset()
         self.jackett_initialized = asyncio.Event()
         self.prowlarr_initialized = asyncio.Event()
         self._configuration_changed = asyncio.Event()
@@ -187,7 +215,9 @@ class IndexerManager:
         self.original_jackett_config = config.JACKETT_INDEXERS.copy()
         self.original_prowlarr_config = config.PROWLARR_INDEXERS.copy()
         self.active_jackett_config = self.original_jackett_config.copy()
-        self.active_prowlarr_config = self.original_prowlarr_config.copy()
+        self.active_prowlarr_config = []
+        self.private_jackett_indexers = frozenset()
+        self.private_prowlarr_indexers = frozenset()
         self.jackett_initialized.clear()
         self.prowlarr_initialized.clear()
         self._configuration_changed.set()
@@ -240,6 +270,7 @@ class IndexerManager:
                 active_ids = _active_jackett_ids(root, self.original_jackett_config)
 
                 self.active_jackett_config = active_ids
+                self.private_jackett_indexers = _private_jackett_ids(root, active_ids)
 
         finally:
             self.jackett_initialized.set()
@@ -280,6 +311,7 @@ class IndexerManager:
             )
 
             self.active_prowlarr_config = active_ids
+            self.private_prowlarr_indexers = _private_prowlarr_ids(indexers, active_ids)
 
         finally:
             self.prowlarr_initialized.set()
@@ -325,3 +357,14 @@ def active_jackett_indexers() -> list[str]:
 
 def active_prowlarr_indexers() -> list[str]:
     return indexer_manager.active_prowlarr_config
+
+
+def is_private_prowlarr_indexer(indexer_id: object) -> bool:
+    return str(indexer_id) in indexer_manager.private_prowlarr_indexers
+
+
+def is_private_jackett_indexer(indexer_id: object) -> bool:
+    return (
+        isinstance(indexer_id, str)
+        and indexer_id.casefold() in indexer_manager.private_jackett_indexers
+    )

@@ -15,6 +15,7 @@ from comet.services.indexer_manager import (
     active_prowlarr_indexers,
     decode_indexer_json,
     indexer_manager,
+    is_private_prowlarr_indexer,
 )
 from comet.services.torrent_manager import (
     add_torrent_queue,
@@ -36,6 +37,7 @@ class ProwlarrScraper(TorrentDiscoveryAdapter):
         super().__init__(manager, session, url)
 
     async def process_torrent(self, result: dict, media_id: str, season: int):
+        is_private = is_private_prowlarr_indexer(result.get("indexerId"))
         base_torrent = {
             "title": result["title"],
             "infoHash": None,
@@ -46,6 +48,7 @@ class ProwlarrScraper(TorrentDiscoveryAdapter):
             "size": result["size"],
             "tracker": result["indexer"],
             "sources": [],
+            "isPrivate": is_private,
         }
 
         torrents = []
@@ -60,6 +63,7 @@ class ProwlarrScraper(TorrentDiscoveryAdapter):
             if content:
                 metadata = await asyncio.to_thread(extract_torrent_metadata, content)
                 if metadata:
+                    base_torrent["isPrivate"] |= metadata["is_private"]
                     for file in metadata["files"]:
                         torrent = base_torrent.copy()
                         torrent["title"] = file["title"]
@@ -81,6 +85,7 @@ class ProwlarrScraper(TorrentDiscoveryAdapter):
                     media_id,
                     season,
                     base_torrent["infoHash"],
+                    is_private=base_torrent["isPrivate"],
                 )
 
                 torrents.append(base_torrent)
@@ -99,6 +104,7 @@ class ProwlarrScraper(TorrentDiscoveryAdapter):
                     media_id,
                     season,
                     base_torrent["infoHash"],
+                    is_private=base_torrent["isPrivate"],
                 )
 
             torrents.append(base_torrent)

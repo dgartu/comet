@@ -122,6 +122,7 @@ The standalone service exposes:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COMETNET_ENABLED` | `False` | Enable Integrated Mode. Set to `True` for single-instance deployments. |
+| `COMETNET_PRIVATE_TORRENTS_ENABLED` | `False` | Publish torrents marked private to CometNet. Keep disabled unless the tracker explicitly permits redistribution. |
 | `COMETNET_LISTEN_PORT` | `8765` | WebSocket port for incoming P2P connections. |
 | `COMETNET_HTTP_PORT` | `8766` | HTTP API port (standalone service only). |
 | `COMETNET_RELAY_URL` | *(empty)* | URL of standalone CometNet service. When set, Integrated Mode is disabled. |

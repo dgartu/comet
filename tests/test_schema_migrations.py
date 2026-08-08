@@ -16,6 +16,7 @@ from comet.core.schema_migrations import (
     _migration_debrid_account_cleanup_index,
     _migration_media_demand_scrape_coverage,
     _migration_original_indexer_titles,
+    _migration_private_torrent_flag,
     _migration_tmdb_title_aliases,
     _rename_column_if_missing,
     _upgrade_download_link_cache,
@@ -24,6 +25,26 @@ from comet.core.schema_specs import ManagedTableSpec
 
 
 class SchemaMigrationMetadataCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_torrent_flag_is_added_to_existing_candidates(self):
+        with TemporaryDirectory() as temp_dir:
+            database = ReplicaAwareDatabase(
+                Database(f"sqlite+aiosqlite:///{temp_dir}/migration.db")
+            )
+            await database.connect()
+            try:
+                await database.execute(
+                    "CREATE TABLE release_candidates (candidate_id TEXT PRIMARY KEY)"
+                )
+                context = MigrationContext(database, is_sqlite=True, is_postgres=False)
+                await _migration_private_torrent_flag(context)
+                columns = await database.fetch_all(
+                    "PRAGMA table_info(release_candidates)"
+                )
+            finally:
+                await database.disconnect()
+
+        self.assertIn("is_private", {column["name"] for column in columns})
+
     async def test_postgres_active_connection_timestamp_types_are_repaired(self):
         database = AsyncMock()
 

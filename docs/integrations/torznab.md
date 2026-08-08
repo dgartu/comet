@@ -74,6 +74,14 @@ queries while preserving Comet's magnets, hashes, sizes, dates, and seeders.
 Use a direct Torznab connection or Prowlarr when possible; Jackett adds an
 extra XML parsing and serialization layer.
 
+## Private trackers
+
+Comet detects private torrents from Jackett's tracker type, Prowlarr's indexer
+privacy metadata, and the BitTorrent `info.private=1` flag. They are excluded
+from CometNet by default, but remain visible in Stremio and Torznab. Set
+`INDEXER_PRIVATE_TORRENTS_ENABLED=False` to hide them from those results as
+well.
+
 ## Troubleshooting
 
 - A connection failure usually means the client container cannot resolve or

@@ -135,6 +135,7 @@ class ReleaseCandidate:
     parsed: object | None = None
     transport_stats: dict[str, object] = field(default_factory=dict)
     identities: tuple[str, ...] = ()
+    is_private: bool = False
 
     def __post_init__(self):
         if self.transport is TransportKind.BITTORRENT:

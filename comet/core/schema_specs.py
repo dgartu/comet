@@ -862,6 +862,7 @@ RELEASE_CANDIDATES_TABLE_SPEC = ManagedTableSpec(
             attributes_json TEXT NOT NULL CHECK (
                 transport = 'bittorrent' OR length(attributes_json) <= 65536
             ),
+            is_private BOOLEAN NOT NULL DEFAULT FALSE,
             created_at_ms BIGINT NOT NULL CHECK (created_at_ms >= 0),
             updated_at_ms BIGINT NOT NULL CHECK (updated_at_ms >= 0),
             last_seen_at_ms BIGINT NOT NULL CHECK (last_seen_at_ms >= 0),

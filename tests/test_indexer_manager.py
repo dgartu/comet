@@ -9,6 +9,8 @@ from comet.services.indexer_manager import (
     InvalidIndexerResponse,
     _active_jackett_ids,
     _active_prowlarr_ids,
+    _private_jackett_ids,
+    _private_prowlarr_ids,
     read_indexer_json,
     read_indexer_xml,
 )
@@ -60,6 +62,39 @@ class _Session:
 
 
 class IndexerManagerTests(unittest.IsolatedAsyncioTestCase):
+    def test_prowlarr_waits_for_privacy_metadata_before_becoming_active(self):
+        with patch("comet.services.indexer_manager.settings.PROWLARR_INDEXERS", ["7"]):
+            manager = IndexerManager()
+
+        self.assertEqual(manager.original_prowlarr_config, ["7"])
+        self.assertEqual(manager.active_prowlarr_config, [])
+
+    def test_private_indexer_metadata_is_kept_only_for_active_indexers(self):
+        root = ET.fromstring(
+            """
+            <indexers>
+                <indexer id="private"><type>private</type></indexer>
+                <indexer id="public"><type>public</type></indexer>
+                <indexer id="inactive"><type>private</type></indexer>
+            </indexers>
+            """
+        )
+        self.assertEqual(
+            _private_jackett_ids(root, ["private", "public"]),
+            frozenset({"private"}),
+        )
+        self.assertEqual(
+            _private_prowlarr_ids(
+                [
+                    {"id": 1, "privacy": "private"},
+                    {"id": 2, "privacy": "public"},
+                    {"id": 3, "privacy": "private"},
+                ],
+                ["1", "2"],
+            ),
+            frozenset({"1"}),
+        )
+
     async def test_jackett_internal_failure_is_not_swallowed(self):
         manager = IndexerManager()
         manager.get_session = AsyncMock(side_effect=AssertionError("implementation"))

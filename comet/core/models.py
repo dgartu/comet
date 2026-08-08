@@ -249,6 +249,7 @@ class AppSettings(ServerSettings):
     PROWLARR_URL: str | None = "http://127.0.0.1:9696"
     PROWLARR_API_KEY: str | None = None
     PROWLARR_INDEXERS: list[str] = Field(default_factory=list)
+    INDEXER_PRIVATE_TORRENTS_ENABLED: bool = True
     GET_TORRENT_TIMEOUT: int = 5
     MAGNET_RESOLVE_TIMEOUT: int = 60
     CATALOG_TIMEOUT: int = 30
@@ -425,6 +426,7 @@ class AppSettings(ServerSettings):
 
     # CometNet P2P Network Configuration
     COMETNET_ENABLED: bool = False
+    COMETNET_PRIVATE_TORRENTS_ENABLED: bool = False
     COMETNET_LISTEN_PORT: int = 8765
     COMETNET_HTTP_PORT: int = 8766
     COMETNET_BOOTSTRAP_NODES: list[str] = Field(default_factory=list)

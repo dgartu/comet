@@ -155,6 +155,7 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                     "tracker": "TorBox",
                     "sources": [],
                     "parsed": None,
+                    "isPrivate": False,
                 }
             ],
         )
@@ -267,6 +268,39 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runtime.size, MAX_SIGNED_BIGINT + 1)
         self.assertEqual(discovery.size, MAX_SIGNED_BIGINT + 1)
+
+    def test_private_torrents_are_hidden_unless_results_are_enabled(self):
+        manager = TorrentResultAccumulator(
+            media_type="movie",
+            media_full_id="tt123",
+            media_only_id="tt123",
+            title="Movie",
+            year=2026,
+            year_end=None,
+            season=None,
+            episode=None,
+            aliases={},
+            remove_adult_content=False,
+        )
+        torrent = {
+            "title": "Movie.2026.mkv",
+            "infoHash": "a" * 40,
+            "fileIndex": 0,
+            "seeders": 1,
+            "size": 100,
+            "tracker": "Private",
+            "sources": [],
+            "parsed": ParsedData(raw_title="Movie.2026.mkv"),
+            "isPrivate": True,
+        }
+
+        with patch.object(settings, "INDEXER_PRIVATE_TORRENTS_ENABLED", False):
+            manager._publish_ready_torrents([torrent])
+        self.assertEqual(manager.torrents, {})
+
+        with patch.object(settings, "INDEXER_PRIVATE_TORRENTS_ENABLED", True):
+            manager._publish_ready_torrents([torrent])
+        self.assertTrue(manager.torrents["a" * 40]["isPrivate"])
 
     async def test_scrape_waits_until_cache_updates_are_enqueued(self):
         manager = TorrentResultAccumulator(

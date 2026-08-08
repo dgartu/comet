@@ -34,7 +34,10 @@ from comet.discovery.capabilities import (
 )
 from comet.discovery.manager import DiscoveryResult
 from comet.discovery.models import MediaQuery
-from comet.discovery.torrent_repository import torrent_candidate_from_runtime
+from comet.discovery.torrent_repository import (
+    TorrentReleaseRepository,
+    torrent_candidate_from_runtime,
+)
 from comet.metadata.episode_index import EpisodeIndexService
 from comet.metadata.filter import release_filter
 from comet.metadata.manager import (
@@ -421,6 +424,13 @@ async def _filter_and_rank_discovery_candidates(
     """Apply request policy and ranking to normalized discovery candidates."""
     if not candidates:
         return ()
+    candidates = _coalesce_private_torrent_candidates(candidates)
+    if not settings.INDEXER_PRIVATE_TORRENTS_ENABLED:
+        candidates = tuple(
+            candidate for candidate in candidates if not candidate.is_private
+        )
+        if not candidates:
+            return ()
     legacy_candidates = tuple(
         candidate for candidate in candidates if candidate.parsed is None
     )
@@ -454,6 +464,37 @@ async def _filter_and_rank_discovery_candidates(
         config["removeTrash"],
     )
     return ranked
+
+
+def _coalesce_private_torrent_candidates(candidates: tuple) -> tuple:
+    private_ids = {
+        candidate.candidate_id
+        for candidate in candidates
+        if getattr(candidate, "is_private", False)
+    }
+    if not private_ids:
+        return candidates
+    return tuple(
+        replace(candidate, is_private=True)
+        if candidate.candidate_id in private_ids and not candidate.is_private
+        else candidate
+        for candidate in candidates
+    )
+
+
+async def _apply_private_torrent_result_policy(torrents: dict) -> None:
+    if not torrents:
+        return
+    private_hashes = await TorrentReleaseRepository(database).private_hashes(
+        tuple(torrents)
+    )
+    for info_hash in private_hashes:
+        torrent = torrents.get(info_hash)
+        if torrent is not None:
+            torrent["isPrivate"] = True
+    if not settings.INDEXER_PRIVATE_TORRENTS_ENABLED:
+        for info_hash in private_hashes:
+            torrents.pop(info_hash, None)
 
 
 async def _persist_rendered_candidates(
@@ -1308,8 +1349,11 @@ async def _search_media(
 
     if discovery_result is None:
         discovery_result = await discovery_task
+    discovery_candidates = _coalesce_private_torrent_candidates(
+        discovery_result.candidates
+    )
     candidates = await _filter_and_rank_discovery_candidates(
-        discovery_result.candidates,
+        discovery_candidates,
         title=title,
         year=year,
         year_end=year_end,
@@ -1320,7 +1364,7 @@ async def _search_media(
         config=config,
     )
     await torrent_manager.ingest_release_candidates(
-        "configured-discovery", discovery_result.candidates
+        "configured-discovery", discovery_candidates
     )
 
     service_cache_status = defaultdict(dict)
@@ -1372,6 +1416,8 @@ async def _search_media(
             existing_parsed = existing_torrent.get("parsed")
             if existing_parsed is None or str(existing_parsed.resolution) == "unknown":
                 existing_torrent["parsed"] = account_torrent["parsed"]
+
+    await _apply_private_torrent_result_policy(torrent_manager.torrents)
 
     if debrid_entries:
         existing_service_cache_status = await check_multi_service_availability(

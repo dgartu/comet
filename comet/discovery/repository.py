@@ -1012,7 +1012,7 @@ class ReleaseDiscoveryRepository:
                 f" :daily_date, :title_{index},"
                 f" :byte_size_{index}, :published_at_ms_{index},"
                 f" :parsed_json_{index}, :attributes_json_{index},"
-                f" :now_ms, :now_ms, :now_ms)"
+                f" :is_private_{index}, :now_ms, :now_ms, :now_ms)"
                 for index in range(len(chunk))
             ]
             returned = await self._database.fetch_all(
@@ -1022,7 +1022,7 @@ class ReleaseDiscoveryRepository:
                     transport, release_key, scope, season_norm,
                     episode_norm, daily_date, title, byte_size,
                     published_at_ms, parsed_json, attributes_json,
-                    created_at_ms, updated_at_ms, last_seen_at_ms
+                    is_private, created_at_ms, updated_at_ms, last_seen_at_ms
                 ) VALUES {", ".join(tuples)}
                 ON CONFLICT (
                     visibility_partition, media_id, transport,
@@ -1034,6 +1034,7 @@ class ReleaseDiscoveryRepository:
                     published_at_ms = excluded.published_at_ms,
                     parsed_json = excluded.parsed_json,
                     attributes_json = excluded.attributes_json,
+                    is_private = release_candidates.is_private OR excluded.is_private,
                     updated_at_ms = excluded.updated_at_ms,
                     last_seen_at_ms = excluded.last_seen_at_ms
                 RETURNING candidate_id, transport, release_key
@@ -1178,6 +1179,7 @@ class ReleaseDiscoveryRepository:
                 candidate.byte_size,
                 candidate.published_at_ms, candidate.parsed_json,
                 candidate.attributes_json,
+                candidate.is_private,
                 locator.locator_id, locator.locator_kind,
                 locator.locator_json, locator.policy_json
             FROM release_locator_coverage coverage
@@ -1271,6 +1273,7 @@ class ReleaseDiscoveryRepository:
                 source=attributes["source"],
                 parsed=load_cached_parsed(row["parsed_json"]),
                 transport_stats=attributes["transport_stats"],
+                is_private=bool(row["is_private"]),
             )
             result.append(candidate)
         return tuple(result)
@@ -1314,6 +1317,7 @@ def _candidate_values(
             trusted=candidate.transport is TransportKind.BITTORRENT,
         ),
         "attributes_json": _attributes_json(candidate),
+        "is_private": candidate.is_private,
         "now_ms": observed_at_ms,
     }
 

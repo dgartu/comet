@@ -169,6 +169,20 @@ class TorrentMetadataTests(unittest.TestCase):
         self.assertEqual(
             actual["files"], [{"index": 0, "title": "Movie.MKV", "size": 1234}]
         )
+        self.assertFalse(actual["is_private"])
+
+    def test_extracts_private_metainfo_flag(self):
+        content = bencodepy.encode(
+            {
+                b"info": {
+                    b"name": b"Movie.mkv",
+                    b"length": 1234,
+                    b"private": 1,
+                }
+            }
+        )
+
+        self.assertTrue(extract_torrent_metadata(content)["is_private"])
 
     def test_video_title_containing_sample_is_not_pre_filtered(self):
         info = {b"name": b"The.Sample.2026.mkv", b"length": 1234}
@@ -526,6 +540,38 @@ class TorrentPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([metadata.title for metadata in metadata_batch], ["valid.mkv"])
         self.assertEqual(metadata_batch[0].size, 1)
         self.assertEqual(metadata_batch[0].tracker, "DebridAccount|torbox")
+
+    async def test_private_torrent_broadcast_requires_explicit_opt_in(self):
+        backend = Mock(spec=CometNetService)
+        backend.broadcast_torrents = AsyncMock()
+        private = self._make_update("private.mkv", 1)
+        private.is_private = True
+
+        disabled = torrent_manager.TorrentUpdateQueue()
+        with (
+            patch.object(torrent_manager, "get_active_backend", return_value=backend),
+            patch.object(
+                torrent_manager.settings,
+                "COMETNET_PRIVATE_TORRENTS_ENABLED",
+                False,
+            ),
+        ):
+            await disabled._enqueue_broadcast_items([private], updated_at=123.0)
+        backend.broadcast_torrents.assert_not_awaited()
+
+        enabled = torrent_manager.TorrentUpdateQueue()
+        with (
+            patch.object(torrent_manager, "get_active_backend", return_value=backend),
+            patch.object(
+                torrent_manager.settings,
+                "COMETNET_PRIVATE_TORRENTS_ENABLED",
+                True,
+            ),
+        ):
+            await enabled._enqueue_broadcast_items([private], updated_at=123.0)
+            await enabled._broadcast_queue.join()
+            await enabled.stop()
+        backend.broadcast_torrents.assert_awaited_once()
 
     def test_retryable_database_errors_use_structured_codes(self):
         locked = sqlite3.OperationalError("opaque")

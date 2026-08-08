@@ -230,6 +230,11 @@ class TorrentResultAccumulator:
     def _publish_ready_torrents(self, torrents: list[dict]) -> None:
         """Expose already-filtered releases through the legacy torrent view."""
         for torrent in torrents:
+            if (
+                torrent.get("isPrivate")
+                and not settings.INDEXER_PRIVATE_TORRENTS_ENABLED
+            ):
+                continue
             if not self._matches_requested_scope(torrent["parsed"]):
                 continue
 
@@ -243,6 +248,7 @@ class TorrentResultAccumulator:
                 "sources": torrent["sources"],
                 "parsed": torrent["parsed"],
                 "updatedAt": self.live_result_timestamp,
+                "isPrivate": bool(torrent.get("isPrivate")),
             }
 
     async def ingest_release_candidates(
@@ -283,6 +289,7 @@ class TorrentResultAccumulator:
             "tracker": candidate.source or source_id,
             "sources": list(tracker_sources),
             "parsed": candidate.parsed,
+            "isPrivate": candidate.is_private,
         }
 
     async def _fetch_cached_rows(self, media_id: str):
@@ -342,6 +349,9 @@ class TorrentResultAccumulator:
             rows = list(best_rows.values())
 
         for row, parsed_data in rows:
+            is_private = bool(row.get("is_private"))
+            if is_private and not settings.INDEXER_PRIVATE_TORRENTS_ENABLED:
+                continue
             ensure_multi_language(parsed_data)
 
             target_season = self.search_season
@@ -374,6 +384,7 @@ class TorrentResultAccumulator:
                 "sources": orjson.loads(row["sources_json"]),
                 "parsed": parsed_data,
                 "updatedAt": row["updated_at"],
+                "isPrivate": is_private,
             }
 
     def _append_cache_file_infos(self, file_infos: list[dict], torrent: dict):
@@ -398,6 +409,7 @@ class TorrentResultAccumulator:
         seeders = torrent["seeders"]
         tracker = torrent["tracker"]
         sources = torrent["sources"]
+        is_private = bool(torrent.get("isPrivate"))
 
         for season in cache_seasons:
             file_infos.append(
@@ -412,6 +424,7 @@ class TorrentResultAccumulator:
                     "seeders": seeders,
                     "tracker": tracker,
                     "sources": sources,
+                    "is_private": is_private,
                 }
             )
 

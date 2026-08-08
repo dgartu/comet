@@ -815,3 +815,26 @@ class CachedSearchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             public_partition,
         )
         self.assertIsNone(row["account_partition"])
+
+    async def test_private_torrent_flag_is_monotone_across_refreshes(self):
+        private = replace(_torrent_candidate(), is_private=True)
+        adapter = FakeAdapter(
+            DiscoveryBatch(
+                candidates=(private,),
+                coverage=frozenset({"bittorrent"}),
+            )
+        )
+
+        first = await self.search(self.coordinator(adapter))
+        self.assertTrue(first.candidates[0].is_private)
+
+        await self.database.execute("UPDATE search_coverage SET next_refresh_at = 0")
+        adapter.batch = DiscoveryBatch(
+            candidates=(_torrent_candidate(),),
+            coverage=frozenset({"bittorrent"}),
+        )
+        refreshed = await self.search(self.coordinator(adapter))
+
+        self.assertTrue(refreshed.candidates[0].is_private)
+        row = await self.database.fetch_one("SELECT is_private FROM release_candidates")
+        self.assertTrue(row["is_private"])

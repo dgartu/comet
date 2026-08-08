@@ -85,6 +85,41 @@ class _IndexerSession:
 
 
 class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_indexer_privacy_metadata_reaches_scrape_results(self):
+        jackett = JackettScraper(None, None, "https://jackett.test")
+        jackett_torrents = await jackett.process_torrent(
+            {
+                "Title": "Private Jackett",
+                "Seeders": 1,
+                "Size": 100,
+                "Tracker": "Private",
+                "TrackerType": "private",
+                "Link": None,
+                "InfoHash": "a" * 40,
+                "MagnetUri": None,
+            },
+            "tt123",
+            None,
+        )
+        self.assertTrue(jackett_torrents[0]["isPrivate"])
+
+        prowlarr = ProwlarrScraper(None, None, "https://prowlarr.test")
+        with patch.object(indexer_manager, "private_prowlarr_indexers", {"7"}):
+            prowlarr_torrents = await prowlarr.process_torrent(
+                {
+                    "title": "Private Prowlarr",
+                    "seeders": 1,
+                    "size": 100,
+                    "indexer": "Private",
+                    "indexerId": 7,
+                    "infoHash": "b" * 40,
+                    "guid": None,
+                },
+                "tt123",
+                None,
+            )
+        self.assertTrue(prowlarr_torrents[0]["isPrivate"])
+
     async def test_indexer_scrapers_use_the_bounded_response_contract(self):
         jackett_session = _IndexerSession(b'{"Results":[]}')
         prowlarr_session = _IndexerSession(b"[]")

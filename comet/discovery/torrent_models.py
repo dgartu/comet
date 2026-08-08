@@ -53,3 +53,4 @@ class ScrapeResult(TypedDict):
     size: int | None
     tracker: str
     sources: list[str]
+    isPrivate: bool

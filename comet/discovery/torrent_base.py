@@ -20,15 +20,19 @@ def deduplicate_torrents(torrents: list[dict]) -> list[dict]:
     """Keep the first occurrence of each torrent file across title queries."""
 
     unique = []
-    seen = set()
+    seen = {}
     for torrent in torrents:
         identity = (
             torrent["infoHash"].lower(),
             torrent.get("fileIndex"),
         )
-        if identity in seen:
+        existing = seen.get(identity)
+        if existing is not None:
+            existing["isPrivate"] = bool(
+                existing.get("isPrivate") or torrent.get("isPrivate")
+            )
             continue
-        seen.add(identity)
+        seen[identity] = torrent
         unique.append(torrent)
     return unique
 

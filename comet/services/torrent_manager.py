@@ -214,11 +214,14 @@ def _iter_bencoded_file_specs(info: dict) -> Iterator[tuple[int, str, int]]:
         yield index, title, size
 
 
-def _build_torrent_metadata_payload(info_hash: str, sources, file_specs) -> dict:
+def _build_torrent_metadata_payload(
+    info_hash: str, sources, file_specs, *, is_private: bool = False
+) -> dict:
     return {
         "info_hash": info_hash,
         "sources": _normalize_sources(sources),
         "files": _extract_relevant_file_entries(file_specs),
+        "is_private": is_private,
     }
 
 
@@ -352,6 +355,7 @@ def _resolve_torrent_metadata(torrent) -> dict:
             (index, Path(torrent_file).name, torrent_file.size)
             for index, torrent_file in enumerate(torrent.files)
         ),
+        is_private=bool(getattr(torrent, "private", False)),
     )
 
 
@@ -390,6 +394,7 @@ def extract_torrent_metadata(content: bytes):
         info_hash,
         announce_list,
         _iter_bencoded_file_specs(info),
+        is_private=info.get(b"private") == 1,
     )
 
 
@@ -441,6 +446,7 @@ def _merge_torrent_updates(
         existing.sources = _dedupe_strings([*existing.sources, *incoming.sources])
     existing.parsed = _merge_parsed_payloads(existing.parsed, incoming.parsed)
     existing.from_cometnet = existing.from_cometnet and incoming.from_cometnet
+    existing.is_private = existing.is_private or incoming.is_private
     existing.attempts = max(existing.attempts, incoming.attempts)
     return existing
 
@@ -459,6 +465,7 @@ def _construct_torrent_update(
     sources: list[str],
     parsed: dict,
     from_cometnet: bool,
+    is_private: bool = False,
     attempts: int = 0,
 ) -> "_TorrentUpdate":
     season_norm = normalize_scope_value(season)
@@ -476,6 +483,7 @@ def _construct_torrent_update(
     item.sources = sources
     item.parsed = parsed
     item.from_cometnet = from_cometnet
+    item.is_private = is_private
     item.attempts = attempts
     item.season_norm = season_norm
     item.episode_norm = episode_norm
@@ -514,6 +522,7 @@ def _build_torrent_update_from_source(
             parsed_cache,
         ),
         from_cometnet=from_cometnet,
+        is_private=bool(source.get("is_private")),
     )
 
 
@@ -567,6 +576,7 @@ class _TorrentUpdate:
     sources: list[str]
     parsed: dict
     from_cometnet: bool
+    is_private: bool = False
     attempts: int = 0
     season_norm: int = field(init=False)
     episode_norm: int = field(init=False)
@@ -599,6 +609,7 @@ def _iter_resolved_torrent_updates(
     seeders: int,
     tracker: str,
     search_season: int | None,
+    is_private: bool,
 ) -> Iterator[_TorrentUpdate]:
     info_hash = resolved_torrent["info_hash"]
     sources = resolved_torrent["sources"]
@@ -626,6 +637,7 @@ def _iter_resolved_torrent_updates(
                 sources=sources,
                 parsed=parsed_payload,
                 from_cometnet=False,
+                is_private=is_private or resolved_torrent["is_private"],
             )
 
 
@@ -757,18 +769,22 @@ class AddTorrentQueue:
         )
 
     @staticmethod
-    def _build_pending_metadata(seeders: int, tracker: str) -> dict[str, int | str]:
+    def _build_pending_metadata(
+        seeders: int, tracker: str, is_private: bool
+    ) -> dict[str, object]:
         return {
             "seeders": seeders,
             "tracker": tracker,
+            "is_private": is_private,
         }
 
     @staticmethod
     def _merge_pending_metadata(
-        current: dict[str, int | str],
+        current: dict[str, object],
         *,
         seeders: int,
         tracker: str,
+        is_private: bool,
     ) -> None:
         current_seeders = current["seeders"]
         if seeders is not None and (
@@ -778,6 +794,7 @@ class AddTorrentQueue:
 
         if tracker:
             current["tracker"] = tracker
+        current["is_private"] = current["is_private"] or is_private
 
     async def add_torrent(
         self,
@@ -787,6 +804,8 @@ class AddTorrentQueue:
         media_id: str,
         search_season: int | None,
         magnet_key: str | None = None,
+        *,
+        is_private: bool = False,
     ):
         if not settings.DOWNLOAD_TORRENT_FILES or self._stopping:
             return
@@ -804,10 +823,11 @@ class AddTorrentQueue:
                     pending_metadata,
                     seeders=seeders,
                     tracker=tracker,
+                    is_private=is_private,
                 )
                 return
             self._pending_torrents[queue_key] = self._build_pending_metadata(
-                seeders, tracker
+                seeders, tracker, is_private
             )
 
         await self._ensure_workers()
@@ -879,6 +899,7 @@ class AddTorrentQueue:
                         seeders=pending_metadata["seeders"],
                         tracker=pending_metadata["tracker"],
                         search_season=search_season,
+                        is_private=pending_metadata["is_private"],
                     )
             finally:
                 async with self._lock:
@@ -1043,6 +1064,7 @@ class TorrentUpdateQueue:
         seeders: int,
         tracker: str,
         search_season: int | None,
+        is_private: bool = False,
     ):
         if self._stopping:
             return
@@ -1054,6 +1076,7 @@ class TorrentUpdateQueue:
                 seeders=seeders,
                 tracker=tracker,
                 search_season=search_season,
+                is_private=is_private,
             )
         )
 
@@ -1170,6 +1193,7 @@ class TorrentUpdateQueue:
             metadata
             for item in batch_items
             if not item.from_cometnet
+            and (not item.is_private or settings.COMETNET_PRIVATE_TORRENTS_ENABLED)
             and (metadata := item.to_broadcast_metadata(updated_at)) is not None
         ]
         if not metadata_batch:
@@ -1413,16 +1437,23 @@ def _release_torrent_row(item: _TorrentUpdate, updated_at: float) -> dict:
         "sources_json": encode_json_param(item.sources),
         "parsed_json": encode_json_param(item.parsed),
         "updated_at": updated_at,
+        "is_private": item.is_private,
     }
 
 
 async def _execute_batched_upsert(rows: list[_TorrentUpdate], *, updated_at: float):
+    repository = TorrentReleaseRepository(database)
     async with database.transaction():
-        persisted = await TorrentReleaseRepository(database).persist_rows(
+        persisted = await repository.persist_rows(
             [_release_torrent_row(item, updated_at) for item in rows]
         )
         if persisted != len(rows):
             raise RuntimeError("torrent release persistence lost an update")
+    private_hashes = await repository.private_hashes(
+        tuple(dict.fromkeys(item.info_hash for item in rows))
+    )
+    for item in rows:
+        item.is_private = item.info_hash in private_hashes
     return rows
 
 

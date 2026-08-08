@@ -15,6 +15,8 @@ from comet.services.indexer_manager import (
     active_jackett_indexers,
     decode_indexer_json,
     indexer_manager,
+    is_private_indexer_type,
+    is_private_jackett_indexer,
 )
 from comet.services.torrent_manager import (
     add_torrent_queue,
@@ -36,6 +38,9 @@ class JackettScraper(TorrentDiscoveryAdapter):
         super().__init__(manager, session, url)
 
     async def process_torrent(self, result: dict, media_id: str, season: int):
+        is_private = is_private_indexer_type(
+            result.get("TrackerType")
+        ) or is_private_jackett_indexer(result.get("TrackerId"))
         base_torrent = {
             "title": result["Title"],
             "infoHash": None,
@@ -46,6 +51,7 @@ class JackettScraper(TorrentDiscoveryAdapter):
             "size": result["Size"],
             "tracker": result["Tracker"],
             "sources": [],
+            "isPrivate": is_private,
         }
 
         torrents = []
@@ -60,6 +66,7 @@ class JackettScraper(TorrentDiscoveryAdapter):
             if content:
                 metadata = await asyncio.to_thread(extract_torrent_metadata, content)
                 if metadata:
+                    base_torrent["isPrivate"] |= metadata["is_private"]
                     for file in metadata["files"]:
                         torrent = base_torrent.copy()
                         torrent["title"] = file["title"]
@@ -81,6 +88,7 @@ class JackettScraper(TorrentDiscoveryAdapter):
                     media_id,
                     season,
                     base_torrent["infoHash"],
+                    is_private=base_torrent["isPrivate"],
                 )
 
                 torrents.append(base_torrent)
@@ -100,6 +108,7 @@ class JackettScraper(TorrentDiscoveryAdapter):
                     media_id,
                     season,
                     base_torrent["infoHash"],
+                    is_private=base_torrent["isPrivate"],
                 )
 
             torrents.append(base_torrent)

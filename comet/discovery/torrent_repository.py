@@ -80,6 +80,7 @@ def _torrent_row(row: Any) -> dict[str, object]:
         "source": row["tracker"] or "Torrent cache",
         "tracker_sources": orjson.loads(row["sources_json"]),
         "updated_at": row["updated_at"],
+        "is_private": bool(row["is_private"]) if "is_private" in row else False,
     }
 
 
@@ -128,6 +129,7 @@ def _candidate_from_rows(
     )
     if tracker_sources:
         stats["tracker_sources"] = tracker_sources
+    is_private = any(row["is_private"] for row in rows)
     return (
         query,
         ReleaseCandidate(
@@ -142,6 +144,7 @@ def _candidate_from_rows(
             parsed=representative["parsed"],
             transport_stats=stats,
             identities=(f"btih:{info_hash}",),
+            is_private=is_private,
         ),
     )
 
@@ -203,6 +206,7 @@ def torrent_candidate_from_runtime(
         parsed=parsed,
         transport_stats=transport_stats,
         identities=(f"btih:{info_hash}",),
+        is_private=bool(torrent.get("isPrivate")),
     )
 
 
@@ -258,6 +262,7 @@ def torrent_candidate_from_scrape_result(
         parsed=parsed,
         transport_stats=stats,
         identities=(f"btih:{info_hash}",),
+        is_private=bool(torrent.get("isPrivate")),
     )
 
 
@@ -330,6 +335,7 @@ class TorrentReleaseRepository:
             SELECT candidate.title, candidate.byte_size,
                    candidate.season_norm, candidate.episode_norm,
                    candidate.parsed_json, candidate.attributes_json,
+                   candidate.is_private,
                    candidate.updated_at_ms, identity.identity_value,
                    locator.locator_id, locator.locator_json,
                    locator.policy_json
@@ -403,9 +409,31 @@ class TorrentReleaseRepository:
                     "season": locator_season,
                     "episode": locator_episode,
                     "updated_at": row["updated_at_ms"] / 1_000,
+                    "is_private": bool(row["is_private"]),
                 }
             )
         return result
+
+    async def private_hashes(self, info_hashes: tuple[str, ...]) -> set[str]:
+        private = set()
+        for start in range(0, len(info_hashes), _EXISTENCE_CHUNK):
+            chunk = info_hashes[start : start + _EXISTENCE_CHUNK]
+            rows = await self._database.fetch_all(
+                f"""
+                SELECT DISTINCT identity.identity_value
+                FROM candidate_identities AS identity
+                JOIN release_candidates AS candidate
+                  ON candidate.candidate_id = identity.candidate_id
+                WHERE candidate.transport = 'bittorrent'
+                  AND candidate.is_private
+                  AND identity.identity_scheme = 'btih'
+                  AND {_IDENTITY_MEMBERSHIP_SQL}
+                """,
+                {"info_hashes": encode_json_param(chunk)},
+                force_primary=True,
+            )
+            private.update(row["identity_value"] for row in rows)
+        return private
 
     async def existing_hashes(self, info_hashes: tuple[str, ...]) -> set[str]:
         existing = set()
