@@ -83,7 +83,7 @@ class DebridService:
             "season": season,
             "episode": episode,
             "parsed": load_cached_parsed(row["parsed"]),
-            "media_info": media_info_from_json(row.get("media_info", None)),
+            "media_info": media_info_from_json(row["media_info"]),
         }
 
     async def get_and_cache_availability(

@@ -165,6 +165,7 @@ class DebridServiceCacheTests(unittest.IsolatedAsyncioTestCase):
                 "title": "Sample.mkv",
                 "size": 300,
                 "parsed": parse("Sample.mkv").model_dump_json(),
+                "media_info": None,
             }
         ]
 
@@ -373,6 +374,7 @@ class DebridServiceCacheTests(unittest.IsolatedAsyncioTestCase):
                 "title": "Corrupt.mkv",
                 "size": 100,
                 "parsed": "not-json",
+                "media_info": None,
             },
             {
                 "info_hash": "b" * 40,
@@ -380,6 +382,7 @@ class DebridServiceCacheTests(unittest.IsolatedAsyncioTestCase):
                 "title": "Valid.mkv",
                 "size": 200,
                 "parsed": '{"raw_title":"Valid.mkv"}',
+                "media_info": None,
             },
         ]
 
