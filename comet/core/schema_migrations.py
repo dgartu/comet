@@ -1293,6 +1293,15 @@ async def _migration_debrid_media_info(ctx: MigrationContext):
     )
 
 
+async def _migration_remove_asset_preparation_idle_expiry(ctx: MigrationContext):
+    await _drop_index_if_exists(ctx, "idx_asset_preparations_expiry_v1")
+    await _drop_column_if_exists(ctx, "asset_preparations", "idle_expires_at")
+    await _ensure_index(
+        ctx,
+        _render_index_sql(ASSET_PREPARATIONS_TABLE_SPEC)[0],
+    )
+
+
 async def _migration_remove_manual_nzb_imports(ctx: MigrationContext):
     await ctx.database.execute(
         """
@@ -1352,4 +1361,8 @@ MIGRATIONS = [
     ("2026080801_private_torrent_flag", _migration_private_torrent_flag),
     ("2026080802_remove_manual_nzb_imports", _migration_remove_manual_nzb_imports),
     ("2026080901_debrid_media_info", _migration_debrid_media_info),
+    (
+        "2026080902_remove_asset_preparation_idle_expiry",
+        _migration_remove_asset_preparation_idle_expiry,
+    ),
 ]

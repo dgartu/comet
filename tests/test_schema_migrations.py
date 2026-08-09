@@ -18,6 +18,7 @@ from comet.core.schema_migrations import (
     _migration_media_demand_scrape_coverage,
     _migration_original_indexer_titles,
     _migration_private_torrent_flag,
+    _migration_remove_asset_preparation_idle_expiry,
     _migration_tmdb_title_aliases,
     _rename_column_if_missing,
     _upgrade_download_link_cache,
@@ -26,6 +27,52 @@ from comet.core.schema_specs import ManagedTableSpec
 
 
 class SchemaMigrationMetadataCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_asset_preparation_idle_expiry_is_removed_with_its_stale_index(
+        self,
+    ):
+        with TemporaryDirectory() as temp_dir:
+            database = ReplicaAwareDatabase(
+                Database(f"sqlite+aiosqlite:///{temp_dir}/migration.db")
+            )
+            await database.connect()
+            try:
+                await database.execute(
+                    """
+                    CREATE TABLE asset_preparations (
+                        preparation_id TEXT PRIMARY KEY,
+                        idle_expires_at DOUBLE PRECISION NOT NULL,
+                        absolute_expires_at DOUBLE PRECISION NOT NULL
+                    )
+                    """
+                )
+                await database.execute(
+                    """
+                    CREATE INDEX idx_asset_preparations_expiry_v1
+                    ON asset_preparations (
+                        absolute_expires_at, idle_expires_at
+                    )
+                    """
+                )
+                context = MigrationContext(database, is_sqlite=True, is_postgres=False)
+
+                await _migration_remove_asset_preparation_idle_expiry(context)
+                await _migration_remove_asset_preparation_idle_expiry(context)
+
+                columns = await database.fetch_all(
+                    "PRAGMA table_info(asset_preparations)"
+                )
+                index_columns = await database.fetch_all(
+                    "PRAGMA index_info(idx_asset_preparations_expiry_v1)"
+                )
+            finally:
+                await database.disconnect()
+
+        self.assertNotIn("idle_expires_at", {column["name"] for column in columns})
+        self.assertEqual(
+            [column["name"] for column in index_columns],
+            ["absolute_expires_at", "preparation_id"],
+        )
+
     async def test_debrid_media_info_is_added_to_an_existing_cache(self):
         with TemporaryDirectory() as temp_dir:
             database = ReplicaAwareDatabase(
