@@ -204,7 +204,7 @@ fn cache_keys(count: usize) -> Vec<SegmentCacheKey> {
 fn quality_benchmark_cache_hit_and_miss() {
     let keys = cache_keys(256);
     let missing = cache_keys(512).into_iter().skip(256).collect::<Vec<_>>();
-    let mut cache = VerifiedSegmentCache::new(8 * 1024 * 1024).unwrap();
+    let mut cache = VerifiedSegmentCache::new(8 * 1024 * 1024);
     for (index, key) in keys.iter().copied().enumerate() {
         assert_eq!(
             cache.insert(key, segment(1, 4096, 4096, index as u8)),

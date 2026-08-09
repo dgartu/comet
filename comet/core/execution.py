@@ -91,18 +91,6 @@ def _create_executor(
     )
 
 
-def replace_executor(
-    max_workers: int,
-    log_profile: str,
-    log_format: str,
-    no_color: bool,
-) -> None:
-    prepared = prepare_executor(max_workers, log_profile, log_format, no_color)
-    if prepared is None:
-        return
-    install_executor(prepared)
-
-
 def prepare_executor(
     max_workers: int,
     log_profile: str,
@@ -156,7 +144,6 @@ __all__ = (
     "get_executor",
     "install_executor",
     "prepare_executor",
-    "replace_executor",
     "setup_executor",
     "shutdown_executor",
     "worker_initializer",

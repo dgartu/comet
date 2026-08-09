@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 import xml.etree.ElementTree as ET
@@ -43,8 +44,10 @@ class _ResponseContext:
     async def __aexit__(self, exc_type, exc, traceback):
         self.exited = True
 
-    async def read(self, size):
+    async def read(self, size=-1):
         self.body_read = True
+        if size < 0:
+            size = len(self._body) - self._offset
         chunk = self._body[self._offset : self._offset + size]
         self._offset += len(chunk)
         return chunk
@@ -129,6 +132,37 @@ class IndexerManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(manager.prowlarr_initialized.is_set())
 
+    async def test_prowlarr_failure_cancels_and_joins_the_sibling_request(self):
+        sibling_started = asyncio.Event()
+        sibling_cancelled = asyncio.Event()
+        manager = IndexerManager()
+        manager.get_session = AsyncMock(return_value=object())
+
+        async def fetch(_session, path, _headers):
+            if path == "/api/v1/indexer":
+                await sibling_started.wait()
+                raise InvalidIndexerResponse("invalid indexer JSON")
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                sibling_cancelled.set()
+
+        manager._fetch_prowlarr_json = fetch
+        with (
+            patch.multiple(
+                "comet.services.indexer_manager.settings",
+                SCRAPE_PROWLARR=True,
+                PROWLARR_URL="http://prowlarr",
+                PROWLARR_API_KEY="secret",
+            ),
+            self.assertRaises(InvalidIndexerResponse),
+        ):
+            await manager.update_prowlarr()
+
+        self.assertTrue(sibling_cancelled.is_set())
+        self.assertTrue(manager.prowlarr_initialized.is_set())
+
     def test_jackett_active_ids_match_configured_names_after_normalization(self):
         root = ET.fromstring(
             """
@@ -142,7 +176,7 @@ class IndexerManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(_active_jackett_ids(root, ["wantedname"]), ["wanted"])
 
-    def test_jackett_active_ids_are_unique_and_fanout_bounded(self):
+    def test_jackett_active_ids_are_unique_without_silent_truncation(self):
         root = ET.fromstring(
             "<indexers>"
             '<indexer id="duplicate" />'
@@ -155,7 +189,7 @@ class IndexerManagerTests(unittest.IsolatedAsyncioTestCase):
         active = _active_jackett_ids(root, [])
 
         self.assertEqual(active[0], "duplicate")
-        self.assertEqual(len(active), 64)
+        self.assertEqual(len(active), 71)
         self.assertEqual(len(active), len(set(active)))
 
     def test_prowlarr_active_ids_ignore_unusable_optional_health(self):
@@ -206,7 +240,7 @@ class IndexerManagerTests(unittest.IsolatedAsyncioTestCase):
         ):
             _active_prowlarr_ids({}, [], [], datetime.now(UTC))
 
-    def test_prowlarr_active_ids_use_latest_status_and_bound_fanout(self):
+    def test_prowlarr_active_ids_use_latest_status_without_silent_truncation(self):
         now = datetime(2026, 7, 22, tzinfo=UTC)
         indexers = [
             {
@@ -224,7 +258,7 @@ class IndexerManagerTests(unittest.IsolatedAsyncioTestCase):
         active = _active_prowlarr_ids(indexers, statuses, [], now)
 
         self.assertIn("1", active)
-        self.assertEqual(len(active), 64)
+        self.assertEqual(len(active), 69)
         self.assertEqual(len(active), len(set(active)))
 
     async def test_prowlarr_response_closes_without_reading_error_body(self):
@@ -272,7 +306,9 @@ class IndexerManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.kwargs["headers"]["Accept-Encoding"], "identity")
         self.assertEqual(session.kwargs["headers"]["X-Api-Key"], "secret")
 
-    async def test_indexer_decoders_bound_observed_bytes_and_reject_active_xml(self):
+    async def test_indexer_decoders_read_operator_responses_and_reject_active_xml(
+        self,
+    ):
         encoded = _ResponseContext(
             200,
             payload={},

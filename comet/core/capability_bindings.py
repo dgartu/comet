@@ -74,8 +74,11 @@ def build_playback_capability_bindings(
         return ()
     versions = instance_capability_versions or {}
     instance_credentials = instance_credential_material or {}
-    raw_accounts = config.get("accounts")
-    accounts = {} if raw_accounts is None else dict(raw_accounts.items())
+    accounts = config.get("accounts") or {}
+    debrid_entries = {
+        (item["configurationId"], item["service"]): item
+        for item in config.get("_debridEntries") or ()
+    }
     configured_transports = config.get("enabledTransports")
     enabled_transports = (
         set(configured_transports) if configured_transports is not None else None
@@ -105,17 +108,7 @@ def build_playback_capability_bindings(
             continue
         options = resolve_capability_options(entry, accounts)
         if kind in TORRENT_PROVIDER_KINDS:
-            debrid_binding = next(
-                (
-                    item
-                    for item in config.get("_debridEntries") or ()
-                    if item.get("configurationId") == configuration_id
-                    and item.get("service") == kind
-                ),
-                None,
-            )
-            if debrid_binding is None:
-                raise ValueError("debrid capability binding is unavailable")
+            debrid_binding = debrid_entries[(configuration_id, kind)]
             options = {
                 "service": kind,
                 "apiKey": debrid_binding.get("apiKey"),
@@ -262,8 +255,6 @@ async def record_playback_capability_failure(
         instance_credential_material=instance_credential_material,
         provider_configuration_ids=frozenset({provider_configuration_id}),
     )
-    if len(bindings) != 1:
-        raise ValueError("playback capability binding is unavailable")
     binding = bindings[0]
     await CapabilityStateRepository(database).record_failure(
         binding.binding,
@@ -320,7 +311,7 @@ def build_playback_capability_validator(
                 "plan_incompatible",
                 "provider_configuration_invalid",
             )
-        status = await provider.validate_config(dict(item.validation_options))
+        status = await provider.validate_config(item.validation_options)
         return provider_validation_outcome(status)
 
     return validate

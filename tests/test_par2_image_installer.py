@@ -1,6 +1,8 @@
 import io
 import stat
+import tarfile
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +26,18 @@ def _release_archive(
     return payload.getvalue()
 
 
+def _source_archive() -> bytes:
+    payload = io.BytesIO()
+    root = f"par2cmdline-turbo-{install_par2.COMMIT}"
+    with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+        for name in ("COPYING", "AUTHORS"):
+            content = name.encode()
+            member = tarfile.TarInfo(f"{root}/{name}")
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+    return payload.getvalue()
+
+
 def test_release_archive_accepts_only_the_expected_executable():
     assert install_par2.extract_release(_release_archive()) == b"calculator"
 
@@ -35,3 +49,27 @@ def test_release_archive_accepts_only_the_expected_executable():
     ):
         with pytest.raises(RuntimeError):
             install_par2.extract_release(archive)
+
+
+def test_failed_version_check_removes_partial_install(tmp_path, monkeypatch):
+    payloads = iter((_release_archive(), _source_archive()))
+    monkeypatch.setattr(
+        install_par2,
+        "download_https",
+        lambda *_args: next(payloads),
+    )
+    monkeypatch.setattr(
+        install_par2.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="failed",
+        ),
+    )
+    output = tmp_path / "par2"
+
+    with pytest.raises(RuntimeError, match="version check"):
+        install_par2.install("amd64", output)
+
+    assert not output.exists()

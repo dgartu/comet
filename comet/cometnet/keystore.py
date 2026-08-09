@@ -18,7 +18,6 @@ from comet.cometnet.crypto import NodeIdentity
 class PeerKey:
     """Stores a peer's public key and related metadata."""
 
-    node_id: str
     public_key_hex: str
     first_seen: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
@@ -55,7 +54,7 @@ class PublicKeyStore:
         if type(public_key_hex) is not str or not public_key_hex:
             raise ValueError("public_key_hex must be a non-empty string")
         key = NodeIdentity.load_public_key(public_key_hex)
-        if not isinstance(key, EllipticCurvePublicKey):
+        if key is None:
             raise ValueError("public_key_hex must contain a DER elliptic-curve key")
         if NodeIdentity.node_id_from_public_key(public_key_hex) != node_id:
             raise ValueError("node_id must derive from public_key_hex")
@@ -92,7 +91,6 @@ class PublicKeyStore:
             raise ValueError("persisted peer verified must be a boolean")
 
         return node_id, PeerKey(
-            node_id=node_id,
             public_key_hex=public_key_hex,
             first_seen=first_seen,
             last_seen=last_seen,
@@ -121,26 +119,13 @@ class PublicKeyStore:
         else:
             # Add new entry
             self._keys[node_id] = PeerKey(
-                node_id=node_id,
                 public_key_hex=public_key_hex,
                 verified=verified,
             )
 
             # Enforce max size
             if len(self._keys) > self.max_keys:
-                self._evict_oldest()
-
-    def get_key(self, node_id: str) -> str | None:
-        """
-        Get a peer's public key if we have it.
-
-        Returns the public key hex string, or None if not found.
-        """
-        if node_id in self._keys:
-            self._keys[node_id].update_seen()
-            self._keys.move_to_end(node_id)
-            return self._keys[node_id].public_key_hex
-        return None
+                self._keys.popitem(last=False)
 
     def get_key_obj(self, node_id: str) -> EllipticCurvePublicKey | None:
         """
@@ -155,25 +140,6 @@ class PublicKeyStore:
     def is_verified(self, node_id: str) -> bool:
         """Check if we have a verified key for this peer."""
         return node_id in self._keys and self._keys[node_id].verified
-
-    def has_key(self, node_id: str) -> bool:
-        """Check if we have any key for this peer."""
-        return node_id in self._keys
-
-    def remove_key(self, node_id: str) -> None:
-        """Remove a peer's key."""
-        self._keys.pop(node_id, None)
-
-    def _evict_oldest(self) -> None:
-        """Remove the oldest (least recently seen) keys."""
-        if not self._keys:
-            return
-
-        # Remove oldest 10% (LRU)
-        to_remove = max(1, len(self._keys) // 10)
-
-        for _ in range(to_remove):
-            self._keys.popitem(last=False)
 
     def cleanup_old_keys(self, max_age_days: float = 30.0) -> int:
         """Remove keys that haven't been seen in a while."""
@@ -209,25 +175,28 @@ class PublicKeyStore:
         }
 
     @classmethod
-    def validate_persisted(cls, data: object, *, max_keys: int = 10000) -> None:
-        """Validate a complete persisted candidate without publishing it."""
+    def _validated_items(
+        cls, data: object, *, max_keys: int
+    ) -> list[tuple[str, PeerKey]]:
         if type(data) is not dict or "keys" not in data:
             raise ValueError("keystore does not match the current schema")
         if type(data["keys"]) is not dict:
             raise ValueError("keystore keys must be an object")
         if len(data["keys"]) > max_keys:
             raise ValueError("persisted keystore exceeds max_keys")
-        for node_id, value in data["keys"].items():
+        return [
             cls._peer_from_persisted(node_id, value)
+            for node_id, value in data["keys"].items()
+        ]
+
+    @classmethod
+    def validate_persisted(cls, data: object, *, max_keys: int = 10000) -> None:
+        """Validate a complete persisted candidate without publishing it."""
+        cls._validated_items(data, max_keys=max_keys)
 
     def from_dict(self, data: dict) -> None:
         """Load from persisted data."""
-        self.validate_persisted(data, max_keys=self.max_keys)
-
-        validated = [
-            self._peer_from_persisted(node_id, value)
-            for node_id, value in data["keys"].items()
-        ]
+        validated = self._validated_items(data, max_keys=self.max_keys)
         # Sort by last_seen to preserve LRU order when reloading
         sorted_items = sorted(
             validated,

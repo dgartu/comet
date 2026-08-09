@@ -1,13 +1,12 @@
 """Configured Stremio-addon ingestion for standard real ``nzbUrl`` streams."""
 
-import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit
-from uuid import UUID
 
 from comet.core.models import settings
+from comet.core.provider_json import MAX_PROVIDER_JSON_BYTES
 from comet.core.sources import (
     REAL_NZB_PROVIDER_KINDS,
     LocatorKind,
@@ -17,11 +16,12 @@ from comet.core.sources import (
     TransportKind,
 )
 from comet.discovery.models import DiscoveryBatch, DiscoveryContext, MediaQuery
+from comet.metadata.validation import metadata_text
 from comet.playback.base import Actionability, ProviderStatus, Readiness
+from comet.usenet.limits import MAX_NZB_DOCUMENT_BYTES
 from comet.usenet.outbound import OutboundUrlError, fetch_http_bytes
+from comet.utils.text import has_ascii_control
 
-_MAX_JSON_BYTES = 2 * 1024 * 1024
-_MAX_NZB_BYTES = 150 * 1024 * 1024
 _MAX_NZB_ATTEMPTS = 20
 
 
@@ -37,10 +37,8 @@ class StremioAddonConfiguration:
 
 def stremio_addon_configuration(
     configuration_id: str,
-    options: object,
+    options: dict,
 ) -> StremioAddonConfiguration:
-    if not isinstance(options, dict):
-        raise ValueError("Stremio addon options must be an object")
     raw_manifest = options.get("manifestUrl")
     raw_base = options.get("baseUrl")
     if raw_manifest is not None:
@@ -55,24 +53,10 @@ def stremio_addon_configuration(
         raise ValueError("Stremio addon URL is required")
     authorization = options.get("authorization")
     if authorization is not None and (
-        not isinstance(authorization, str)
-        or not 1 <= len(authorization) <= 2_048
-        or authorization != authorization.strip()
-        or not _is_utf8(authorization)
-        or any(
-            ord(character) < 32 or ord(character) == 127 for character in authorization
-        )
+        not _is_utf8(authorization) or has_ascii_control(authorization)
     ):
         raise ValueError("Stremio addon authorization is invalid")
     maximum = options.get("maxResults", 3)
-    if (
-        isinstance(maximum, bool)
-        or not isinstance(maximum, int)
-        or not 1 <= maximum <= 10
-    ):
-        raise ValueError("Stremio addon result limit is invalid")
-    if not isinstance(configuration_id, str) or not _canonical_uuid(configuration_id):
-        raise ValueError("Stremio addon configuration ID is invalid")
     return StremioAddonConfiguration(
         configuration_id,
         base_url,
@@ -134,22 +118,9 @@ class StremioAddonAdapter:
     ) -> DiscoveryBatch:
         if "usenet" not in context.branches:
             return DiscoveryBatch()
-        if (
-            self._broker is None
-            or not isinstance(context.account_partition, bytes)
-            or len(context.account_partition) != 32
-        ):
+        if self._broker is None:
             return DiscoveryBatch(
                 diagnostics=("Stremio addon NZB brokerage is unavailable",)
-            )
-        if context.cancelled():
-            return DiscoveryBatch(diagnostics=("Stremio addon search was cancelled",))
-        if (
-            context.hard_deadline is not None
-            and asyncio.get_running_loop().time() >= context.hard_deadline
-        ):
-            return DiscoveryBatch(
-                diagnostics=("Stremio addon search deadline expired",)
             )
         return await self._search(query, context)
 
@@ -161,7 +132,7 @@ class StremioAddonAdapter:
         payload = _json_object(
             await self._fetch(
                 self._stream_url(query),
-                maximum=_MAX_JSON_BYTES,
+                maximum=MAX_PROVIDER_JSON_BYTES,
                 accept="application/json",
             )
         )
@@ -176,17 +147,10 @@ class StremioAddonAdapter:
         for stream in streams:
             if len(candidates) >= self._configuration.max_results:
                 break
-            if context.cancelled():
-                incomplete = True
-                break
             if not isinstance(stream, dict):
                 continue
             nzb_url = stream.get("nzbUrl")
-            if (
-                not isinstance(nzb_url, str)
-                or not 1 <= len(nzb_url) <= 4_096
-                or not _is_utf8(nzb_url)
-            ):
+            if not isinstance(nzb_url, str) or not nzb_url:
                 continue
             if nzb_url in seen_nzb_urls:
                 continue
@@ -197,7 +161,7 @@ class StremioAddonAdapter:
             attempts += 1
             document = await self._fetch(
                 nzb_url,
-                maximum=_MAX_NZB_BYTES,
+                maximum=MAX_NZB_DOCUMENT_BYTES,
                 accept=(
                     "application/x-nzb, application/xml, text/xml, "
                     "application/gzip, */*"
@@ -298,6 +262,7 @@ class StremioAddonAdapter:
                     in settings.USENET_PRIVATE_UPSTREAM_ORIGINS
                     else frozenset()
                 ),
+                timeout=None,
             )
         finally:
             if lease is not None:
@@ -305,16 +270,9 @@ class StremioAddonAdapter:
 
 
 def _configured_url(value: object) -> tuple[str, str]:
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= 4_096
-        or not _is_utf8(value)
-    ):
+    if not isinstance(value, str) or not value or not _is_utf8(value):
         raise ValueError("Stremio addon URL is invalid")
-    if any(
-        character.isspace() or ord(character) < 32 or ord(character) == 127
-        for character in value
-    ):
+    if has_ascii_control(value) or any(character.isspace() for character in value):
         raise ValueError("Stremio addon URL is invalid")
     try:
         parsed = urlsplit(value)
@@ -347,13 +305,6 @@ def _configured_url(value: object) -> tuple[str, str]:
     return base, origin
 
 
-def _canonical_uuid(value: str) -> bool:
-    try:
-        return str(UUID(value)) == value
-    except ValueError:
-        return False
-
-
 def _is_utf8(value: str) -> bool:
     try:
         value.encode("utf-8")
@@ -381,12 +332,8 @@ def _json_object(document: bytes) -> dict:
 
 
 def _stream_title(stream: dict, query: MediaQuery) -> str:
-    for value in (stream.get("title"), stream.get("name")):
-        if (
-            isinstance(value, str)
-            and 1 <= len(value) <= 1_024
-            and _is_utf8(value)
-            and not any(ord(character) < 32 for character in value)
-        ):
+    for raw_value in (stream.get("title"), stream.get("name")):
+        value = metadata_text(raw_value)
+        if value is not None and len(value) <= 1_024:
             return value
     return query.title_aliases[0] if query.title_aliases else "Upstream NZB"

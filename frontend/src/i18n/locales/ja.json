@@ -143,6 +143,7 @@
     "preview": {
       "audio": "DDP 5.1 · アトモス",
       "languages": "🇬🇧 / 🇫🇷",
+      "subtitles": "💬 🇬🇧 / 🇫🇷",
       "quality": "ブルーレイ",
       "releaseGroup": "YTS",
       "seeders": "シーダー1,234",
@@ -846,7 +847,6 @@
     },
     "detail": {
       "timestamp": "タイムスタンプ",
-      "context": "コンテキスト",
       "process": "プロセス",
       "errorCode": "エラーコード",
       "safeDetails": "安全な構造化詳細",

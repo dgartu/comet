@@ -12,9 +12,11 @@ from comet.debrid.exceptions import DebridAuthError, DebridLinkGenerationError
 from comet.debrid.file_selection import (
     is_auxiliary_video,
     select_best_availability_files,
+    select_playback_file,
 )
 from comet.debrid.link_cache import valid_download_url
 from comet.metadata.episode_index import EpisodeIndexService
+from comet.metadata.media_info import media_info_from_stremthru
 from comet.services.debrid_cache import schedule_cache_availability
 from comet.services.filtering import exact_alias_match
 from comet.services.torrent_manager import torrent_update_queue
@@ -81,19 +83,14 @@ class StremThru:
         token: str,
         ip: str,
     ):
-        store, token = self.parse_store_creds(token)
+        store, separator, credential = token.partition(":")
         self.session = session
         self.base_url = f"{settings.STREMTHRU_URL.rstrip('/')}/v0/store"
         self.store_name = store
-        self.store_token = token
+        self.store_token = credential if separator else ""
         self.client_ip = ip
         self.sid = video_id
         self.media_only_id = media_only_id
-
-    @staticmethod
-    def parse_store_creds(token: str) -> tuple[str, str]:
-        store, separator, credential = token.partition(":")
-        return (store, credential) if separator else (store, "")
 
     def _headers(self):
         return {
@@ -181,7 +178,6 @@ class StremThru:
             orjson.JSONDecodeError,
         ):
             raise DebridLinkGenerationError(
-                self.store_name,
                 f"{self.store_name}: Failed to {action}.",
             ) from None
         return status, data
@@ -205,14 +201,12 @@ class StremThru:
         if error:
             upstream = error.get("__upstream_cause__")
             raise DebridLinkGenerationError(
-                self.store_name,
                 f"{self.store_name}: Failed to {action}.",
                 error_code=error.get("code"),
                 upstream_error_code=self._extract_upstream_error_code(upstream),
             )
         if not 200 <= status < 300:
             raise DebridLinkGenerationError(
-                self.store_name,
                 f"{self.store_name}: Failed to {action}.",
             )
         return data
@@ -249,7 +243,6 @@ class StremThru:
         )
         if not is_success_status(status) or payload.get("error"):
             raise DebridLinkGenerationError(
-                self.store_name,
                 f"{self.store_name}: Failed to check instant availability.",
             )
         return payload
@@ -267,7 +260,6 @@ class StremThru:
         )
         if not is_success_status(status) or payload.get("error"):
             raise DebridLinkGenerationError(
-                self.store_name,
                 f"{self.store_name}: Failed to list account magnets.",
             )
         data = payload["data"]
@@ -287,16 +279,17 @@ class StremThru:
         await self.check_premium()
 
         chunk_size = 500
-        chunks = [
-            torrent_hashes[i : i + chunk_size]
+        requests = [
+            asyncio.create_task(self.get_instant(torrent_hashes[i : i + chunk_size]))
             for i in range(0, len(torrent_hashes), chunk_size)
         ]
-
-        tasks = []
-        for chunk in chunks:
-            tasks.append(self.get_instant(chunk))
-
-        responses = await asyncio.gather(*tasks)
+        try:
+            responses = await asyncio.gather(*requests)
+        except BaseException:
+            for request in requests:
+                request.cancel()
+            await asyncio.gather(*requests, return_exceptions=True)
+            raise
 
         is_offcloud = self.store_name == "offcloud"
         try:
@@ -306,7 +299,6 @@ class StremThru:
             )
         except (AttributeError, KeyError, TypeError, ValueError):
             raise DebridLinkGenerationError(
-                self.store_name,
                 f"{self.store_name}: Invalid instant availability response.",
             ) from None
         requested_series_id, requested_season, requested_episode = (
@@ -391,6 +383,7 @@ class StremThru:
                     "season": season,
                     "episode": episode,
                     "parsed": filename_parsed,
+                    "media_info": file.get("media_info"),
                     "seeders": seeders,
                     "tracker": tracker,
                     "sources": sources,
@@ -400,6 +393,7 @@ class StremThru:
 
         files = select_best_availability_files(files)
         for file_info in files:
+            file_info["media_info"] = media_info_from_stremthru(file_info["media_info"])
             if is_auxiliary_video(file_info["parsed"]):
                 continue
             await torrent_update_queue.add_torrent_info(file_info, self.media_only_id)
@@ -416,18 +410,6 @@ class StremThru:
         sources: list | None = None,
         aliases: dict | None = None,
     ):
-        """
-        Smart file selection algorithm with scoring system.
-
-        Priority order (highest to lowest):
-        1. Exact season + episode match with single episode file (+1000)
-        2. Exact season + episode match with multi-episode file (+500)
-        3. Episode match without season info (+200)
-        4. Exact filename match with requested torrent_name (+100)
-        5. Title alias match (+50)
-        6. Index match from original selection (+25)
-        7. Fallback: largest video file (+file_size as tiebreaker)
-        """
         try:
             magnet_uri = f"magnet:?xt=urn:btih:{hash}&dn={quote(torrent_name)}"
 
@@ -445,7 +427,6 @@ class StremThru:
             debrid_files = magnet["data"]["files"]
             if not debrid_files:
                 raise DebridLinkGenerationError(
-                    self.store_name,
                     f"{self.store_name}: Media is not cached yet.",
                     upstream_error_code="MEDIA_NOT_CACHED_YET",
                 )
@@ -453,16 +434,16 @@ class StremThru:
             name = unquote(name)
             torrent_name = unquote(torrent_name)
             aliases = aliases or {}
-            ez_aliases_normalized = frozenset(
+            normalized_aliases = frozenset(
                 normalized
-                for alias in aliases.get("ez", [])
+                for alias in aliases.get("ez", ())
                 if (normalized := normalize_title(alias))
             )
 
             video_files = []
             filenames_to_parse = []
             for file in debrid_files:
-                filename = file["name"]
+                filename = file["name"].rsplit("/", 1)[-1]
                 if not is_video(filename):
                     continue
 
@@ -478,7 +459,7 @@ class StremThru:
             )
             release_parsed = parsed_results.pop()
 
-            scored_files = []
+            candidates = []
             (
                 is_episode_request,
                 season,
@@ -517,123 +498,86 @@ class StremThru:
                     file_season = season
                     file_episode = episode
 
-                # Calculate score
-                score = 0
-                match_reason = []
+                candidates.append(
+                    {
+                        "info_hash": hash,
+                        "index": file_index,
+                        "title": filename,
+                        "size": file_size if file_size > 0 else None,
+                        "season": file_season,
+                        "episode": file_episode,
+                        "link": file_link,
+                        "parsed": parsed,
+                        "media_info": file.get("media_info"),
+                        "title_match": bool(
+                            parsed.parsed_title
+                            and (
+                                exact_alias_match(
+                                    normalize_title(parsed.parsed_title),
+                                    normalized_aliases,
+                                )
+                                or title_match(
+                                    name,
+                                    parsed.parsed_title,
+                                    aliases=aliases,
+                                )
+                            )
+                        ),
+                    }
+                )
 
-                # Season + Episode matching (highest priority)
-                if season is not None and episode is not None:
-                    season_matches = (not parsed.seasons) or (season in parsed.seasons)
-                    episode_matches = parsed.episodes and episode in parsed.episodes
-
-                    if season_matches and episode_matches:
-                        if len(parsed.episodes) == 1:
-                            score += 1000  # Perfect single episode match
-                            match_reason.append("exact_episode")
-                        else:
-                            score += 500  # Multi-episode file containing our episode
-                            match_reason.append("multi_episode")
-                    elif episode_matches:
-                        score += 200  # Episode matches but season doesn't
-                        match_reason.append("episode_only")
-
-                # Exact filename match
-                if filename == torrent_name:
-                    score += 100
-                    match_reason.append("exact_name")
-
-                # Title/alias matching
-                if parsed.parsed_title:
-                    # Exact alias match first
-                    if exact_alias_match(
-                        normalize_title(parsed.parsed_title), ez_aliases_normalized
-                    ):
-                        score += 50
-                        match_reason.append("alias")
-                    elif title_match(name, parsed.parsed_title, aliases=aliases):
-                        score += 50
-                        match_reason.append("title")
-
-                # Index match from original selection
-                if file_index is not None and str(file_index) == str(index):
-                    score += 25
-                    match_reason.append("index")
-
-                # Use file size as tiebreaker (larger files preferred)
-                # Normalize to 0-10 range to not overwhelm other scores
-                size_score = min(
-                    file_size / (10 * 1024 * 1024 * 1024), 10
-                )  # Cap at 10GB
-                score += size_score
-
-                enriched_file = {
-                    "index": file_index,
-                    "title": filename,
-                    "size": file_size if file_size > 0 else None,
-                    "season": file_season,
-                    "episode": file_episode,
-                    "link": file_link,
-                    "parsed": parsed,
-                    "score": score,
-                    "match_reason": match_reason,
-                }
-
-                scored_files.append(enriched_file)
-
-            if not scored_files:
+            if not candidates:
                 if is_episode_request:
                     raise DebridLinkGenerationError(
-                        self.store_name,
                         f"{self.store_name}: No file matched requested episode.",
                         upstream_error_code="EPISODE_MATCH_NOT_FOUND",
                     )
                 raise DebridLinkGenerationError(
-                    self.store_name,
                     f"{self.store_name}: Media is not cached yet.",
                     upstream_error_code="MEDIA_NOT_CACHED_YET",
                 )
 
-            # Sort by score descending
-            scored_files.sort(key=lambda x: x["score"], reverse=True)
-
-            # Select best file
-            target_file = scored_files[0]
-
-            all_files_for_cache = []
-
-            for f in scored_files:
-                if f["season"] is not None or f["episode"] is not None:
-                    all_files_for_cache.append(
-                        {
-                            "info_hash": hash,
-                            "index": f["index"],
-                            "title": f["title"],
-                            "size": f["size"],
-                            "season": f["season"]
-                            if f["season"] is not None
-                            else season,
-                            "episode": f["episode"],
-                            "parsed": f["parsed"],
-                        }
+            target_file = select_playback_file(
+                candidates,
+                preferred_index=index,
+                preferred_title=torrent_name,
+            )
+            cache_files = [
+                {
+                    key: candidate[key]
+                    for key in (
+                        "info_hash",
+                        "index",
+                        "title",
+                        "size",
+                        "season",
+                        "episode",
+                        "parsed",
+                        "media_info",
                     )
-
-            # Also ensure the selected file is cached with the REQUESTED season/episode
-            # This handles cases where filename doesn't contain S/E info but user requested it
-            if season is not None or episode is not None:
-                all_files_for_cache.append(
-                    {
-                        "info_hash": hash,
-                        "index": target_file["index"],
-                        "title": target_file["title"],
-                        "size": target_file["size"],
-                        "season": season,
-                        "episode": episode,
-                        "parsed": target_file["parsed"],
-                    }
+                }
+                for candidate in candidates
+                if (candidate["season"], candidate["episode"]) != (season, episode)
+                and (
+                    candidate["season"] is not None or candidate["episode"] is not None
                 )
-
-            if all_files_for_cache:
-                schedule_cache_availability(self.store_name, all_files_for_cache)
+            ]
+            cache_files.append(
+                {
+                    "info_hash": hash,
+                    "index": target_file["index"],
+                    "title": target_file["title"],
+                    "size": target_file["size"],
+                    "season": season,
+                    "episode": episode,
+                    "parsed": target_file["parsed"],
+                    "media_info": target_file["media_info"],
+                }
+            )
+            cache_files = select_best_availability_files(cache_files)
+            for file in cache_files:
+                file["media_info"] = media_info_from_stremthru(file["media_info"])
+            schedule_cache_availability(self.store_name, cache_files)
 
             link = await self._post_store_json(
                 "/link/generate",
@@ -645,15 +589,11 @@ class StremThru:
             link_url = valid_download_url(link["data"]["link"])
             if link_url is None:
                 raise DebridLinkGenerationError(
-                    self.store_name,
                     f"{self.store_name}: Failed to generate download link.",
                 )
 
             return link_url
-        except DebridLinkGenerationError:
-            raise
         except (AttributeError, KeyError, TypeError, ValueError):
             raise DebridLinkGenerationError(
-                self.store_name,
                 f"{self.store_name}: Failed to generate download link.",
             ) from None

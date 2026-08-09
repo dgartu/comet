@@ -550,7 +550,7 @@ class StremThruNewzProviderTests(unittest.IsolatedAsyncioTestCase):
             "locked-2",
         )
 
-    async def test_link_generation_keeps_the_url_in_memory_and_enforces_origins(self):
+    async def test_link_generation_keeps_the_provider_url_in_memory(self):
         class Session:
             def post(self, *_args, **_kwargs):
                 return _JsonResponse(
@@ -570,7 +570,6 @@ class StremThruNewzProviderTests(unittest.IsolatedAsyncioTestCase):
             {
                 "baseUrl": "https://bridge.example",
                 "authToken": "user:pass",
-                "allowedMediaOrigins": ["https://cdn.example"],
             },
         )
 
@@ -607,7 +606,6 @@ class StremThruNewzProviderTests(unittest.IsolatedAsyncioTestCase):
             {
                 "baseUrl": "https://bridge.example",
                 "authToken": "user:pass",
-                "allowedMediaOrigins": ["https://cdn.example"],
             },
         )
 

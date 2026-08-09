@@ -10,14 +10,14 @@ from comet.utils.formatting import normalize_info_hash
 class StremthruScraper(TorrentDiscoveryAdapter):
     url_setting = "STREMTHRU_SCRAPE_URL"
 
-    def __init__(self, manager, session, url: str):
-        super().__init__(manager, session, url)
+    def __init__(self, session, url: str):
+        super().__init__(session, url)
 
     async def scrape(self, request: ScrapeRequest):
         torrents = []
         media_id = request.media_only_id
         if request.media_id.startswith("kitsu:"):
-            imdb_id = await anime_mapper.get_imdb_from_kitsu(int(media_id))
+            imdb_id = await anime_mapper.get_imdb_from_kitsu(media_id)
             if imdb_id:
                 media_id = imdb_id
         async with self.session.get(

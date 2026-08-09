@@ -129,9 +129,23 @@ class ProviderResolutionCacheTests(unittest.IsolatedAsyncioTestCase):
             selection_intent_json="[0]",
             client="kodi",
         )
-        loaded = await self.repository._load(loaded_scope, 20)
-        other_account = await self.repository._load(other_account_scope, 20)
-        other_client = await self.repository._load(other_client_scope, 20)
+        await self.repository.validate_ready(
+            **self.arguments(),
+            observed_at=20,
+            expires_at=100,
+        )
+        loaded = await self.database.fetch_one(
+            "SELECT * FROM provider_resolution_cache WHERE resolution_key = :key",
+            {"key": loaded_scope["resolution_key"]},
+        )
+        other_account = await self.database.fetch_one(
+            "SELECT 1 FROM provider_resolution_cache WHERE resolution_key = :key",
+            {"key": other_account_scope["resolution_key"]},
+        )
+        other_client = await self.database.fetch_one(
+            "SELECT 1 FROM provider_resolution_cache WHERE resolution_key = :key",
+            {"key": other_client_scope["resolution_key"]},
+        )
         row = await self.database.fetch_one("SELECT * FROM provider_resolution_cache")
         indexes = await self.database.fetch_all(
             "PRAGMA index_list(provider_resolution_cache)"
@@ -256,7 +270,14 @@ class ProviderResolutionCacheTests(unittest.IsolatedAsyncioTestCase):
             selection_intent_json="[0]",
             client="stremio",
         )
-        await self.repository._load(loser_scope, 30)
+        await self.database.execute(
+            """
+            UPDATE provider_resolution_cache
+            SET last_used_at_ms = 30000
+            WHERE resolution_key = :key
+            """,
+            {"key": loser_scope["resolution_key"]},
+        )
 
         await self.repository.reassign_candidate(loser, winner)
 

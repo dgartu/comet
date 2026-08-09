@@ -173,17 +173,6 @@ class CachePolicies:
         return CacheControl().public().max_age(ttl).stale_while_revalidate(swr)
 
     @staticmethod
-    def configure_page():
-        """
-        For the /configure page.
-        Long cache as the page is mostly static.
-        """
-        ttl = settings.HTTP_CACHE_CONFIGURE_TTL
-        swr = settings.HTTP_CACHE_STALE_WHILE_REVALIDATE
-
-        return CacheControl().public().max_age(ttl).stale_while_revalidate(swr)
-
-    @staticmethod
     def empty_results():
         """
         For empty/temporary responses (no torrents found, processing, errors).

@@ -3,14 +3,14 @@ interface SkeletonProps {
   lines?: number;
 }
 
-const skeletonLines = ["first", "second", "third", "fourth", "fifth"];
-
 export function Skeleton({ label, lines = 3 }: SkeletonProps) {
   return (
     <div aria-busy="true" className="skeleton" role="status">
       <span className="visually-hidden">{label}</span>
-      {skeletonLines.slice(0, lines).map((line) => (
-        <span aria-hidden="true" key={line} />
+      {Array.from({ length: lines }, (_, index) => (
+        // Static presentation-only lines have no identity beyond their position.
+        // biome-ignore lint/suspicious/noArrayIndexKey: line positions are stable
+        <span aria-hidden="true" key={index} />
       ))}
     </div>
   );

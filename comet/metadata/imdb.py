@@ -6,7 +6,7 @@ import aiohttp
 
 from comet.core.models import database, settings
 from comet.metadata.http import MetadataHttpError, get_metadata_json
-from comet.metadata.validation import metadata_text, metadata_year
+from comet.metadata.validation import metadata_text
 from comet.utils.year import parse_year, parse_year_range
 
 _IMDB_SUGGESTION_URL = "https://v3.sg.media-imdb.com/suggestion/a/{id}.json"
@@ -138,7 +138,7 @@ def _extract_title_match(
             media_type is not None and candidate_type != media_type
         ):
             continue
-        candidate_year = metadata_year(parse_year(element.get("y")))
+        candidate_year = parse_year(element.get("y"))
         match = ImdbTitleMatch(imdb_id, candidate_type, candidate_year)
         if year is None or candidate_year == year:
             return match
@@ -157,11 +157,7 @@ async def resolve_imdb_title(
     year: int | None = None,
 ) -> ImdbTitleMatch | None:
     normalized_query = metadata_text(query)
-    if (
-        normalized_query is None
-        or media_type not in (None, *_CINEMETA_MEDIA_TYPES)
-        or (year is not None and metadata_year(year) is None)
-    ):
+    if normalized_query is None or media_type not in (None, *_CINEMETA_MEDIA_TYPES):
         return None
 
     query_key = _title_lookup_key(normalized_query, media_type, year)
@@ -198,9 +194,9 @@ def _extract_imdb_metadata(
         if title is None:
             continue
 
-        year = metadata_year(parse_year(element.get("y")))
+        year = parse_year(element.get("y"))
         _, raw_year_end = parse_year_range(element.get("yr"))
-        year_end = metadata_year(raw_year_end)
+        year_end = raw_year_end
         if year is not None and year_end is not None and year_end < year:
             year_end = None
         return title, year, year_end
@@ -224,8 +220,6 @@ def _extract_cinemeta_metadata(
 
     if year is None:
         year = parse_year(meta.get("released"))
-    year = metadata_year(year)
-    year_end = metadata_year(year_end)
     if year is not None and year_end is not None and year_end < year:
         year_end = None
 

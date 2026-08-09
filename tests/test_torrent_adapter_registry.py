@@ -6,12 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from comet.core.models import AppSettings
-from comet.core.scrape import ScrapeContext
-from comet.discovery.adapters.torrent.jackett import JackettScraper
+from comet.core.scrape import ScrapeContext, scraper_timeout
 from comet.discovery.adapters.torrent.jackettio import JackettioScraper
-from comet.discovery.adapters.torrent.prowlarr import ProwlarrScraper
-from comet.discovery.adapters.torrent.torrentio import TorrentioScraper
-from comet.discovery.adapters.torrent.zilean import ZileanScraper
 from comet.discovery.models import DiscoveryContext, MediaQuery
 from comet.discovery.torrent_base import TorrentDiscoveryAdapter
 from comet.discovery.torrent_models import ScrapeRequest
@@ -81,17 +77,15 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
 
         first = {}
         repeated = {}
+        TorrentAdapterRegistry._register_adapter(first, "Example", ExampleScraper(None))
         TorrentAdapterRegistry._register_adapter(
-            first, "Example", ExampleScraper(None, None), 8
+            first, "Example #2", ExampleScraper(None)
         )
         TorrentAdapterRegistry._register_adapter(
-            first, "Example #2", ExampleScraper(None, None), 8
+            repeated, "Example", ExampleScraper(None)
         )
         TorrentAdapterRegistry._register_adapter(
-            repeated, "Example", ExampleScraper(None, None), 8
-        )
-        TorrentAdapterRegistry._register_adapter(
-            repeated, "Example #2", ExampleScraper(None, None), 8
+            repeated, "Example #2", ExampleScraper(None)
         )
 
         self.assertEqual(tuple(first), tuple(repeated))
@@ -106,7 +100,7 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
                 del request
                 return []
 
-        adapters = {"server-torrent:example": ExampleScraper(None, None)}
+        adapters = {"server-torrent:example": ExampleScraper(None)}
 
         first = TorrentAdapterRegistry.branch_fingerprints(adapters, ScrapeContext.LIVE)
         repeated = TorrentAdapterRegistry.branch_fingerprints(
@@ -138,7 +132,7 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ]
 
-        adapter = ExampleScraper(None, None)
+        adapter = ExampleScraper(None)
         result = await adapter.search(
             MediaQuery(
                 "tt123",
@@ -176,7 +170,7 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
                 return [{"title": "incomplete"}]
 
         with self.assertRaises(KeyError):
-            await MalformedScraper(None, None).search(
+            await MalformedScraper(None).search(
                 MediaQuery("tt123", "movie", title="Movie"),
                 DiscoveryContext(frozenset({"bittorrent"})),
             )
@@ -187,9 +181,8 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
                 del request
                 return []
 
-        adapter = ExampleScraper(None, None)
+        adapter = ExampleScraper(None)
         adapter.discovery_name = "Example"
-        adapter.discovery_timeout = 30
         with (
             patch(
                 "comet.discovery.torrent_base.time.perf_counter",
@@ -211,8 +204,6 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_timeout_resolution_uses_most_specific_override(self):
-        manager = TorrentAdapterRegistry.__new__(TorrentAdapterRegistry)
-
         with (
             patch.object(settings, "LIVE_SCRAPE_TIMEOUT", 10.0),
             patch.object(settings, "BACKGROUND_SCRAPE_TIMEOUT", 60.0),
@@ -226,50 +217,42 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         ):
+            self.assertEqual(scraper_timeout("ZileanScraper", ScrapeContext.LIVE), 90.0)
             self.assertEqual(
-                manager._resolve_timeout(ZileanScraper, ScrapeContext.LIVE), 90.0
-            )
-            self.assertEqual(
-                manager._resolve_timeout(ZileanScraper, ScrapeContext.BACKGROUND),
+                scraper_timeout("ZileanScraper", ScrapeContext.BACKGROUND),
                 90.0,
             )
             self.assertEqual(
-                manager._resolve_timeout(JackettScraper, ScrapeContext.LIVE), 20.0
+                scraper_timeout("JackettScraper", ScrapeContext.LIVE), 20.0
             )
             self.assertEqual(
-                manager._resolve_timeout(JackettScraper, ScrapeContext.BACKGROUND),
+                scraper_timeout("JackettScraper", ScrapeContext.BACKGROUND),
                 120.0,
             )
             self.assertEqual(
-                manager._resolve_timeout(TorrentioScraper, ScrapeContext.LIVE), 10.0
+                scraper_timeout("TorrentioScraper", ScrapeContext.LIVE), 10.0
             )
             self.assertEqual(
-                manager._resolve_timeout(TorrentioScraper, ScrapeContext.BACKGROUND),
+                scraper_timeout("TorrentioScraper", ScrapeContext.BACKGROUND),
                 60.0,
             )
 
     def test_indexer_defaults_are_the_context_budgets(self):
-        manager = TorrentAdapterRegistry.__new__(TorrentAdapterRegistry)
-
         with (
             patch.object(settings, "LIVE_SCRAPE_TIMEOUT", 10.0),
             patch.object(settings, "BACKGROUND_SCRAPE_TIMEOUT", 60.0),
             patch.object(settings, "SCRAPER_TIMEOUT_OVERRIDES", {}),
         ):
             self.assertEqual(
-                manager._resolve_timeout(JackettScraper, ScrapeContext.LIVE), 10.0
+                scraper_timeout("JackettScraper", ScrapeContext.LIVE), 10.0
             )
             self.assertEqual(
-                manager._resolve_timeout(ProwlarrScraper, ScrapeContext.BACKGROUND),
+                scraper_timeout("ProwlarrScraper", ScrapeContext.BACKGROUND),
                 60.0,
             )
-            self.assertEqual(
-                manager._resolve_timeout(ZileanScraper, ScrapeContext.LIVE), 10.0
-            )
+            self.assertEqual(scraper_timeout("ZileanScraper", ScrapeContext.LIVE), 10.0)
 
     def test_indexer_override_replaces_the_context_default(self):
-        manager = TorrentAdapterRegistry.__new__(TorrentAdapterRegistry)
-
         with (
             patch.object(settings, "LIVE_SCRAPE_TIMEOUT", 10.0),
             patch.object(
@@ -279,17 +262,20 @@ class TorrentAdapterRegistryTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             self.assertEqual(
-                manager._resolve_timeout(JackettScraper, ScrapeContext.LIVE), 15.0
+                scraper_timeout("JackettScraper", ScrapeContext.LIVE), 15.0
             )
             self.assertEqual(
-                manager._resolve_timeout(ProwlarrScraper, ScrapeContext.LIVE), 20.0
+                scraper_timeout("ProwlarrScraper", ScrapeContext.LIVE), 20.0
             )
 
-    def test_scraper_clients_use_shared_http_request_timeout(self):
+    async def test_scraper_clients_have_no_hidden_http_total_timeout(self):
         with (
             patch.object(settings, "HTTP_CLIENT_TIMEOUT_TOTAL", 47.5),
             patch.object(settings, "GLOBAL_PROXY_URL", None),
         ):
             client = AsyncClientWrapper()
-
-        self.assertEqual(client.timeout, 47.5)
+        try:
+            session = await client._get_aiohttp_session()
+            self.assertIsNone(session.timeout.total)
+        finally:
+            await client.close()

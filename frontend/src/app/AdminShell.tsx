@@ -275,7 +275,7 @@ function QuickNavigation() {
       const key = normalizeSearch(`${item.label} ${item.detail}`);
       if (!unique.has(key)) unique.set(key, item);
     }
-    return [...unique.values()].slice(0, 48);
+    return [...unique.values()];
   })();
 
   const stopPendingReveal = useCallback(() => {

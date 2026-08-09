@@ -1,7 +1,6 @@
 import asyncio
 from itertools import batched
 
-from comet.core.constants import indexer_timeout
 from comet.core.models import settings
 from comet.core.provider_json import is_success_status
 from comet.discovery.torrent_base import (
@@ -11,7 +10,6 @@ from comet.discovery.torrent_base import (
 )
 from comet.discovery.torrent_models import ScrapeRequest, ScrapeResult
 from comet.services.indexer_manager import (
-    MAX_INDEXER_RESPONSE_BYTES,
     active_jackett_indexers,
     decode_indexer_json,
     indexer_manager,
@@ -26,15 +24,14 @@ from comet.services.torrent_manager import (
 )
 from comet.usenet.outbound import configured_http_origin
 
-_MAX_AGGREGATE_RESULTS = 10_000
 _REQUEST_BATCH_SIZE = 16
 
 
 class JackettScraper(TorrentDiscoveryAdapter):
     url_setting = "JACKETT_URL"
 
-    def __init__(self, manager, session, url: str):
-        super().__init__(manager, session, url)
+    def __init__(self, session, url: str):
+        super().__init__(session, url)
 
     async def process_torrent(self, result: dict, media_id: str, season: int):
         is_private = is_private_indexer_type(
@@ -57,7 +54,6 @@ class JackettScraper(TorrentDiscoveryAdapter):
 
         if result["Link"] is not None:
             content, magnet_hash, magnet_url = await download_torrent(
-                self.session,
                 result["Link"],
                 allowed_private_origins=frozenset({configured_http_origin(self.url)}),
             )
@@ -127,8 +123,6 @@ class JackettScraper(TorrentDiscoveryAdapter):
                 "Accept-Encoding": "identity",
             },
             allow_redirects=False,
-            timeout=indexer_timeout(),
-            maximum_body_bytes=MAX_INDEXER_RESPONSE_BYTES,
         ) as response:
             if not is_success_status(response.status):
                 raise RuntimeError(f"HTTP {response.status}")
@@ -138,10 +132,7 @@ class JackettScraper(TorrentDiscoveryAdapter):
     async def scrape(self, request: ScrapeRequest):
         indexers = active_jackett_indexers()
         if not indexers:
-            await asyncio.wait_for(
-                indexer_manager.jackett_initialized.wait(),
-                timeout=settings.INDEXER_MANAGER_WAIT_TIMEOUT,
-            )
+            await indexer_manager.jackett_initialized.wait()
             indexers = active_jackett_indexers()
 
         if not indexers:
@@ -151,7 +142,6 @@ class JackettScraper(TorrentDiscoveryAdapter):
         queries = request.title_queries(include_episode_variants=True)
 
         torrent_results = []
-        inspected_results = 0
         requests = (
             self.fetch_jackett_results(indexer, query)
             for query in queries
@@ -160,13 +150,7 @@ class JackettScraper(TorrentDiscoveryAdapter):
         for request_batch in batched(requests, _REQUEST_BATCH_SIZE):
             result_sets = await gather_concurrently(request_batch)
             for result_set in result_sets:
-                remaining = _MAX_AGGREGATE_RESULTS - inspected_results
-                if remaining <= 0:
-                    break
-                inspected_results += min(len(result_set), remaining)
-                torrent_results.extend(result_set[:remaining])
-            if inspected_results >= _MAX_AGGREGATE_RESULTS:
-                break
+                torrent_results.extend(result_set)
 
         for result_batch in batched(torrent_results, _REQUEST_BATCH_SIZE):
             processed_torrents = await gather_concurrently(

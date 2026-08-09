@@ -10,10 +10,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_LINE_BYTES: usize = 4096;
-const MAX_MESSAGE_BYTES: usize = 96;
-const MAX_TEXT_BYTES: usize = 128;
-const MAX_FIELDS: usize = 12;
-const MAX_FIELDS_BYTES: usize = 1536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Profile {
@@ -86,9 +82,6 @@ impl Config {
             _ => return Err(ConfigError),
         };
         let generation = generation.parse::<u64>().map_err(|_| ConfigError)?;
-        if generation == 0 {
-            return Err(ConfigError);
-        }
         Ok(Self {
             profile,
             format,
@@ -184,7 +177,6 @@ pub fn emit(
     level: Level,
     event: &'static str,
     message: &'static str,
-    request_id: Option<&str>,
     fields: &[Field<'_>],
 ) {
     let Some(config) = CONFIG.get().copied() else {
@@ -194,12 +186,10 @@ pub fn emit(
     if !config.enabled(detail) {
         return;
     }
-    let result = validate_record(event, message, request_id, fields)
-        .and_then(|()| render(config, level, event, message, request_id, fields));
-    let payload = match result {
+    let payload = match render(config, level, event, message, fields) {
         Ok(payload) => payload,
         Err(()) => {
-            emergency("logging.record.rejected", config.format);
+            emergency("logging.renderer.failed", config.format);
             return;
         }
     };
@@ -208,65 +198,18 @@ pub fn emit(
     }
 }
 
-fn validate_record(
-    event: &str,
-    message: &str,
-    request_id: Option<&str>,
-    fields: &[Field<'_>],
-) -> Result<(), ()> {
-    if !valid_event(event)
-        || message.is_empty()
-        || message.trim() != message
-        || message.len() > MAX_MESSAGE_BYTES
-        || !valid_text(message, MAX_MESSAGE_BYTES)
-        || fields.len() > MAX_FIELDS
-        || request_id.is_some_and(|identifier| !valid_identifier(identifier))
-    {
-        return Err(());
-    }
-    let mut budget = 2usize;
-    for (index, field) in fields.iter().enumerate() {
-        if !valid_token(field.name)
-            || fields[..index]
-                .iter()
-                .any(|previous| previous.name == field.name)
-        {
-            return Err(());
-        }
-        budget += field.name.len() + 4;
-        match field.value {
-            FieldValue::Token(value) => {
-                if value.is_empty() || value.trim() != value || !valid_text(value, MAX_TEXT_BYTES) {
-                    return Err(());
-                }
-                budget += value.len() + 2;
-            }
-            FieldValue::Unsigned(value) => {
-                budget += decimal_length(value);
-            }
-        }
-    }
-    (budget <= MAX_FIELDS_BYTES).then_some(()).ok_or(())
-}
-
 fn render(
     config: Config,
     level: Level,
     event: &str,
     message: &str,
-    request_id: Option<&str>,
     fields: &[Field<'_>],
 ) -> Result<Vec<u8>, ()> {
     let timestamp = timestamp_now()?;
     let payload = match config.format {
-        Format::Json => render_json(
-            config, &timestamp, level, event, message, request_id, fields,
-        )?,
-        Format::Pretty => render_pretty(config, &timestamp, level, message, request_id, fields),
+        Format::Json => render_json(config, &timestamp, level, event, message, fields)?,
+        Format::Pretty => render_pretty(config, &timestamp, level, message, fields),
     };
-    if payload.len() > MAX_LINE_BYTES {
-        return Err(());
-    }
     Ok(payload)
 }
 
@@ -276,14 +219,13 @@ fn render_json(
     level: Level,
     event: &str,
     message: &str,
-    request_id: Option<&str>,
     fields: &[Field<'_>],
 ) -> Result<Vec<u8>, ()> {
     let mut output = Vec::with_capacity(512);
     {
         let mut serializer = serde_json::Serializer::new(&mut output);
         let mut map = serializer
-            .serialize_map(Some(7 + usize::from(request_id.is_some()) + fields.len()))
+            .serialize_map(Some(8 + fields.len()))
             .map_err(|_| ())?;
         map.serialize_entry("timestamp", timestamp)
             .map_err(|_| ())?;
@@ -298,11 +240,7 @@ fn render_json(
             .map_err(|_| ())?;
         map.serialize_entry("engine_generation", &config.generation)
             .map_err(|_| ())?;
-        if let Some(identifier) = request_id {
-            map.serialize_entry("request_id", identifier)
-                .map_err(|_| ())?;
-        }
-        for field in ordered_fields(fields) {
+        for field in fields {
             match field.value {
                 FieldValue::Token(value) => {
                     map.serialize_entry(field.name, value).map_err(|_| ())?
@@ -323,7 +261,6 @@ fn render_pretty(
     timestamp: &str,
     level: Level,
     message: &str,
-    request_id: Option<&str>,
     fields: &[Field<'_>],
 ) -> Vec<u8> {
     let mut output = String::with_capacity(512);
@@ -343,10 +280,7 @@ fn render_pretty(
         );
     }
     let _ = write!(output, " | generation={}", config.generation);
-    if let Some(identifier) = request_id {
-        let _ = write!(output, " request={}", &identifier[..8]);
-    }
-    for field in ordered_fields(fields) {
+    for field in fields {
         let label = match field.name {
             "duration_ms" => "duration",
             "error_code" => "error",
@@ -367,17 +301,6 @@ fn render_pretty(
     output.into_bytes()
 }
 
-fn ordered_fields<'a>(fields: &[Field<'a>]) -> Vec<Field<'a>> {
-    let mut ordered = fields.to_vec();
-    ordered.sort_unstable_by(|left, right| match (left.name, right.name) {
-        ("error_code", "error_code") => std::cmp::Ordering::Equal,
-        ("error_code", _) => std::cmp::Ordering::Less,
-        (_, "error_code") => std::cmp::Ordering::Greater,
-        _ => left.name.cmp(right.name),
-    });
-    ordered
-}
-
 fn timestamp_now() -> Result<String, ()> {
     let mut timespec = libc::timespec {
         tv_sec: 0,
@@ -386,13 +309,10 @@ fn timestamp_now() -> Result<String, ()> {
     if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut timespec) } != 0 {
         return Err(());
     }
-    timestamp_from_epoch(timespec.tv_sec, timespec.tv_nsec)
+    timestamp_from_epoch(timespec.tv_sec)
 }
 
-fn timestamp_from_epoch(seconds: libc::time_t, nanoseconds: libc::c_long) -> Result<String, ()> {
-    if !(0..1_000_000_000).contains(&nanoseconds) {
-        return Err(());
-    }
+fn timestamp_from_epoch(seconds: libc::time_t) -> Result<String, ()> {
     let mut broken_down = unsafe { std::mem::zeroed::<libc::tm>() };
     if unsafe { libc::gmtime_r(&seconds, &mut broken_down) }.is_null() {
         return Err(());
@@ -406,60 +326,6 @@ fn timestamp_from_epoch(seconds: libc::time_t, nanoseconds: libc::c_long) -> Res
         broken_down.tm_min,
         broken_down.tm_sec
     ))
-}
-
-fn valid_event(value: &str) -> bool {
-    value.len() <= 64 && value.is_ascii() && value.split('.').all(valid_token)
-}
-
-fn valid_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 64 && value.trim() == value && valid_text(value, 64)
-}
-
-fn valid_text(value: &str, maximum: usize) -> bool {
-    value.len() <= maximum && !value.chars().any(forbidden_character)
-}
-
-fn forbidden_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{00ad}'
-                | '\u{061c}'
-                | '\u{06dd}'
-                | '\u{070f}'
-                | '\u{180e}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{206f}'
-                | '\u{feff}'
-                | '\u{fff9}'..='\u{fffb}'
-                | '\u{110bd}'
-                | '\u{110cd}'
-                | '\u{e0001}'
-                | '\u{e0020}'..='\u{e007f}'
-        )
-}
-
-const fn decimal_length(mut value: u64) -> usize {
-    let mut length = 1;
-    while value >= 10 {
-        value /= 10;
-        length += 1;
-    }
-    length
 }
 
 const fn level_color(level: Level) -> &'static str {
@@ -490,7 +356,6 @@ pub fn emergency(event: &'static str, format: Format) {
         return;
     }
     let (level, message) = match event {
-        "logging.record.rejected" => ("ERROR", "Logging record rejected"),
         "logging.renderer.failed" => ("ERROR", "Logging renderer failed"),
         "logging.sink.failed" => ("ERROR", "Logging sink failed"),
         "runtime.panic.detected" => ("CRITICAL", "Native runtime panic detected"),
@@ -560,59 +425,18 @@ mod tests {
         }
         assert!(Config::parse("trace", "json", false, "1").is_err());
         assert!(Config::parse("normal", "text", false, "1").is_err());
-        assert!(Config::parse("normal", "json", false, "0").is_err());
+        assert!(Config::parse("normal", "json", false, "0").is_ok());
     }
 
     #[test]
-    fn renders_fixed_utc_milliseconds() {
+    fn renders_fixed_utc_seconds() {
         assert_eq!(
-            timestamp_from_epoch(0, 123_456_789).expect("render epoch"),
+            timestamp_from_epoch(0).expect("render epoch"),
             "1970-01-01 00:00:00"
         );
         assert_eq!(
-            timestamp_from_epoch(1_784_979_296, 987_000_000).expect("render timestamp"),
+            timestamp_from_epoch(1_784_979_296).expect("render timestamp"),
             "2026-07-25 11:34:56"
-        );
-    }
-
-    #[test]
-    fn validation_rejects_multiline_identity_and_duplicate_fields() {
-        assert!(!valid_event("native\n.failed"));
-        assert!(!valid_identifier("attacker\nid"));
-        assert!(valid_identifier("request-v2/opaque"));
-        assert!(
-            validate_record(
-                "native.socket.failed",
-                "Native socket failed",
-                None,
-                &[
-                    Field::token("cache_tier", "disk"),
-                    Field::token("cache_tier", "memory"),
-                ],
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn validation_accepts_bounded_provider_summaries() {
-        assert!(
-            validate_record(
-                "nntp.provider.completed",
-                "NNTP provider prefetch completed",
-                None,
-                &[
-                    Field::token("provider_name", "primary-1"),
-                    Field::token("provider_host", "news.example.test"),
-                    Field::unsigned("article_count", 42),
-                    Field::unsigned("failure_count", 1),
-                    Field::unsigned("authentication_failure_count", 1),
-                    Field::unsigned("missing_count", 0),
-                    Field::token("error_code", "disk_cache_corrupt"),
-                    Field::token("cache_tier", "disk"),
-                ],
-            )
-            .is_ok()
         );
     }
 
@@ -633,7 +457,6 @@ mod tests {
                 Level::Error,
                 "native.socket.failed",
                 "Native socket failed",
-                Some("0123456789abcdef0123456789abcdef"),
                 &fields,
             )
             .expect("render");

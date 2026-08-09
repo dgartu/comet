@@ -2,7 +2,7 @@ import unittest
 
 from comet.discovery.torrent_base import deduplicate_torrents
 from comet.discovery.torrent_models import ScrapeRequest
-from comet.utils.languages import MAX_INDEXER_TITLES, select_indexer_titles
+from comet.utils.languages import select_indexer_titles
 
 
 class IndexerTitleTests(unittest.TestCase):
@@ -104,7 +104,7 @@ class IndexerTitleTests(unittest.TestCase):
             ),
         )
 
-    def test_anime_canonical_title_is_the_bounded_fallback(self):
+    def test_anime_canonical_title_is_the_fallback(self):
         self.assertEqual(
             select_indexer_titles(
                 "Main",
@@ -166,7 +166,7 @@ class IndexerTitleTests(unittest.TestCase):
             ("The Life Ahead",),
         )
 
-    def test_indexer_titles_are_capped_in_stable_priority_order(self):
+    def test_indexer_titles_keep_stable_priority_order(self):
         languages = ("aa", "ab", "ac", "ad", "ae", "af", "ag", "ah", "ai", "aj")
         aliases = {
             "original": ["Original"],
@@ -181,42 +181,26 @@ class IndexerTitleTests(unittest.TestCase):
             (
                 "Canonical",
                 "Original",
-                "Localized 0",
-                "Localized 1",
-                "Localized 2",
-                "Localized 3",
-                "Localized 4",
-                "Localized 5",
+                *(f"Localized {index}" for index in range(len(languages))),
             ),
         )
 
-    def test_unsafe_indexer_titles_are_rejected_before_fallback(self):
-        oversized = "界" * 171
-
+    def test_indexer_titles_normalize_whitespace_before_fallback(self):
         self.assertEqual(
             select_indexer_titles(
                 "Safe fallback",
                 {
-                    "original": ["unsafe\x00title"],
-                    "lang:fr": [oversized, "unsafe\ntitle", "Titre sûr"],
+                    "original": ["  Original\ttitle  "],
+                    "lang:fr": ["Titre\nsûr"],
                 },
                 ["fr"],
                 include_canonical=False,
             ),
-            ("Titre sur",),
-        )
-        self.assertEqual(
-            select_indexer_titles(
-                "Safe fallback",
-                {"original": ["unsafe\x7ftitle"]},
-                [],
-                include_canonical=False,
-            ),
-            ("Safe fallback",),
+            ("Original title", "Titre sur"),
         )
 
-    def test_direct_request_titles_are_capped_before_variant_expansion(self):
-        titles = tuple(f"Title {index}" for index in range(MAX_INDEXER_TITLES + 5))
+    def test_direct_request_titles_are_all_expanded(self):
+        titles = tuple(f"Title {index}" for index in range(13))
         request = ScrapeRequest(
             media_type="series",
             media_id="tt123:2:3",
@@ -227,10 +211,10 @@ class IndexerTitleTests(unittest.TestCase):
             search_titles=titles,
         )
 
-        self.assertEqual(request.query_titles, titles[:MAX_INDEXER_TITLES])
+        self.assertEqual(request.query_titles, titles)
         self.assertEqual(
             len(request.title_queries(include_episode_variants=True)),
-            MAX_INDEXER_TITLES * 3,
+            len(titles) * 3,
         )
 
     def test_episode_variants_are_generated_for_every_title(self):

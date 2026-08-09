@@ -17,13 +17,13 @@ trap cleanup EXIT
 
 case "${fuzz_seconds}" in
     *[!0-9]* | "")
-        echo "USENET_FUZZ_SECONDS must be an integer between 1 and 3600" >&2
+        echo "USENET_FUZZ_SECONDS must be a positive integer" >&2
         exit 2
         ;;
 esac
 fuzz_seconds=$((10#${fuzz_seconds}))
-if ((fuzz_seconds < 1 || fuzz_seconds > 3600)); then
-    echo "USENET_FUZZ_SECONDS must be an integer between 1 and 3600" >&2
+if ((fuzz_seconds < 1)); then
+    echo "USENET_FUZZ_SECONDS must be a positive integer" >&2
     exit 2
 fi
 

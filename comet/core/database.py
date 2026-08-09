@@ -764,8 +764,6 @@ async def _sqlite_batched_delete(
             force_primary=True,
         )
 
-        if batch_row is None:
-            raise RuntimeError("SQLite cleanup batch query returned no row")
         if not batch_row["row_count"]:
             break
 
@@ -784,7 +782,7 @@ async def _sqlite_batched_delete(
             batch_params,
         )
 
-        last_rowid = int(batch_row["max_rowid"])
+        last_rowid = batch_row["max_rowid"]
 
 
 async def _delete_where(

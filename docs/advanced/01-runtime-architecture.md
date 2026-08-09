@@ -11,7 +11,7 @@ Runtime mode:
 
 Worker behavior:
 
-- `FASTAPI_WORKERS` from 1 through 64: exact worker count.
+- positive `FASTAPI_WORKERS`: exact worker count.
 - `FASTAPI_WORKERS=0`: computed as `min((cpu_count * 2 + 1), 12)` in
   either server mode.
 

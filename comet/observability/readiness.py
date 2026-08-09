@@ -88,6 +88,25 @@ class ReadinessTransitionTracker:
         self._last_emitted_at = self._changed_at
         self._suppressed_count = 0
 
+    @staticmethod
+    def _emit(snapshot: ReadinessSnapshot, suppressed_count: int) -> None:
+        if snapshot.state == "degraded":
+            log.warning(
+                "readiness.degraded",
+                "Application readiness is degraded",
+                error_code="readiness_degraded",
+                details=snapshot.component_details,
+                suppressed_count=suppressed_count,
+            )
+        else:
+            log.error(
+                "readiness.unavailable",
+                "Application is not ready",
+                error_code="readiness_unavailable",
+                details=snapshot.component_details,
+                suppressed_count=suppressed_count,
+            )
+
     def observe(self, snapshot: ReadinessSnapshot) -> None:
         metrics.set_readiness(snapshot.state)
         now = self._clock()
@@ -114,22 +133,7 @@ class ReadinessTransitionTracker:
             self._changed_at = now
             self._last_emitted_at = now
             self._suppressed_count = 0
-            if observed == "degraded":
-                log.warning(
-                    "readiness.degraded",
-                    "Application readiness is degraded",
-                    error_code="readiness_degraded",
-                    details=snapshot.component_details,
-                    suppressed_count=suppressed_count,
-                )
-            else:
-                log.error(
-                    "readiness.unavailable",
-                    "Application is not ready",
-                    error_code="readiness_unavailable",
-                    details=snapshot.component_details,
-                    suppressed_count=suppressed_count,
-                )
+            self._emit(snapshot, suppressed_count)
             return
 
         self._suppressed_count += 1
@@ -138,22 +142,7 @@ class ReadinessTransitionTracker:
         suppressed_count = self._suppressed_count
         self._suppressed_count = 0
         self._last_emitted_at = now
-        if observed == "degraded":
-            log.warning(
-                "readiness.degraded",
-                "Application readiness is degraded",
-                error_code="readiness_degraded",
-                details=snapshot.component_details,
-                suppressed_count=suppressed_count,
-            )
-        else:
-            log.error(
-                "readiness.unavailable",
-                "Application is not ready",
-                error_code="readiness_unavailable",
-                details=snapshot.component_details,
-                suppressed_count=suppressed_count,
-            )
+        self._emit(snapshot, suppressed_count)
 
     def reset(self) -> None:
         """Reset inherited state for a freshly started worker lifecycle."""

@@ -15,7 +15,6 @@ from comet.core.models import settings
 class PeerReputation:
     """Tracks reputation and metadata for a single peer."""
 
-    node_id: str
     reputation: float = field(
         default_factory=lambda: settings.COMETNET_REPUTATION_INITIAL
     )
@@ -23,7 +22,6 @@ class PeerReputation:
     last_seen: float = field(default_factory=time.time)
     valid_contributions: int = 0
     invalid_contributions: int = 0
-    is_blacklisted: bool = False
 
     @property
     def anciennety_days(self) -> float:
@@ -42,8 +40,6 @@ class PeerReputation:
     @property
     def effective_reputation(self) -> float:
         """Returns the effective reputation including anciennety bonus."""
-        if self.is_blacklisted:
-            return 0.0
         return min(
             self.reputation + self.anciennety_bonus, settings.COMETNET_REPUTATION_MAX
         )
@@ -51,29 +47,17 @@ class PeerReputation:
     @property
     def trust_level(self) -> str:
         """Returns the trust level as a string."""
-        if self.is_blacklisted:
-            return "blacklisted"
         score = self.effective_reputation
         if score < settings.COMETNET_REPUTATION_THRESHOLD_UNTRUSTED:
             return "untrusted"
-        elif score < settings.COMETNET_REPUTATION_THRESHOLD_TRUSTED:
+        if score < settings.COMETNET_REPUTATION_THRESHOLD_TRUSTED:
             return "neutral"
-        else:
-            return "trusted"
-
-    def is_trusted(self) -> bool:
-        """Returns True if the peer is trusted."""
-        return (
-            not self.is_blacklisted
-            and self.effective_reputation
-            >= settings.COMETNET_REPUTATION_THRESHOLD_TRUSTED
-        )
+        return "trusted"
 
     def is_acceptable(self) -> bool:
-        """Returns True if messages from this peer should be processed."""
+        """Return whether messages from this peer should be processed."""
         return (
-            not self.is_blacklisted
-            and self.effective_reputation
+            self.effective_reputation
             >= settings.COMETNET_REPUTATION_THRESHOLD_UNTRUSTED
         )
 
@@ -99,14 +83,6 @@ class PeerReputation:
         """Apply invalid signature penalty to reputation."""
         self._adjust_reputation(-settings.COMETNET_REPUTATION_PENALTY_INVALID_SIGNATURE)
 
-    def blacklist(self) -> None:
-        """Blacklist this peer."""
-        self.is_blacklisted = True
-
-    def unblacklist(self) -> None:
-        """Remove this peer from the blacklist."""
-        self.is_blacklisted = False
-
     def _adjust_reputation(self, delta: float) -> None:
         """Adjust reputation by delta, clamping to valid range."""
         self.reputation = max(
@@ -124,7 +100,6 @@ class ReputationStore:
 
     def __init__(self):
         self._peers: dict[str, PeerReputation] = {}
-        self._blacklist: set[str] = set()
 
     @staticmethod
     def _validate_node_id(node_id: object) -> str:
@@ -134,7 +109,7 @@ class ReputationStore:
 
     @classmethod
     def _peer_from_persisted(
-        cls, node_id: object, value: object, blacklist: set[str]
+        cls, node_id: object, value: object
     ) -> tuple[str, PeerReputation]:
         node_id = cls._validate_node_id(node_id)
         required_fields = {
@@ -143,7 +118,6 @@ class ReputationStore:
             "last_seen",
             "valid_contributions",
             "invalid_contributions",
-            "is_blacklisted",
         }
         if type(value) is not dict or not required_fields <= value.keys():
             raise ValueError("persisted reputation peer does not match current schema")
@@ -179,29 +153,18 @@ class ReputationStore:
                     f"persisted {field_name} must be a non-negative integer"
                 )
 
-        is_blacklisted = value["is_blacklisted"]
-        if type(is_blacklisted) is not bool:
-            raise ValueError("persisted is_blacklisted must be a boolean")
-        if is_blacklisted != (node_id in blacklist):
-            raise ValueError("peer blacklist flag must match the blacklist set")
-
         return node_id, PeerReputation(
-            node_id=node_id,
             reputation=reputation,
             first_seen=first_seen,
             last_seen=last_seen,
             valid_contributions=value["valid_contributions"],
             invalid_contributions=value["invalid_contributions"],
-            is_blacklisted=is_blacklisted,
         )
 
     def get_or_create(self, node_id: str) -> PeerReputation:
         """Get an existing peer reputation or create a new one."""
-        self._validate_node_id(node_id)
         if node_id not in self._peers:
-            self._peers[node_id] = PeerReputation(node_id=node_id)
-            if node_id in self._blacklist:
-                self._peers[node_id].is_blacklisted = True
+            self._peers[node_id] = PeerReputation()
         return self._peers[node_id]
 
     def get(self, node_id: str) -> PeerReputation | None:
@@ -209,9 +172,7 @@ class ReputationStore:
         return self._peers.get(node_id)
 
     def is_peer_acceptable(self, node_id: str) -> bool:
-        """Check if a peer is acceptable (not blacklisted and above untrusted threshold)."""
-        if node_id in self._blacklist:
-            return False
+        """Check if a peer is above the untrusted threshold."""
         peer = self._peers.get(node_id)
         if peer is None:
             # New peers are acceptable
@@ -219,47 +180,15 @@ class ReputationStore:
             return True
         return peer.is_acceptable()
 
-    def blacklist_peer(self, node_id: str) -> None:
-        """Blacklist a peer by node ID."""
-        self._validate_node_id(node_id)
-        self._blacklist.add(node_id)
-        if node_id in self._peers:
-            self._peers[node_id].blacklist()
-
-    def unblacklist_peer(self, node_id: str) -> None:
-        """Remove a peer from the blacklist."""
-        self._validate_node_id(node_id)
-        self._blacklist.discard(node_id)
-        if node_id in self._peers:
-            self._peers[node_id].unblacklist()
-
     def cleanup_old_peers(self, max_age_days: float = 30.0) -> int:
-        """
-        Remove peers that haven't been seen in a while.
-        Does not remove blacklisted peers.
-        """
+        """Remove peers that haven't been seen in a while."""
         cutoff = time.time() - (max_age_days * 86400)
         to_remove = [
-            node_id
-            for node_id, peer in self._peers.items()
-            if peer.last_seen < cutoff and not peer.is_blacklisted
+            node_id for node_id, peer in self._peers.items() if peer.last_seen < cutoff
         ]
         for node_id in to_remove:
             del self._peers[node_id]
         return len(to_remove)
-
-    def get_trusted_peers(self) -> list[PeerReputation]:
-        """Get all trusted peers."""
-        return [p for p in self._peers.values() if p.is_trusted()]
-
-    def get_reputation_summary(self) -> dict[str, int]:
-        """Get a summary of peer reputations by trust level."""
-        summary = {"trusted": 0, "neutral": 0, "untrusted": 0, "blacklisted": 0}
-        for peer in self._peers.values():
-            level = peer.trust_level
-            if level in summary:
-                summary[level] += 1
-        return summary
 
     def to_dict(self) -> dict:
         """Serialize the store to a dictionary for persistence."""
@@ -271,31 +200,22 @@ class ReputationStore:
                     "last_seen": peer.last_seen,
                     "valid_contributions": peer.valid_contributions,
                     "invalid_contributions": peer.invalid_contributions,
-                    "is_blacklisted": peer.is_blacklisted,
                 }
                 for node_id, peer in sorted(self._peers.items())
             },
-            "blacklist": sorted(self._blacklist),
         }
 
     @classmethod
-    def _decode_persisted(
-        cls, data: object
-    ) -> tuple[set[str], dict[str, PeerReputation]]:
-        if type(data) is not dict or not {"peers", "blacklist"} <= data.keys():
+    def _decode_persisted(cls, data: object) -> dict[str, PeerReputation]:
+        if type(data) is not dict or "peers" not in data:
             raise ValueError("reputation store does not match the current schema")
-        if type(data["peers"]) is not dict or type(data["blacklist"]) is not list:
-            raise ValueError("reputation peers/blacklist containers are invalid")
+        if type(data["peers"]) is not dict:
+            raise ValueError("reputation peers container is invalid")
 
-        blacklist_values = [
-            cls._validate_node_id(node_id) for node_id in data["blacklist"]
-        ]
-        blacklist = set(blacklist_values)
-        peers = dict(
-            cls._peer_from_persisted(node_id, value, blacklist)
+        return dict(
+            cls._peer_from_persisted(node_id, value)
             for node_id, value in data["peers"].items()
         )
-        return blacklist, peers
 
     @classmethod
     def validate_persisted(cls, data: object) -> None:
@@ -304,7 +224,4 @@ class ReputationStore:
 
     def from_dict(self, data: dict) -> None:
         """Load the store from a dictionary."""
-        blacklist, peers = self._decode_persisted(data)
-
-        self._blacklist = blacklist
-        self._peers = peers
+        self._peers = self._decode_persisted(data)

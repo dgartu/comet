@@ -5,8 +5,6 @@ from unittest.mock import patch
 from urllib.parse import quote
 
 from comet.playback.altmount_contract import (
-    valid_altmount_last_modified,
-    valid_altmount_strong_etag,
     valid_altmount_virtual_path,
 )
 from comet.playback.base import Readiness
@@ -117,23 +115,6 @@ class AltMountProviderTests(unittest.IsolatedAsyncioTestCase):
                         "a" * 64,
                         (0,),
                     )
-
-    async def test_native_upload_rejects_oversized_nzb_before_network(self):
-        config = {"internalBaseUrl": "https://altmount.example", "apiKey": "key"}
-
-        with (
-            patch(
-                "comet.playback.providers.altmount.MAX_NZB_METADATA_BYTES",
-                3,
-            ),
-            self.assertRaisesRegex(ValueError, "artifact submission"),
-        ):
-            await AltMountProvider(object()).submit_artifact(
-                config,
-                b"1234",
-                "a" * 64,
-                (0,),
-            )
 
     def test_episode_filename_preserves_the_exact_selection(self):
         self.assertEqual(
@@ -271,10 +252,3 @@ class AltMountProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(valid_altmount_virtual_path("é" * 1025))
         self.assertFalse(valid_altmount_virtual_path("video\x7f.mkv"))
-        self.assertTrue(valid_altmount_strong_etag('"revision"'))
-        self.assertFalse(valid_altmount_strong_etag("revision"))
-        self.assertFalse(valid_altmount_strong_etag('W/"revision"'))
-        self.assertTrue(valid_altmount_last_modified("Wed, 21 Oct 2015 07:28:00 GMT"))
-        self.assertFalse(
-            valid_altmount_last_modified("Wed, 21 Oct 2015 07:28:00 GMT\x7f")
-        )

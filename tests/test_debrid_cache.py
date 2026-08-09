@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from databases import Database
 
+from comet.metadata.media_info import media_info_from_stremthru
 from comet.services import debrid_cache
 from comet.utils.parsing import MediaScope
 
@@ -97,12 +98,15 @@ class DebridAvailabilityScopeTests(unittest.IsolatedAsyncioTestCase):
             CREATE TABLE debrid_availability (
                 debrid_service TEXT NOT NULL,
                 info_hash TEXT NOT NULL,
+                season INTEGER,
+                episode INTEGER,
                 season_norm INTEGER NOT NULL,
                 episode_norm INTEGER NOT NULL,
                 file_index TEXT,
                 title TEXT,
                 size BIGINT,
                 parsed_json TEXT,
+                media_info_json TEXT,
                 updated_at REAL NOT NULL
             )
             """
@@ -201,6 +205,7 @@ class DebridAvailabilityScopeTests(unittest.IsolatedAsyncioTestCase):
                 title,
                 size,
                 parsed_json,
+                media_info_json,
                 updated_at
             ) VALUES (
                 :debrid_service,
@@ -211,6 +216,7 @@ class DebridAvailabilityScopeTests(unittest.IsolatedAsyncioTestCase):
                 :title,
                 :size,
                 :parsed_json,
+                :media_info_json,
                 :updated_at
             )
             """,
@@ -241,6 +247,7 @@ class DebridAvailabilityScopeTests(unittest.IsolatedAsyncioTestCase):
             "title": title,
             "size": 100,
             "parsed_json": None,
+            "media_info_json": None,
             "updated_at": updated_at,
         }
 
@@ -324,6 +331,62 @@ class DebridAvailabilityScopeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(rows), 3)
         self.assertTrue(all(set(row) == {"info_hash"} for row in rows))
+
+    async def test_media_info_is_preserved_only_while_file_identity_is_stable(self):
+        media_info = media_info_from_stremthru(
+            {
+                "video": {"codec": "hevc", "w": 3840, "h": 2160},
+                "v": 1,
+            }
+        )
+        selected = {
+            "info_hash": self.movie_hash,
+            "index": 5,
+            "title": "Movie.2026.mkv",
+            "size": 100,
+            "season": None,
+            "episode": None,
+            "parsed": None,
+            "media_info": media_info,
+        }
+
+        with patch.object(debrid_cache, "database", self.database):
+            await debrid_cache.cache_availability("torbox", [selected])
+            await debrid_cache.cache_availability(
+                "torbox", [{**selected, "media_info": None}]
+            )
+            preserved = await self.database.fetch_one(
+                """
+                SELECT media_info_json
+                FROM debrid_availability
+                WHERE debrid_service = 'torbox' AND info_hash = :info_hash
+                  AND season_norm = -1 AND episode_norm = -1
+                """,
+                {"info_hash": self.movie_hash},
+            )
+            await debrid_cache.cache_availability(
+                "torbox",
+                [
+                    {
+                        **selected,
+                        "index": 7,
+                        "title": "Movie.2026.Directors.Cut.mkv",
+                        "media_info": None,
+                    }
+                ],
+            )
+            cleared = await self.database.fetch_one(
+                """
+                SELECT media_info_json
+                FROM debrid_availability
+                WHERE debrid_service = 'torbox' AND info_hash = :info_hash
+                  AND season_norm = -1 AND episode_norm = -1
+                """,
+                {"info_hash": self.movie_hash},
+            )
+
+        self.assertIsNotNone(preserved["media_info_json"])
+        self.assertIsNone(cleared["media_info_json"])
 
 
 if __name__ == "__main__":

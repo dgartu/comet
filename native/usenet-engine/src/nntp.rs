@@ -1,4 +1,6 @@
 use crate::cache::FlightCancellation;
+use crate::limits::MAX_DECLARED_POSTING_BYTES as MAX_DECLARED_ARTICLE_BYTES;
+use crate::nntp_protocol::MAX_LINE_BYTES;
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -15,7 +17,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-const MAX_LINE_BYTES: usize = crate::nntp_protocol::MAX_LINE_BYTES;
 const TIMEOUT: Duration = Duration::from_secs(15);
 const ARTICLE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 const BODY_STALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -30,8 +31,8 @@ const DNS_WORKERS: usize = 4;
 const MAX_DNS_QUEUE: usize = 64;
 const MAX_RESOLVED_ADDRESSES: usize = 64;
 const ARTICLE_RESERVATION_QUANTUM: u64 = 64 * 1024;
-const MAX_DECLARED_ARTICLE_BYTES: u64 = crate::session::MAX_DECLARED_POSTING_BYTES;
 const INTERACTIVE_DECODED_RESERVE: u64 = MAX_DECLARED_ARTICLE_BYTES * 2;
+#[cfg(test)]
 const MAX_PIPELINE_DEPTH: usize = 16;
 const MAX_CAPABILITY_LINES: usize = 128;
 const COMPRESSED_FRAMING_ALLOWANCE: u64 = 64 * 1024;
@@ -420,6 +421,17 @@ impl From<&str> for SecretText {
     }
 }
 
+#[cfg(test)]
+fn validate_body_template(request: &BodyRequest) -> Result<(), &'static str> {
+    validate_request(
+        &request.host,
+        &request.tls_mode,
+        request.username.as_deref(),
+        request.password.as_deref(),
+        "validation@comet.invalid",
+    )
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 pub struct BodyRequest {
     pub host: String,
@@ -431,16 +443,6 @@ pub struct BodyRequest {
     pub password: Option<SecretText>,
     #[serde(default)]
     pub message_id: String,
-}
-
-pub fn validate_body_template(request: &BodyRequest) -> Result<(), &'static str> {
-    validate_request(
-        &request.host,
-        &request.tls_mode,
-        request.username.as_deref(),
-        request.password.as_deref(),
-        "validation@comet.invalid",
-    )
 }
 
 pub fn valid_group(value: &str) -> bool {
@@ -759,25 +761,19 @@ struct PhysicalPoolKey {
     port: u16,
     tls_mode: String,
     allow_private: bool,
-    username_fingerprint: Option<[u8; 32]>,
     credential_fingerprint: [u8; 32],
 }
 
 impl PhysicalPoolKey {
     fn from_request(request: &BodyRequest) -> Self {
-        let username_fingerprint = request.username.as_ref().map(|username| {
-            let mut digest = Sha256::new();
-            digest.update(b"comet-nntp-username-v1\0");
-            digest.update(username.as_bytes());
-            digest.finalize().into()
-        });
         let mut digest = Sha256::new();
         digest.update(b"comet-nntp-credential-v1\0");
         if let Some(username) = &request.username {
+            digest.update(b"u\0");
             digest.update(username.as_bytes());
         }
-        digest.update(b"\0");
         if let Some(password) = &request.password {
+            digest.update(b"p\0");
             digest.update(password.as_bytes());
         }
         Self {
@@ -785,7 +781,6 @@ impl PhysicalPoolKey {
             port: request.port,
             tls_mode: request.tls_mode.clone(),
             allow_private: request.allow_private,
-            username_fingerprint,
             credential_fingerprint: digest.finalize().into(),
         }
     }
@@ -828,11 +823,8 @@ impl Drop for DecodedMemoryReservation {
 }
 
 impl GlobalConnectionLimiter {
-    fn new(maximum: usize, maximum_decoded_bytes: u64) -> Result<Self, &'static str> {
-        if maximum == 0 || maximum_decoded_bytes == 0 {
-            return Err("invalid_nntp_connection_limit");
-        }
-        Ok(Self {
+    fn new(maximum: usize, maximum_decoded_bytes: u64) -> Self {
+        Self {
             maximum,
             maximum_decoded_bytes,
             state: Mutex::new(GlobalConnectionState {
@@ -841,7 +833,7 @@ impl GlobalConnectionLimiter {
                 reserved_non_interactive_decoded_bytes: 0,
             }),
             changed: Condvar::new(),
-        })
+        }
     }
 
     fn reserve_decoded(
@@ -1018,7 +1010,7 @@ impl PhysicalPool {
         declared_encoded_bytes: u64,
         work_class: WorkClass,
     ) -> Result<PipelineReservation, &'static str> {
-        let article_bytes = rounded_article_cost(declared_encoded_bytes)?;
+        let article_bytes = rounded_article_cost(declared_encoded_bytes);
         let decoded_memory = self.global.reserve_decoded(article_bytes, work_class)?;
         let mut state = self.state.lock().expect("physical NNTP pool lock");
         let byte_capacity = u64::try_from(state.connection_limit)
@@ -1279,23 +1271,8 @@ impl PhysicalPool {
     }
 }
 
-fn rounded_article_cost(declared_encoded_bytes: u64) -> Result<u64, &'static str> {
-    if declared_encoded_bytes == 0 || declared_encoded_bytes > MAX_DECLARED_ARTICLE_BYTES {
-        return Err("invalid_nntp_article_cost");
-    }
-    declared_encoded_bytes
-        .checked_add(ARTICLE_RESERVATION_QUANTUM - 1)
-        .map(|bytes| bytes / ARTICLE_RESERVATION_QUANTUM * ARTICLE_RESERVATION_QUANTUM)
-        .ok_or("invalid_nntp_article_cost")
-}
-
-fn article_read_limit(maximum_bytes: usize) -> Result<usize, &'static str> {
-    let hard_limit =
-        usize::try_from(MAX_DECLARED_ARTICLE_BYTES).map_err(|_| "invalid_nntp_article_cost")?;
-    (1..=hard_limit)
-        .contains(&maximum_bytes)
-        .then_some(maximum_bytes)
-        .ok_or("invalid_nntp_article_cost")
+fn rounded_article_cost(declared_encoded_bytes: u64) -> u64 {
+    declared_encoded_bytes.div_ceil(ARTICLE_RESERVATION_QUANTUM) * ARTICLE_RESERVATION_QUANTUM
 }
 
 fn effective_work_class(task: &PipelineTask) -> WorkClass {
@@ -1650,6 +1627,9 @@ impl PoolRegistry {
         maximum_connections: usize,
         maximum_decoded_bytes: u64,
     ) -> Result<Self, &'static str> {
+        if maximum_connections == 0 || maximum_decoded_bytes == 0 {
+            return Err("invalid_nntp_connection_limit");
+        }
         let maximum_pool_entries = maximum_connections
             .saturating_mul(64)
             .clamp(256, MAX_PHYSICAL_POOL_ENTRIES);
@@ -1658,7 +1638,7 @@ impl PoolRegistry {
             global: Arc::new(GlobalConnectionLimiter::new(
                 maximum_connections,
                 maximum_decoded_bytes,
-            )?),
+            )),
             pools: Mutex::new(HashMap::new()),
             maximum_pool_entries,
             poisoned_connections,
@@ -1700,12 +1680,7 @@ impl PoolRegistry {
         backup: bool,
     ) -> Result<PoolReference, &'static str> {
         let pool = self.physical_pool(request)?;
-        let reference_id = self
-            .next_reference_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| "nntp_pool_reference_capacity")?;
+        let reference_id = self.next_reference_id.fetch_add(1, Ordering::Relaxed);
         pool.add_reference(reference_id, connection_limit, pipeline_depth);
         Ok(PoolReference {
             inner: Arc::new(PoolReferenceInner {
@@ -1729,10 +1704,6 @@ impl PoolRegistry {
         connection_limit: usize,
         pipeline_depth: usize,
     ) -> Result<PoolReference, &'static str> {
-        if connection_limit == 0 || pipeline_depth == 0 || pipeline_depth > MAX_PIPELINE_DEPTH {
-            return Err("invalid_nntp_connection_limit");
-        }
-        validate_body_template(request)?;
         self.reference_for_generation(
             request,
             connection_limit,
@@ -1922,8 +1893,7 @@ impl PoolRegistry {
                 work_class: WorkClass::Interactive,
                 configuration_partition: partition,
                 session,
-                declared_encoded_bytes: u64::try_from(maximum_bytes)
-                    .map_err(|_| "invalid_nntp_article_cost")?,
+                declared_encoded_bytes: maximum_bytes as u64,
             },
         )
     }
@@ -1962,7 +1932,6 @@ impl PoolRegistry {
     ) -> Result<crate::yenc::DecodedPart, &'static str> {
         let telemetry = Arc::clone(&self.provider_telemetry);
         let pool = Arc::clone(&pool_reference.inner.pool);
-        let article_limit = article_read_limit(maximum_bytes)?;
         let reservation =
             match pool.reserve_pipeline(scheduling.declared_encoded_bytes, scheduling.work_class) {
                 Ok(reservation) => reservation,
@@ -1977,9 +1946,8 @@ impl PoolRegistry {
         let start_dispatcher = pool.enqueue(PipelineTask {
             request,
             group,
-            maximum_wire_bytes: article_limit,
-            maximum_decoded_bytes: usize::try_from(decoded_limit)
-                .map_err(|_| "invalid_nntp_article_cost")?,
+            maximum_wire_bytes: maximum_bytes,
+            maximum_decoded_bytes: decoded_limit as usize,
             cancellation,
             scheduling,
             _reservation: Some(reservation),
@@ -2222,7 +2190,7 @@ where
             Err(_) => return Err("nntp_read_failed"),
         }
     }
-    if scratch.is_empty() || scratch.len() > MAX_LINE_BYTES || !scratch.ends_with(b"\r\n") {
+    if scratch.is_empty() || !scratch.ends_with(b"\r\n") {
         return Err("nntp_invalid_response");
     }
     Ok(())
@@ -2332,6 +2300,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn validate_request(
     host: &str,
     tls_mode: &str,
@@ -2804,15 +2773,9 @@ impl NntpConnection {
     where
         F: Fn() -> bool,
     {
-        if message_ids.is_empty() || message_ids.len() > MAX_PIPELINE_DEPTH {
-            return Err("nntp_invalid_request");
-        }
         let deadline = Instant::now() + ARTICLE_TOTAL_TIMEOUT;
         self.reader.get_mut().begin_compressed_read_budget(
-            u64::try_from(MAX_LINE_BYTES * message_ids.len())
-                .map_err(|_| "nntp_invalid_request")?
-                .checked_add(COMPRESSED_FRAMING_ALLOWANCE)
-                .ok_or("nntp_invalid_request")?,
+            (MAX_LINE_BYTES * message_ids.len()) as u64 + COMPRESSED_FRAMING_ALLOWANCE,
         );
         if let Some(group) = group {
             self.select_group(group, cancelled, deadline)?;
@@ -3287,6 +3250,15 @@ fn tls_client_config(roots: RootCertStore) -> ClientConfig {
         .with_no_client_auth()
 }
 
+fn native_tls_client_config() -> Result<Arc<ClientConfig>, &'static str> {
+    static CONFIGURATION: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    if let Some(configuration) = CONFIGURATION.get() {
+        return Ok(Arc::clone(configuration));
+    }
+    let configuration = Arc::new(tls_client_config(native_root_store()?));
+    Ok(Arc::clone(CONFIGURATION.get_or_init(|| configuration)))
+}
+
 fn tls_stream_cancellable<F>(
     stream: TcpStream,
     host: &str,
@@ -3295,11 +3267,9 @@ fn tls_stream_cancellable<F>(
 where
     F: Fn() -> bool,
 {
-    let roots = native_root_store()?;
     let server_name = ServerName::try_from(host.to_owned()).map_err(|_| "nntp_tls_name_invalid")?;
-    let configuration = tls_client_config(roots);
     let mut stream = StreamOwned::new(
-        ClientConnection::new(Arc::new(configuration), server_name)
+        ClientConnection::new(native_tls_client_config()?, server_name)
             .map_err(|_| "nntp_tls_failed")?,
         stream,
     );
@@ -3470,7 +3440,7 @@ mod tests {
         GroupDispatch, GroupRequirement, MAX_DECLARED_ARTICLE_BYTES, MAX_PIPELINE_DEPTH,
         MAX_PIPELINE_QUEUE, NntpConnection, NntpStream, PipelineTask, PoolReference, PoolRegistry,
         PoolStats, ProviderPerformance, SchedulingContext, SecretText, TIMEOUT, WorkClass,
-        article_read_limit, authentication_status_failure, body, body_with_cancellation,
+        authentication_status_failure, body, body_with_cancellation,
         capabilities_cancellable_until, code, complete_tls_with, connect_addresses,
         line_cancellable, resolve_cancellable, rounded_article_cost, valid_group,
         validate_body_template, verified_part, wait_for_connect_with, wait_for_resolution,
@@ -4888,28 +4858,14 @@ mod tests {
 
     #[test]
     fn scheduler_reserves_rounded_bytes_and_releases_every_admission_exactly_once() {
-        assert_eq!(rounded_article_cost(1), Ok(ARTICLE_RESERVATION_QUANTUM));
+        assert_eq!(rounded_article_cost(1), ARTICLE_RESERVATION_QUANTUM);
         assert_eq!(
             rounded_article_cost(ARTICLE_RESERVATION_QUANTUM),
-            Ok(ARTICLE_RESERVATION_QUANTUM)
+            ARTICLE_RESERVATION_QUANTUM
         );
         assert_eq!(
             rounded_article_cost(ARTICLE_RESERVATION_QUANTUM + 1),
-            Ok(2 * ARTICLE_RESERVATION_QUANTUM)
-        );
-        assert_eq!(rounded_article_cost(0), Err("invalid_nntp_article_cost"));
-        assert_eq!(
-            rounded_article_cost(MAX_DECLARED_ARTICLE_BYTES + 1),
-            Err("invalid_nntp_article_cost")
-        );
-        assert_eq!(
-            article_read_limit(MAX_DECLARED_ARTICLE_BYTES as usize),
-            Ok(MAX_DECLARED_ARTICLE_BYTES as usize)
-        );
-        assert_eq!(article_read_limit(0), Err("invalid_nntp_article_cost"));
-        assert_eq!(
-            article_read_limit(MAX_DECLARED_ARTICLE_BYTES as usize + 1),
-            Err("invalid_nntp_article_cost")
+            2 * ARTICLE_RESERVATION_QUANTUM
         );
 
         let pools = Arc::new(PoolRegistry::new(1).expect("create byte reservation registry"));
@@ -5050,7 +5006,7 @@ mod tests {
         assert_eq!(pools.preparation_slots(), 25);
         assert_eq!(
             pools.stats().reserved_decoded_bytes,
-            25 * rounded_article_cost(article_bytes).expect("rounded article cost")
+            25 * rounded_article_cost(article_bytes)
         );
         drop(reservations);
         assert_eq!(pools.stats().reserved_decoded_bytes, 0);

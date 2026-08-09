@@ -266,8 +266,6 @@ class TorrentResultAccumulator:
         candidate: ReleaseCandidate,
         source_id: str = "Discovery",
     ) -> dict:
-        if candidate.transport is not TransportKind.BITTORRENT:
-            raise ValueError("torrent pipeline received a non-torrent candidate")
         locator = candidate.locators[0]
         seeders = candidate.transport_stats.get("seeders")
         tracker_sources = candidate.transport_stats.get("tracker_sources", ())
@@ -489,10 +487,9 @@ class TorrentResultAccumulator:
             if parsed is None:
                 unparsed_torrents.append(torrent)
                 continue
-            parsed = parsed.model_copy(deep=True)
             if self.remove_adult_content and parsed.adult:
                 continue
-            self.ready_to_cache.append({**torrent, "parsed": parsed})
+            self.ready_to_cache.append(torrent)
 
         if not unparsed_torrents:
             return

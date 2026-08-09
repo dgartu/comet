@@ -221,27 +221,6 @@ def test_account_partition_is_independent_of_option_key_order():
     assert first_binding.credential_fingerprint == second_binding.credential_fingerprint
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("accounts", []),
-        ("options", []),
-    ],
-)
-def test_malformed_binding_containers_are_not_replaced_with_empty_values(
-    field,
-    value,
-):
-    config = _easynews_config()
-    if field == "accounts":
-        config[field] = value
-    else:
-        config["playbackProviders"][0][field] = value
-
-    with pytest.raises(AttributeError):
-        build_playback_capability_bindings(config, CapabilityCodec(ROOT))
-
-
 def test_provider_status_maps_to_closed_persisted_states():
     assert (
         provider_validation_outcome(

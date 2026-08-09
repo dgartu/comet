@@ -41,7 +41,6 @@ class NodeIdentity:
         self._keys_dir = keys_dir or self.KEYS_DIR
         self._private_key: EllipticCurvePrivateKey | None = None
         self._public_key: EllipticCurvePublicKey | None = None
-        self._public_key_bytes: bytes | None = None
         self._public_key_hex: str | None = None
         self._node_id: str | None = None
 
@@ -55,24 +54,17 @@ class NodeIdentity:
         return self._node_id
 
     @property
-    def public_key_bytes(self) -> bytes:
-        """Returns the public key as DER-encoded bytes."""
-        if self._public_key_bytes is None:
+    def public_key_hex(self) -> str:
+        """Returns the public key as a hex string."""
+        if self._public_key_hex is None:
             if self._public_key is None:
                 raise RuntimeError(
                     "Node identity not initialized. Call load_or_generate() first."
                 )
-            self._public_key_bytes = self._public_key.public_bytes(
+            self._public_key_hex = self._public_key.public_bytes(
                 encoding=serialization.Encoding.DER,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-        return self._public_key_bytes
-
-    @property
-    def public_key_hex(self) -> str:
-        """Returns the public key as a hex string."""
-        if self._public_key_hex is None:
-            self._public_key_hex = self.public_key_bytes.hex()
+            ).hex()
         return self._public_key_hex
 
     async def load_or_generate(self) -> None:
@@ -92,7 +84,6 @@ class NodeIdentity:
         # Generate new key pair
         self._private_key = ec.generate_private_key(ec.SECP256K1())
         self._public_key = self._private_key.public_key()
-        self._public_key_bytes = None
         self._public_key_hex = None
 
         # Derive node ID from public key
@@ -154,11 +145,12 @@ class NodeIdentity:
                     "If the key is encrypted, set COMETNET_KEY_PASSWORD."
                 )
 
-        if not isinstance(self._private_key, EllipticCurvePrivateKey):
+        if not isinstance(self._private_key, EllipticCurvePrivateKey) or not isinstance(
+            self._private_key.curve, ec.SECP256K1
+        ):
             raise ValueError("Invalid key type: expected ECDSA private key")
 
         self._public_key = self._private_key.public_key()
-        self._public_key_bytes = None
         self._public_key_hex = None
         self._node_id = self._derive_node_id(self._public_key)
 
@@ -206,7 +198,9 @@ class NodeIdentity:
         """
         try:
             public_key = serialization.load_der_public_key(public_key_bytes)
-            if not isinstance(public_key, EllipticCurvePublicKey):
+            if not isinstance(public_key, EllipticCurvePublicKey) or not isinstance(
+                public_key.curve, ec.SECP256K1
+            ):
                 return False
 
             public_key.verify(signature, data, ec.ECDSA(hashes.SHA256()))
@@ -233,22 +227,9 @@ class NodeIdentity:
         except ValueError:
             return ""
 
-    async def sign_async(self, data: bytes) -> bytes:
-        """Sign data asynchronously."""
-        return await run_in_executor(self.sign, data)
-
     async def sign_hex_async(self, data: bytes) -> str:
         """Sign data and return hex asynchronously."""
         return await run_in_executor(self.sign_hex, data)
-
-    @staticmethod
-    async def verify_async(
-        data: bytes, signature: bytes, public_key_bytes: bytes
-    ) -> bool:
-        """Verify signature asynchronously."""
-        return await run_in_executor(
-            NodeIdentity.verify, data, signature, public_key_bytes
-        )
 
     @staticmethod
     async def verify_hex_async(
@@ -264,9 +245,14 @@ class NodeIdentity:
         """Load a public key object from a hex string."""
         try:
             public_key_bytes = bytes.fromhex(public_key_hex)
-            return serialization.load_der_public_key(public_key_bytes)
+            public_key = serialization.load_der_public_key(public_key_bytes)
         except (ValueError, TypeError):
             return None
+        if not isinstance(public_key, EllipticCurvePublicKey) or not isinstance(
+            public_key.curve, ec.SECP256K1
+        ):
+            return None
+        return public_key
 
     @staticmethod
     def verify_with_key(
@@ -277,19 +263,7 @@ class NodeIdentity:
         Avoids re-parsing the public key bytes every time.
         """
         try:
-            if not isinstance(public_key, EllipticCurvePublicKey):
-                return False
-
             public_key.verify(signature, data, ec.ECDSA(hashes.SHA256()))
             return True
         except (InvalidSignature, ValueError, TypeError):
             return False
-
-    @staticmethod
-    async def verify_with_key_async(
-        data: bytes, signature: bytes, public_key: EllipticCurvePublicKey
-    ) -> bool:
-        """Verify signature using key object asynchronously."""
-        return await run_in_executor(
-            NodeIdentity.verify_with_key, data, signature, public_key
-        )

@@ -7,8 +7,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
-pub const MAX_COMPOSITE_PARTS: usize = crate::archive_group::MAX_VOLUMES;
-const MAX_COMPOSITE_BYTES: u64 = crate::limits::MAX_LOGICAL_BYTES;
 pub const MIN_COMPOSITE_METADATA_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const COMPOSITE_BASE_METADATA_BYTES: usize = 512;
 const COMPOSITE_PART_METADATA_BYTES: usize = 384;
@@ -50,34 +48,18 @@ pub struct SessionSet {
 }
 
 impl SessionSet {
-    pub fn new(sessions: Vec<SessionSource>) -> Result<Self, &'static str> {
-        if sessions.is_empty() || sessions.len() > MAX_COMPOSITE_PARTS {
-            return Err("invalid_raw_composite");
-        }
+    pub fn new(sessions: Vec<SessionSource>) -> Self {
         let mut exact_size = 0_u64;
-        let mut identities = std::collections::BTreeSet::new();
-        let mut revisions = std::collections::BTreeSet::new();
         let mut prefix_ends = Vec::with_capacity(sessions.len());
         for session in &sessions {
-            if session.exact_size == 0
-                || !identities.insert(&session.identity)
-                || !revisions.insert(&session.revision)
-            {
-                return Err("invalid_raw_composite");
-            }
-            exact_size = exact_size
-                .checked_add(session.exact_size)
-                .ok_or("invalid_raw_composite")?;
-            if exact_size > MAX_COMPOSITE_BYTES {
-                return Err("invalid_raw_composite");
-            }
+            exact_size += session.exact_size;
             prefix_ends.push(exact_size);
         }
-        Ok(Self {
+        Self {
             sessions,
             prefix_ends,
             exact_size,
-        })
+        }
     }
 
     pub fn exact_size(&self) -> u64 {
@@ -99,7 +81,7 @@ impl SessionSet {
             let index = self
                 .prefix_ends
                 .partition_point(|prefix| *prefix <= position);
-            let session = self.sessions.get(index).ok_or("raw_composite_conflict")?;
+            let session = &self.sessions[index];
             let session_start = if index == 0 {
                 0
             } else {
@@ -249,10 +231,10 @@ pub struct RawCompositeSource {
 impl RawCompositeSource {
     pub fn from_materialization(
         content_identity: String,
-        exact_size: u64,
         file_identity: ImmutableFileIdentity,
-    ) -> Result<Self, &'static str> {
-        Ok(Self {
+    ) -> Self {
+        let exact_size = file_identity.size;
+        Self {
             identity: content_identity.clone(),
             exact_size,
             parts: vec![RawCompositePart {
@@ -262,13 +244,13 @@ impl RawCompositeSource {
                 backing: RawCompositeBacking::Materialization(file_identity),
             }],
             prefix_ends: vec![exact_size],
-        })
+        }
     }
 
     pub fn from_plan(
         plan: VolumePlan,
         mut file_identities: BTreeMap<String, ImmutableFileIdentity>,
-    ) -> Result<Self, &'static str> {
+    ) -> Self {
         let mut total = 0_u64;
         let mut prefix_ends = Vec::with_capacity(plan.volumes.len());
         let mut parts = Vec::with_capacity(plan.volumes.len());
@@ -286,19 +268,19 @@ impl RawCompositeSource {
                 exact_size: volume.exact_size,
             });
         }
-        Ok(Self {
+        Self {
             identity: plan.set_identity,
-            exact_size: plan.exact_size,
+            exact_size: total,
             parts,
             prefix_ends,
-        })
+        }
     }
 
     pub fn from_ranges(
         identity: String,
         parts: Vec<RawCompositePart>,
     ) -> Result<Self, &'static str> {
-        if !(1..=MAX_COMPOSITE_PARTS).contains(&parts.len()) {
+        if parts.is_empty() {
             return Err("invalid_raw_composite");
         }
         let mut exact_size = 0_u64;
@@ -312,12 +294,7 @@ impl RawCompositeSource {
             {
                 return Err("invalid_raw_composite");
             }
-            exact_size = exact_size
-                .checked_add(part.exact_size)
-                .ok_or("invalid_raw_composite")?;
-            if exact_size > MAX_COMPOSITE_BYTES {
-                return Err("invalid_raw_composite");
-            }
+            exact_size += part.exact_size;
             prefix_ends.push(exact_size);
         }
         Ok(Self {
@@ -351,28 +328,21 @@ impl RawCompositeSource {
             let index = self
                 .prefix_ends
                 .partition_point(|part_end| *part_end <= logical);
-            let part = self.parts.get(index).ok_or("raw_composite_conflict")?;
+            let part = &self.parts[index];
             let part_start = if index == 0 {
                 0
             } else {
                 self.prefix_ends[index - 1]
             };
-            let within = logical
-                .checked_sub(part_start)
-                .ok_or("raw_composite_conflict")?;
+            let within = logical - part_start;
             let part_length = (part.exact_size - within).min(end - logical);
             parts.push(RawCompositePart {
                 content_identity: part.content_identity.clone(),
-                source_offset: part
-                    .source_offset
-                    .checked_add(within)
-                    .ok_or("raw_composite_conflict")?,
+                source_offset: part.source_offset + within,
                 exact_size: part_length,
                 backing: part.backing.clone(),
             });
-            logical = logical
-                .checked_add(part_length)
-                .ok_or("raw_composite_conflict")?;
+            logical += part_length;
         }
         Ok(parts)
     }
@@ -407,40 +377,24 @@ impl RawCompositeSource {
         let mut output =
             Vec::with_capacity(usize::try_from(length).map_err(|_| "invalid_raw_composite_range")?);
         let mut logical = offset;
-        let final_offset = offset
-            .checked_add(length)
-            .ok_or("invalid_raw_composite_range")?;
+        let final_offset = offset + length;
         while logical < final_offset {
             if cancelled() {
                 return Err("raw_composite_cancelled");
             }
             let index = self.prefix_ends.partition_point(|end| *end <= logical);
-            let part = self.parts.get(index).ok_or("raw_composite_conflict")?;
+            let part = &self.parts[index];
             let part_begin = if index == 0 {
                 0
             } else {
                 self.prefix_ends[index - 1]
             };
-            let part_offset = logical
-                .checked_sub(part_begin)
-                .ok_or("raw_composite_conflict")?;
-            let available = part
-                .exact_size
-                .checked_sub(part_offset)
-                .ok_or("raw_composite_conflict")?;
+            let part_offset = logical - part_begin;
+            let available = part.exact_size - part_offset;
             let part_length = available.min(final_offset - logical);
-            let part_end = part_offset
-                .checked_add(part_length)
-                .and_then(|end| end.checked_sub(1))
-                .ok_or("raw_composite_conflict")?;
-            let source_start = part
-                .source_offset
-                .checked_add(part_offset)
-                .ok_or("raw_composite_conflict")?;
-            let source_end = part
-                .source_offset
-                .checked_add(part_end)
-                .ok_or("raw_composite_conflict")?;
+            let part_end = part_offset + part_length - 1;
+            let source_start = part.source_offset + part_offset;
+            let source_end = part.source_offset + part_end;
             let bytes = read_part(part, source_start, source_end)?;
             if bytes.len()
                 != usize::try_from(part_length).map_err(|_| "invalid_raw_composite_range")?
@@ -448,12 +402,7 @@ impl RawCompositeSource {
                 return Err("raw_composite_conflict");
             }
             output.extend_from_slice(&bytes);
-            logical = logical
-                .checked_add(part_length)
-                .ok_or("raw_composite_conflict")?;
-        }
-        if output.len() != usize::try_from(length).map_err(|_| "invalid_raw_composite_range")? {
-            return Err("raw_composite_conflict");
+            logical += part_length;
         }
         Ok(output)
     }
@@ -548,9 +497,6 @@ impl RawCompositeRegistry {
             .entries
             .get_mut(identity)
             .ok_or("raw_composite_unavailable")?;
-        if expired(entry, now) {
-            return Err("raw_composite_busy");
-        }
         let permit = entry
             .readers
             .acquire_transient()
@@ -576,9 +522,6 @@ impl RawCompositeRegistry {
             .entries
             .get_mut(identity)
             .ok_or("raw_composite_unavailable")?;
-        if expired(entry, now) {
-            return Err("raw_composite_busy");
-        }
         let lease_id = entry.readers.open().map_err(raw_reader_error)?;
         entry.last_access = now;
         Ok(lease_id)
@@ -735,7 +678,6 @@ mod tests {
             },
             file_identities,
         )
-        .expect("raw composite source")
     }
 
     #[test]
@@ -804,7 +746,6 @@ mod tests {
         let identity = "a".repeat(64);
         let source = RawCompositeSource::from_materialization(
             identity.clone(),
-            6,
             ImmutableFileIdentity {
                 device: 1,
                 inode: 2,
@@ -816,8 +757,7 @@ mod tests {
                 changed_seconds: 1,
                 changed_nanoseconds: 0,
             },
-        )
-        .expect("single immutable source");
+        );
 
         let bytes = source
             .read_at(2, 3, &|| false, |part, start, end| {

@@ -16,9 +16,9 @@ from comet.discovery.torrent_models import ScrapeRequest
 from comet.services.anime import anime_mapper
 from comet.utils.network_manager import network_manager
 from comet.utils.parsing import (
+    SCRAPE_URL_MODE_BOTH,
     associate_urls_credentials,
     parse_url_scrape_mode,
-    url_mode_matches_context,
 )
 
 SERVER_TORRENT_ACCOUNT_PARTITION = hashlib.sha256(
@@ -37,9 +37,6 @@ class TorrentAdapterRegistry:
         path = Path(__file__).parent / "adapters" / "torrent"
 
         for _, module_name, _ in pkgutil.iter_modules([str(path)]):
-            if module_name == "helpers":
-                continue
-
             module = importlib.import_module(f"{package}.{module_name}")
 
             # Find classes inheriting from TorrentDiscoveryAdapter
@@ -52,27 +49,9 @@ class TorrentAdapterRegistry:
                     self.adapter_types[obj.__name__] = obj
 
     @staticmethod
-    def _resolve_timeout(
-        scraper_class: type[TorrentDiscoveryAdapter], context: ScrapeContext
-    ) -> float:
-        normalized_name = normalize_scraper_name(scraper_class.__name__)
-        overrides = settings.SCRAPER_TIMEOUT_OVERRIDES
-        context_selector = f"{normalized_name}:{context.value}"
-        if context_selector in overrides:
-            return overrides[context_selector]
-        if normalized_name in overrides:
-            return overrides[normalized_name]
-
-        return (
-            settings.LIVE_SCRAPE_TIMEOUT
-            if context == ScrapeContext.LIVE
-            else settings.BACKGROUND_SCRAPE_TIMEOUT
-        )
-
-    @staticmethod
     def _resolve_url_for_context(url: str, context: str):
         parsed_url, mode = parse_url_scrape_mode(url)
-        if not parsed_url or not url_mode_matches_context(mode, context):
+        if not parsed_url or mode not in (SCRAPE_URL_MODE_BOTH, context):
             return None
         return parsed_url
 
@@ -122,7 +101,6 @@ class TorrentAdapterRegistry:
                 if not url_credentials_pairs:
                     continue
 
-            scrape_timeout = self._resolve_timeout(scraper_class, request.context)
             client = network_manager.get_client(
                 scraper_name=scraper_name_clean, impersonate=scraper_class.impersonate
             )
@@ -133,16 +111,14 @@ class TorrentAdapterRegistry:
                     scraper_name_clean,
                     scraper_class,
                     client,
-                    scrape_timeout,
                     url_credentials_pairs,
                 )
             else:
-                scraper = scraper_class(self, client)
+                scraper = scraper_class(client)
                 self._register_adapter(
                     adapters,
                     scraper_name_clean,
                     scraper,
-                    scrape_timeout,
                 )
         return adapters
 
@@ -193,13 +169,12 @@ class TorrentAdapterRegistry:
         scraper_name,
         scraper_class,
         client,
-        scrape_timeout,
         url_credentials,
     ) -> None:
         for active_instance_count, (url, credentials) in enumerate(
             url_credentials, start=1
         ):
-            args = (self, client, url)
+            args = (client, url)
             if scraper_class.credential_setting is not None:
                 args += (credentials,)
             scraper = scraper_class(*args)
@@ -207,7 +182,6 @@ class TorrentAdapterRegistry:
                 adapters,
                 f"{scraper_name} #{active_instance_count}",
                 scraper,
-                scrape_timeout,
             )
 
     @staticmethod
@@ -215,7 +189,6 @@ class TorrentAdapterRegistry:
         adapters: dict[str, TorrentDiscoveryAdapter],
         display_name: str,
         adapter: TorrentDiscoveryAdapter,
-        timeout: float,
     ) -> None:
         source_key = "server-torrent:" + normalize_scraper_name(
             display_name.partition(" #")[0]
@@ -226,7 +199,6 @@ class TorrentAdapterRegistry:
             configuration_id = instance_discovery_source_id(f"{source_key}:{suffix}")
             suffix += 1
         adapter.discovery_name = display_name
-        adapter.discovery_timeout = timeout
         adapters[configuration_id] = adapter
 
 

@@ -4,8 +4,8 @@ from comet.discovery.torrent_models import ScrapeRequest
 
 
 class DMMScraper(TorrentDiscoveryAdapter):
-    def __init__(self, manager, session):
-        super().__init__(manager, session, "DMM")
+    def __init__(self, session):
+        super().__init__(session, "DMM")
 
     async def scrape(self, request: ScrapeRequest):
         if not settings.DMM_INGEST_ENABLED:

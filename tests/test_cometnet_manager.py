@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from comet.cometnet.manager import CometNetService
 from comet.cometnet.pools import MemberRole, PoolManifest, PoolMember, PoolStore
-from comet.cometnet.protocol import PoolManifestMessage, PoolMemberUpdate
+from comet.cometnet.protocol import (
+    PoolJoinRequest,
+    PoolManifestMessage,
+    PoolMemberUpdate,
+)
 from comet.utils.atomic_file import write_text_atomic
 
 
@@ -29,6 +33,10 @@ class CometNetManagerTests(unittest.IsolatedAsyncioTestCase):
         for signer, accepted in [("rogue-key", False), ("creator-key", True)]:
             with self.subTest(signer=signer):
                 service = CometNetService(enabled=True)
+                service.identity = Mock(
+                    node_id="local-node",
+                    sign_hex_async=AsyncMock(return_value="relay-signature"),
+                )
                 service.pool_store = Mock(
                     get_manifest=Mock(return_value=self._pool_manifest()),
                     store_manifest=AsyncMock(),
@@ -56,17 +64,23 @@ class CometNetManagerTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(
                         service, "_send_pool_manifest", new=AsyncMock()
                     ) as send_manifest,
+                    patch.object(
+                        service, "_broadcast_pool_manifest", new=AsyncMock()
+                    ) as broadcast_manifest,
                 ):
                     await service._apply_pool_member_update("relay-node", message)
 
                 verify_delta.assert_awaited_once()
                 if accepted:
                     service.pool_store.store_manifest.assert_awaited_once()
-                    service.transport.broadcast.assert_awaited_once()
+                    broadcast_manifest.assert_awaited_once()
+                    self.assertEqual(
+                        broadcast_manifest.await_args.kwargs["exclude"], {"relay-node"}
+                    )
                     send_manifest.assert_not_awaited()
                 else:
                     service.pool_store.store_manifest.assert_not_awaited()
-                    service.transport.broadcast.assert_not_awaited()
+                    broadcast_manifest.assert_not_awaited()
                     send_manifest.assert_awaited_once()
 
     async def test_self_leave_is_persisted_only_as_admin_signed_state(self):
@@ -148,6 +162,10 @@ class CometNetManagerTests(unittest.IsolatedAsyncioTestCase):
             store = PoolStore(directory)
             await store.store_manifest(self._pool_manifest())
             service = CometNetService(enabled=True)
+            service.identity = Mock(
+                node_id="local-node",
+                sign_hex_async=AsyncMock(return_value="relay-signature"),
+            )
             service.pool_store = store
             service.transport = Mock(broadcast=AsyncMock())
             active_writes = 0
@@ -252,6 +270,25 @@ class CometNetManagerTests(unittest.IsolatedAsyncioTestCase):
         ):
             await service._handle_pool_manifest("peer", message)
 
+    async def test_join_request_key_must_match_authenticated_sender(self):
+        service = CometNetService(enabled=True)
+        service.pool_store = Mock(accept_invite_member=AsyncMock())
+        message = PoolJoinRequest(
+            sender_id="peer",
+            signature="signature",
+            pool_id="pool-a",
+            invite_code="invite-code",
+            requester_key="different-key",
+        )
+
+        with patch(
+            "comet.cometnet.manager.validate_message_security",
+            new=AsyncMock(return_value=True),
+        ):
+            await service._handle_pool_join_request("peer", message)
+
+        service.pool_store.accept_invite_member.assert_not_awaited()
+
     async def test_shutdown_continues_after_cleanup_failures(self):
         service = CometNetService(enabled=True)
         service._running = True
@@ -277,7 +314,7 @@ class CometNetManagerTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.stopped = 0
 
-            def stop(self):
+            async def stop(self):
                 self.stopped += 1
 
         gossip = Component(RuntimeError("gossip stop failed"))
@@ -291,6 +328,7 @@ class CometNetManagerTests(unittest.IsolatedAsyncioTestCase):
         service.upnp = upnp
 
         with (
+            patch.object(service, "_save_state", new=AsyncMock()),
             patch("comet.cometnet.manager.shutdown_crypto_executor") as shutdown_crypto,
             self.assertRaisesRegex(RuntimeError, "pool save failed"),
         ):
@@ -316,7 +354,7 @@ class CometNetManagerTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.stopped = 0
 
-            def stop(self):
+            async def stop(self):
                 self.stopped += 1
 
         transport = Component()

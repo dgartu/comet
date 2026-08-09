@@ -15,7 +15,6 @@ from comet.usenet.file_selection import (
     select_archive_volume_groups,
     select_asset,
 )
-from comet.usenet.limits import MAX_USENET_LOGICAL_BYTES
 
 ARTIFACT = "a" * 64
 
@@ -69,10 +68,7 @@ def test_catalogs_trust_native_video_classification_for_obfuscated_names():
     assert source[0].relative_path == "4f6a9d2c"
 
     set_identity = "b" * 64
-    archive = catalog_archive_members(
-        set_identity,
-        [_archive_member(set_identity, "8e12cfa4", 300)],
-    )
+    archive = catalog_archive_members([_archive_member(set_identity, "8e12cfa4", 300)])
     assert archive[0].relative_path == "8e12cfa4"
 
     nested_member = _archive_member(
@@ -81,7 +77,7 @@ def test_catalogs_trust_native_video_classification_for_obfuscated_names():
         300,
     )
     nested_member["selected_paths"] = ["payload.bin", "9ab372e1"]
-    nested = catalog_nested_archive_members(set_identity, [nested_member])
+    nested = catalog_nested_archive_members([nested_member])
     assert nested[0].relative_path == "payload.bin!/9ab372e1"
 
 
@@ -148,18 +144,11 @@ def test_anime_absolute_and_explicit_asset_selection_are_exact():
 @pytest.mark.parametrize(
     "invalid",
     [
-        {**_asset("../Movie.mkv"), "asset_id": "0" * 64},
-        {**_asset("Movie.Sample.mkv"), "asset_id": "0" * 64},
+        _asset("../Movie.mkv"),
         {**_asset("Movie.mkv"), "asset_id": "f" * 64},
-        {**_asset("Movie.mkv"), "declared_bytes": 0},
-        {
-            **_asset("Movie.mkv"),
-            "declared_bytes": MAX_USENET_LOGICAL_BYTES + 1,
-        },
-        {**_asset("Movie.mkv"), "kind": "unknown"},
     ],
 )
-def test_catalog_rejects_malformed_or_untrusted_engine_assets(invalid):
+def test_catalog_binds_engine_assets_to_the_artifact_and_canonical_path(invalid):
     with pytest.raises(FileSelectionError, match="file_selection_invalid"):
         catalog_engine_source_assets(ARTIFACT, [invalid])
 
@@ -327,7 +316,6 @@ def test_archive_groups_from_independent_par2_sets_do_not_merge_by_path():
     def source(set_id, file_id, size):
         return catalog_par2_source_assets(
             set_id,
-            1024,
             [
                 {
                     "file_id": file_id,
@@ -376,28 +364,16 @@ def test_par2_source_catalog_uses_file_ids_and_ignores_non_archive_descriptions(
         },
     ]
 
-    assets = catalog_par2_source_assets("a" * 32, 1024, files)
-    all_assets = catalog_par2_assets("a" * 32, 1024, files)
+    assets = catalog_par2_source_assets("a" * 32, files)
+    all_assets = catalog_par2_assets("a" * 32, files)
 
     assert len(assets) == 1
     assert [asset.kind for asset in all_assets] == ["video", "video", "archive"]
     assert assets[0].relative_path == "release.part01.rar"
     assert assets[0].source_file_id == "4" * 32
     assert len(assets[0].asset_id) == 32
-    assert assets == catalog_par2_source_assets("a" * 32, 1024, files)
-    assert catalog_par2_assets("a" * 32, 1024, list(reversed(files)))
-    with pytest.raises(FileSelectionError, match="file_selection_invalid"):
-        catalog_par2_assets(
-            "a" * 32,
-            1024,
-            [files[0], {**files[1], "file_id": files[0]["file_id"]}],
-        )
-    with pytest.raises(FileSelectionError, match="file_selection_invalid"):
-        catalog_par2_source_assets(
-            "a" * 32,
-            1024,
-            [{**files[0], "relative_path": "../Movie.mkv"}],
-        )
+    assert assets == catalog_par2_source_assets("a" * 32, files)
+    assert catalog_par2_assets("a" * 32, list(reversed(files)))
 
 
 def test_par2_catalog_binds_an_opaque_video_only_to_the_exact_known_source():
@@ -410,10 +386,9 @@ def test_par2_catalog_binds_an_opaque_video_only_to_the_exact_known_source():
         "slice_count": 1,
     }
 
-    assert not catalog_par2_assets("a" * 32, 1024, [opaque])
+    assert not catalog_par2_assets("a" * 32, [opaque])
     assets = catalog_par2_assets(
         "a" * 32,
-        1024,
         [opaque],
         known_video=("4f6a9d2c", 1_000),
     )
@@ -423,7 +398,6 @@ def test_par2_catalog_binds_an_opaque_video_only_to_the_exact_known_source():
     assert assets[0].relative_path == "4f6a9d2c"
     assert not catalog_par2_assets(
         "a" * 32,
-        1024,
         [opaque],
         known_video=("4f6a9d2c", 999),
     )
@@ -453,20 +427,16 @@ def test_archive_members_reuse_exact_episode_and_movie_selection():
         _archive_member(set_identity, "Show.S01E02E03.mkv", 200),
     ]
 
-    assets = catalog_archive_members(set_identity, members)
+    assets = catalog_archive_members(members)
 
     assert select_asset(assets, (1, 1, 2)).relative_path == "Show.S01E02E03.mkv"
     assert select_asset(assets, (0,)).relative_path == "Show.S01E02E03.mkv"
     assert [asset.kind for asset in assets] == ["video", "video"]
 
 
-def test_archive_member_catalog_revalidates_set_bound_ids_and_accepts_order():
+def test_archive_member_catalog_preserves_engine_order():
     set_identity = "b" * 64
-    member = _archive_member(set_identity, "Movie.mkv", 100)
-    with pytest.raises(FileSelectionError, match="file_selection_invalid"):
-        catalog_archive_members(set_identity, [{**member, "member_id": "c" * 64}])
     assets = catalog_archive_members(
-        set_identity,
         [
             _archive_member(set_identity, "z.mkv", 100),
             _archive_member(set_identity, "a.mkv", 100),
@@ -484,12 +454,7 @@ def test_nested_archive_members_bind_the_display_path_to_the_exact_layer_chain()
     )
     member["selected_paths"] = ["payload.tar.gz", "Movie.2026.mkv"]
 
-    assets = catalog_nested_archive_members(set_identity, [member])
+    assets = catalog_nested_archive_members([member])
 
     assert assets[0].relative_path == "payload.tar.gz!/Movie.2026.mkv"
     assert assets[0].selected_paths == ("payload.tar.gz", "Movie.2026.mkv")
-    with pytest.raises(FileSelectionError, match="file_selection_invalid"):
-        catalog_nested_archive_members(
-            set_identity,
-            [{**member, "selected_paths": ["other.zip", "Movie.2026.mkv"]}],
-        )

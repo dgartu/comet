@@ -24,17 +24,17 @@ _SESSION_CHECK_SECONDS = 5
 
 
 def event_filters(
-    search: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
-    category: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
+    search: str | None = None,
+    category: str | None = None,
     level: EventLevel | None = None,
     instance_id: Annotated[str | None, Query(pattern=r"^[0-9a-f]{32}$")] = None,
-    role: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
+    role: str | None = None,
     request_id: Annotated[str | None, Query(pattern=r"^[0-9a-f]{32}$")] = None,
     run_id: Annotated[str | None, Query(pattern=r"^[0-9a-f]{32}$")] = None,
     connection_id: Annotated[str | None, Query(pattern=r"^[0-9a-f]{32}$")] = None,
-    media_type: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
-    provider_name: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
-    outcome: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
+    media_type: str | None = None,
+    provider_name: str | None = None,
+    outcome: str | None = None,
     started_at: Annotated[float | None, Query(ge=0)] = None,
     ended_at: Annotated[float | None, Query(ge=0)] = None,
 ) -> EventFilters:

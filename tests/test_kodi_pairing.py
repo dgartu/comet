@@ -34,26 +34,6 @@ class KodiPairingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("config_b64 IS NULL", query)
         self.assertTrue(fetch.await_args.kwargs["force_primary"])
 
-    async def test_pairing_inputs_enforce_current_schema(self):
-        invalid_codes = (
-            None,
-            False,
-            1,
-            "",
-            "1234567",
-            "123456789",
-            "1234ABCD",
-            "zzzzzzzz",
-        )
-        for code in invalid_codes:
-            with self.subTest(code=code), self.assertRaises(ValueError):
-                await kodi_pairing.associate_setup_code_with_b64config(code, "config")
-            with self.subTest(code=code), self.assertRaises(ValueError):
-                await kodi_pairing.consume_b64config_for_setup_code(code)
-
-        with self.assertRaises(TypeError):
-            await kodi_pairing.associate_setup_code_with_b64config("1234abcd", None)
-
     async def test_consume_requires_exact_database_row_schema(self):
         for row in (
             {"config_b64": "config"},

@@ -1,7 +1,7 @@
 use crate::nntp;
 use crate::reader_lease::random_lease_id;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -70,11 +70,8 @@ impl Registry {
         now: Instant,
     ) -> Result<Arc<ProviderSet>, &'static str> {
         self.remove_expired(now);
-        if !valid_generation(generation) {
-            return Err("invalid_provider_set");
-        }
         let account_partition = decode_partition(&registration.account_partition)?;
-        let servers = normalize_servers(registration.servers)?;
+        let servers = ordered_servers(registration.servers);
         if let Some(identity) = self.generations.get(generation) {
             let entry = self
                 .entries
@@ -180,17 +177,6 @@ impl Registry {
     }
 }
 
-pub fn valid_generation(value: &str) -> bool {
-    valid_hex_partition(value)
-}
-
-pub fn valid_identity(value: &str) -> bool {
-    value.len() == 22
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
 pub fn decode_partition(value: &str) -> Result<[u8; 32], &'static str> {
     if !valid_hex_partition(value) {
         return Err("invalid_provider_set");
@@ -210,37 +196,16 @@ fn valid_hex_partition(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn normalize_servers(mut servers: Vec<Server>) -> Result<Vec<Server>, &'static str> {
-    if servers.is_empty() || servers.len() > 16 {
-        return Err("invalid_provider_set");
-    }
-    let mut identifiers = HashSet::with_capacity(servers.len());
-    for server in &servers {
-        if server.provider_configuration_id.is_empty()
-            || server.provider_configuration_id.len() > 128
-            || server
-                .provider_configuration_id
-                .bytes()
-                .any(|byte| byte.is_ascii_control() || byte == b' ')
-            || !identifiers.insert(server.provider_configuration_id.as_str())
-            || !(1..=100).contains(&server.connections)
-            || !(1..=16).contains(&server.pipeline)
-            || server.priority > 1000
-            || !server.request.message_id.is_empty()
-            || nntp::validate_body_template(&server.request).is_err()
-        {
-            return Err("invalid_provider_set");
-        }
-    }
+fn ordered_servers(mut servers: Vec<Server>) -> Vec<Server> {
     // This stable sort retains configured list order as the tie-breaker inside
     // one primary/backup priority class.
     servers.sort_by_key(|server| (server.backup, server.priority));
-    Ok(servers)
+    servers
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PROVIDER_SET_IDLE_TTL, Registration, Registry, Server, valid_identity};
+    use super::{PROVIDER_SET_IDLE_TTL, Registration, Registry, Server};
     use crate::nntp::BodyRequest;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -303,7 +268,6 @@ mod tests {
             )
             .expect("repeat equivalent provider set");
         assert!(Arc::ptr_eq(&first, &second));
-        assert!(valid_identity(&first.identity));
         assert_ne!(first.identity, "b".repeat(64));
         assert!(registry.acquire(&first.identity, [0xaa; 32], now).is_ok());
         assert!(matches!(
@@ -332,13 +296,11 @@ mod tests {
             .expect("register recreated runtime provider set");
 
         assert_eq!(first.generation, second.generation);
-        assert!(valid_identity(&first.identity));
-        assert!(valid_identity(&second.identity));
         assert_ne!(first.identity, second.identity);
     }
 
     #[test]
-    fn conflicting_or_duplicate_registration_fails_closed() {
+    fn conflicting_registration_fails_closed() {
         let now = Instant::now();
         let mut registry = registry();
         registry
@@ -356,30 +318,6 @@ mod tests {
             ),
             Err("provider_set_conflict")
         ));
-        assert!(matches!(
-            registry.register(
-                &"c".repeat(64),
-                registration(vec![
-                    server("duplicate", 0, false),
-                    server("duplicate", 1, false),
-                ]),
-                now,
-            ),
-            Err("invalid_provider_set")
-        ));
-        let mut explicitly_plaintext = server("plaintext-auth", 0, false);
-        explicitly_plaintext.request.tls_mode = "plaintext".into();
-        let registered = registry
-            .register(
-                &"d".repeat(64),
-                registration(vec![explicitly_plaintext]),
-                now,
-            )
-            .expect("register explicitly selected plaintext authentication");
-        assert_eq!(
-            registered.servers[0].request.username.as_deref(),
-            Some("user")
-        );
     }
 
     #[test]

@@ -49,9 +49,9 @@ REQUEST = ScrapeRequest(
 class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_and_payload_failures_propagate(self):
         with self.assertRaisesRegex(RuntimeError, "HTTP 404"):
-            await PeerflixScraper(None, _Session({}, status=404)).scrape(REQUEST)
+            await PeerflixScraper(_Session({}, status=404)).scrape(REQUEST)
         with self.assertRaises(TypeError):
-            await CometScraper(None, _Session([]), "https://comet.test").scrape(REQUEST)
+            await CometScraper(_Session([]), "https://comet.test").scrape(REQUEST)
 
     def test_stream_parsers_expose_missing_consumed_fields(self):
         cases = (
@@ -86,7 +86,7 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
         session = _Session(payload)
-        scraper = MediaFusionScraper(None, session, "https://mf.test", "secret")
+        scraper = MediaFusionScraper(session, "https://mf.test", "secret")
 
         torrents = await scraper.scrape(REQUEST)
 
@@ -118,7 +118,6 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
         }
         session = _Session(payload)
         scraper = AiostreamsScraper(
-            None,
             session,
             "https://aio.test",
             "user:password",
@@ -153,7 +152,7 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         }
-        scraper = TorrentsDBScraper(None, _Session(payload))
+        scraper = TorrentsDBScraper(_Session(payload))
 
         torrents = await scraper.scrape(REQUEST)
 
@@ -180,7 +179,7 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         }
-        scraper = PeerflixScraper(None, _Session(payload))
+        scraper = PeerflixScraper(_Session(payload))
 
         torrents = await scraper.scrape(REQUEST)
 
@@ -212,7 +211,7 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         }
-        scraper = CometScraper(None, _Session(payload), "https://comet.test")
+        scraper = CometScraper(_Session(payload), "https://comet.test")
 
         torrents = await scraper.scrape(REQUEST)
 
@@ -232,7 +231,7 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
                 {"title": "Second.Movie", "infoHash": "c" * 40},
             ]
         }
-        scraper = JackettioScraper(None, _Session(payload), "https://jackettio.test")
+        scraper = JackettioScraper(_Session(payload), "https://jackettio.test")
 
         torrents = await scraper.scrape(REQUEST)
 
@@ -263,7 +262,7 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         }
-        scraper = SeaDexScraper(None, _Session(payload))
+        scraper = SeaDexScraper(_Session(payload))
         with (
             patch(
                 "comet.discovery.adapters.torrent.seadex.anime_mapper.is_loaded",
@@ -282,7 +281,7 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([torrent["fileIndex"] for torrent in torrents], [0, 0])
 
     async def test_seadex_exposes_malformed_results(self):
-        scraper = SeaDexScraper(None, _Session({"items": [None]}))
+        scraper = SeaDexScraper(_Session({"items": [None]}))
         with (
             patch(
                 "comet.discovery.adapters.torrent.seadex.anime_mapper.is_loaded",
@@ -309,7 +308,7 @@ class StreamAddonScraperTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         }
-        scraper = DebridioScraper(None, _Session(payload))
+        scraper = DebridioScraper(_Session(payload))
         with patch(
             "comet.discovery.adapters.torrent.debridio._debridio_config",
             return_value="config",

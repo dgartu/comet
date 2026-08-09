@@ -1,7 +1,7 @@
 import re
 
 import mediaflow_proxy.utils.http_utils
-from fastapi import APIRouter, BackgroundTasks, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import RedirectResponse
 
 from comet.core.config_validation import config_check
@@ -31,20 +31,6 @@ from comet.utils.network import get_client_ip, get_client_ip_any
 router = APIRouter()
 _INFO_HASH_PATTERN = re.compile(r"[0-9a-f]{40}")
 _NONNEGATIVE_INTEGER_PATTERN = re.compile(r"0|[1-9][0-9]*")
-_build_playback_media_id = build_playback_media_id
-_valid_download_url = valid_download_url
-
-
-def _bounded_query_text(value, *, maximum_bytes: int) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    try:
-        size = len(value.encode("utf-8"))
-    except UnicodeEncodeError:
-        return False
-    return size <= maximum_bytes and all(
-        ord(character) >= 32 and ord(character) != 127 for character in value
-    )
 
 
 def _parse_optional_path_integer(value: str) -> int | None:
@@ -99,10 +85,10 @@ async def playback(
     index: str,
     season: str,
     episode: str,
-    torrent_name: str = Query(max_length=2_048),
-    name: str = Query(max_length=2_048),
-    media_id: str | None = Query(default=None, max_length=128),
-    media_type: str | None = Query(default=None, max_length=16),
+    torrent_name: str,
+    name: str,
+    media_id: str | None = None,
+    media_type: str | None = None,
     background_tasks: BackgroundTasks = None,
 ):
     config = config_check(b64config)
@@ -119,15 +105,7 @@ async def playback(
 
     if media_id:
         request.state.comet_content_id = media_id
-    if (
-        not _bounded_query_text(torrent_name, maximum_bytes=2_048)
-        or not _bounded_query_text(name, maximum_bytes=2_048)
-        or (
-            media_id is not None
-            and not _bounded_query_text(media_id, maximum_bytes=128)
-        )
-        or media_type not in {None, "movie", "series"}
-    ):
+    if media_type not in {None, "movie", "series"}:
         return build_status_video_response(
             ["BAD_REQUEST"],
             default_key="BAD_REQUEST",
@@ -267,7 +245,7 @@ async def playback(
             download_url,
             mediaflow_proxy.utils.http_utils.get_proxy_headers(request),
             media_id=torrent_name,
-            ip=get_client_ip_any(request)[0],
+            ip=get_client_ip_any(request),
             source_type="torrent",
             service=debrid_service,
         )

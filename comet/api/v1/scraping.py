@@ -32,7 +32,15 @@ router = APIRouter(prefix="/admin/scraping", tags=["API v1 Scraping"])
 QueueKind = Literal["item", "episode"]
 QueueAction = Literal["retry", "defer", "abandon"]
 ControlAction = Literal["start", "stop", "pause", "resume", "drain", "cancel_drain"]
-_QUEUE_STATUSES = ("discovered", "running", "success", "failed", "dead", "deferred")
+QueueStatus = Literal["discovered", "running", "success", "failed", "dead", "deferred"]
+_QUEUE_STATUSES: tuple[QueueStatus, ...] = (
+    "discovered",
+    "running",
+    "success",
+    "failed",
+    "dead",
+    "deferred",
+)
 _RUNTIME_FRESH_SECONDS = 2
 
 
@@ -129,7 +137,11 @@ async def scraping_snapshot(
                 CASE
                     WHEN (next_retry_at IS NULL OR next_retry_at <= :now)
                      AND (last_success_at IS NULL OR last_success_at <= :success_cutoff)
-                     AND (status != 'dead' OR consecutive_failures < :max_retries)
+                     AND (
+                         :retry_unlimited = 1
+                         OR status != 'dead'
+                         OR consecutive_failures < :max_retries
+                     )
                     THEN COALESCE(next_retry_at, created_at, :now)
                 END
             ) AS oldest_ready_at,
@@ -137,7 +149,11 @@ async def scraping_snapshot(
                 CASE
                     WHEN (next_retry_at IS NULL OR next_retry_at <= :now)
                      AND (last_success_at IS NULL OR last_success_at <= :success_cutoff)
-                     AND (status != 'dead' OR consecutive_failures < :max_retries)
+                     AND (
+                         :retry_unlimited = 1
+                         OR status != 'dead'
+                         OR consecutive_failures < :max_retries
+                     )
                     THEN 1 ELSE 0
                 END
             ) AS ready
@@ -147,11 +163,8 @@ async def scraping_snapshot(
         {
             "now": now,
             "success_cutoff": success_cutoff,
-            "max_retries": (
-                settings.BACKGROUND_SCRAPER_MAX_RETRIES
-                if settings.BACKGROUND_SCRAPER_MAX_RETRIES >= 0
-                else 1_000_000
-            ),
+            "max_retries": settings.BACKGROUND_SCRAPER_MAX_RETRIES,
+            "retry_unlimited": int(settings.BACKGROUND_SCRAPER_MAX_RETRIES < 0),
         },
         force_primary=True,
     )
@@ -258,15 +271,9 @@ async def scraper_queue(
     kind: Annotated[QueueKind, Path()],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: Annotated[str | None, Query(max_length=256)] = None,
-    status: Annotated[str | None, Query(max_length=32)] = None,
-    search: Annotated[str | None, Query(max_length=128)] = None,
+    status: QueueStatus | None = None,
+    search: str | None = None,
 ):
-    if status is not None and status not in _QUEUE_STATUSES:
-        raise ApiProblem(
-            status_code=422,
-            code="invalid_queue_status",
-            message="The requested queue status is invalid.",
-        )
     values: dict[str, object] = {"limit": limit + 1}
     predicates = ["1 = 1"]
     if cursor is not None:
@@ -437,7 +444,7 @@ async def mutate_scraper_queue(
     kind: Annotated[QueueKind, Path()],
     resource_id: Annotated[
         str,
-        Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9:_-]+$"),
+        Path(min_length=1, pattern=r"^[A-Za-z0-9:_-]+$"),
     ],
     action: Annotated[QueueAction, Path()],
 ):
@@ -453,11 +460,7 @@ async def mutate_scraper_queue(
     else:
         state = (
             "dead",
-            (
-                settings.BACKGROUND_SCRAPER_MAX_RETRIES
-                if settings.BACKGROUND_SCRAPER_MAX_RETRIES >= 0
-                else 1_000_000
-            ),
+            None,
             None,
         )
     table, key = (

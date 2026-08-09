@@ -1,8 +1,8 @@
 import aiohttp
 
-from comet.core.constants import catalog_timeout
-from comet.core.provider_json import read_provider_json
+from comet.core.provider_json import read_json_object
 from comet.metadata.validation import episode_coordinate
+from comet.utils.http_client import http_client_manager
 
 
 def _extract_catalog_page(payload: dict) -> tuple[list[dict], bool, int]:
@@ -12,7 +12,7 @@ def _extract_catalog_page(payload: dict) -> tuple[list[dict], bool, int]:
 
     return (
         [meta for meta in metas if type(meta) is dict],
-        payload.get("hasMore") is not False,
+        bool(payload.get("hasMore", True)),
         len(metas),
     )
 
@@ -74,17 +74,14 @@ class CinemetaClient:
 
     def __init__(self, session: aiohttp.ClientSession | None = None):
         self.session = session
-        self._owns_session = session is None
 
     async def __aenter__(self):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
-            self._owns_session = True
+            self.session = await http_client_manager.get_session()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self._owns_session and self.session and not self.session.closed:
-            await self.session.close()
+        return False
 
     async def _fetch_catalog_page(
         self, media_type: str, category: str, skip: int = 0, genre: str | None = None
@@ -98,11 +95,10 @@ class CinemetaClient:
 
         async with self.session.get(
             url,
-            timeout=catalog_timeout(),
             allow_redirects=False,
         ) as response:
             response.raise_for_status()
-            return await read_provider_json(response)
+            return await read_json_object(response)
 
     async def fetch_all_from_category(
         self,
@@ -139,11 +135,10 @@ class CinemetaClient:
         url = f"{self.META_BASE_URL}/meta/series/{series_id}.json"
         async with self.session.get(
             url,
-            timeout=catalog_timeout(),
             allow_redirects=False,
         ) as response:
             if response.status == 404:
                 return []
             response.raise_for_status()
-            data = await read_provider_json(response)
+            data = await read_json_object(response)
         return _extract_series_episodes(data)

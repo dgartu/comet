@@ -143,6 +143,7 @@
     "preview": {
       "audio": "DDP 5.1 · 애트모스",
       "languages": "🇬🇧 / 🇫🇷",
+      "subtitles": "💬 🇬🇧 / 🇫🇷",
       "quality": "블루레이",
       "releaseGroup": "YTS",
       "seeders": "시더 1,234개",
@@ -846,7 +847,6 @@
     },
     "detail": {
       "timestamp": "타임스탬프",
-      "context": "컨텍스트",
       "process": "프로세스",
       "errorCode": "오류 코드",
       "safeDetails": "안전한 구조화 세부 정보",

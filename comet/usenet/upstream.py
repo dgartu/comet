@@ -4,6 +4,7 @@ from collections.abc import Collection
 from urllib.parse import urlsplit, urlunsplit
 
 from comet.usenet.outbound import configured_http_origin
+from comet.utils.text import has_ascii_control
 
 
 class UpstreamUrlError(ValueError):
@@ -23,16 +24,13 @@ def normalize_upstream_base_url(
     if not isinstance(value, str) or not value:
         raise UpstreamUrlError("configuration_invalid")
     try:
-        encoded = value.encode("utf-8")
+        value.encode("utf-8")
     except UnicodeEncodeError:
         raise UpstreamUrlError("configuration_invalid") from None
     if (
-        len(encoded) > 1024
-        or "\\" in value
-        or any(
-            character.isspace() or ord(character) < 32 or ord(character) == 127
-            for character in value
-        )
+        "\\" in value
+        or has_ascii_control(value)
+        or any(character.isspace() for character in value)
     ):
         raise UpstreamUrlError("configuration_invalid")
     try:

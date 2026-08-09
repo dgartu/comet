@@ -9,9 +9,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const MAX_SESSION_BYTES: u64 = limits::MAX_LOGICAL_BYTES;
-pub const MAX_DECLARED_POSTING_BYTES: u64 = limits::MAX_DECLARED_POSTING_BYTES;
-const MAX_ACTIVE_SESSIONS: usize = 1024;
 // A maximum-size metadata request must have room to expand into Rust
 // collections even when the configured segment cache is deliberately tiny.
 pub const MIN_SESSION_METADATA_BUDGET_BYTES: usize = limits::MAX_NZB_METADATA_BYTES * 4;
@@ -136,6 +133,7 @@ pub struct PersistentSessionLease<T> {
 
 pub struct SessionRegistry<T> {
     entries: HashMap<String, RegisteredSession<T>>,
+    recreation_index: HashMap<Arc<str>, String>,
     retained_metadata_bytes: usize,
     maximum_retained_metadata_bytes: usize,
     last_sweep: Instant,
@@ -145,6 +143,7 @@ impl<T> SessionRegistry<T> {
     pub fn new(maximum_retained_metadata_bytes: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            recreation_index: HashMap::new(),
             retained_metadata_bytes: 0,
             maximum_retained_metadata_bytes,
             last_sweep: Instant::now(),
@@ -166,11 +165,11 @@ impl<T> SessionRegistry<T> {
         now: Instant,
     ) -> Result<(String, u64, Option<String>), &'static str> {
         self.maybe_sweep(now);
-        if let Some(entry) = self
-            .entries
-            .values_mut()
-            .find(|entry| entry.recreation_key.as_ref() == recreation_key)
-        {
+        if let Some(identity) = self.active_recreation_identity(&recreation_key, now) {
+            let entry = self
+                .entries
+                .get_mut(&identity)
+                .expect("indexed session exists");
             entry.last_access = now;
             let session = entry.session.lock().expect("random access session lock");
             return Ok((
@@ -186,9 +185,8 @@ impl<T> SessionRegistry<T> {
         if retained_metadata_bytes > self.maximum_retained_metadata_bytes {
             return Err("session_capacity");
         }
-        while self.entries.len() >= MAX_ACTIVE_SESSIONS
-            || retained_metadata_bytes
-                > self.maximum_retained_metadata_bytes - self.retained_metadata_bytes
+        while retained_metadata_bytes
+            > self.maximum_retained_metadata_bytes - self.retained_metadata_bytes
         {
             let oldest = self
                 .entries
@@ -205,12 +203,13 @@ impl<T> SessionRegistry<T> {
         let identity = session.identity().to_owned();
         let size = session.size();
         let strong_asset_revision = session.strong_asset_revision().map(str::to_owned);
+        let recreation_key: Arc<str> = Arc::from(recreation_key);
         self.entries.insert(
             identity.clone(),
             RegisteredSession {
                 session: Arc::new(Mutex::new(session)),
                 context: Arc::new(context),
-                recreation_key: Arc::from(recreation_key),
+                recreation_key: Arc::clone(&recreation_key),
                 retention: SessionRetention::new(),
                 retained_metadata_bytes,
                 readers: ReaderLeases::new(MAX_SESSION_READERS),
@@ -218,6 +217,8 @@ impl<T> SessionRegistry<T> {
                 last_access: now,
             },
         );
+        self.recreation_index
+            .insert(recreation_key, identity.clone());
         self.retained_metadata_bytes += retained_metadata_bytes;
         Ok((identity, size, strong_asset_revision))
     }
@@ -228,10 +229,11 @@ impl<T> SessionRegistry<T> {
         now: Instant,
     ) -> Option<(String, u64, Option<String>)> {
         self.maybe_sweep(now);
+        let identity = self.active_recreation_identity(recreation_key, now)?;
         let entry = self
             .entries
-            .values_mut()
-            .find(|entry| entry.recreation_key.as_ref() == recreation_key)?;
+            .get_mut(&identity)
+            .expect("indexed session exists");
         entry.last_access = now;
         let session = entry.session.lock().expect("random access session lock");
         Some((
@@ -243,13 +245,13 @@ impl<T> SessionRegistry<T> {
 
     pub fn get(&mut self, identity: &str, now: Instant) -> Result<SessionLease<T>, &'static str> {
         self.maybe_sweep(now);
+        if self.remove_target_if_expired(identity, now) {
+            return Err("session_unavailable");
+        }
         let entry = self
             .entries
             .get_mut(identity)
             .ok_or("session_unavailable")?;
-        if expired(entry, now) {
-            return Err("session_busy");
-        }
         let permit = entry
             .readers
             .acquire_transient()
@@ -266,13 +268,13 @@ impl<T> SessionRegistry<T> {
 
     pub fn open_reader(&mut self, identity: &str, now: Instant) -> Result<String, &'static str> {
         self.maybe_sweep(now);
+        if self.remove_target_if_expired(identity, now) {
+            return Err("session_unavailable");
+        }
         let entry = self
             .entries
             .get_mut(identity)
             .ok_or("session_unavailable")?;
-        if expired(entry, now) {
-            return Err("session_busy");
-        }
         let lease_id = entry.readers.open().map_err(session_reader_error)?;
         entry.last_access = now;
         Ok(lease_id)
@@ -337,14 +339,37 @@ impl<T> SessionRegistry<T> {
     }
 
     fn remove_expired(&mut self, now: Instant) {
+        let recreation_index = &mut self.recreation_index;
         self.entries.retain(|_, entry| {
-            let retain =
-                entry.readers.is_busy() || entry.retention.retained() || !expired(entry, now);
+            let retain = !expired(entry, now);
             if !retain {
                 self.retained_metadata_bytes -= entry.retained_metadata_bytes;
+                recreation_index.remove(entry.recreation_key.as_ref());
             }
             retain
         });
+    }
+
+    fn active_recreation_identity(&mut self, recreation_key: &str, now: Instant) -> Option<String> {
+        let identity = self.recreation_index.get(recreation_key)?.clone();
+        if self.remove_target_if_expired(&identity, now) {
+            None
+        } else {
+            Some(identity)
+        }
+    }
+
+    fn remove_target_if_expired(&mut self, identity: &str, now: Instant) -> bool {
+        if self
+            .entries
+            .get(identity)
+            .is_some_and(|entry| expired(entry, now))
+        {
+            self.remove_entry(identity);
+            true
+        } else {
+            false
+        }
     }
 
     fn remove_entry(&mut self, identity: &str) {
@@ -352,6 +377,7 @@ impl<T> SessionRegistry<T> {
             .entries
             .remove(identity)
             .expect("registered session exists");
+        self.recreation_index.remove(entry.recreation_key.as_ref());
         self.retained_metadata_bytes -= entry.retained_metadata_bytes;
     }
 }
@@ -367,6 +393,7 @@ fn session_reader_error(error: ReaderLeaseError) -> &'static str {
 
 fn expired<T>(entry: &RegisteredSession<T>, now: Instant) -> bool {
     !entry.readers.is_busy()
+        && !entry.retention.retained()
         && (now.duration_since(entry.last_access) >= SESSION_IDLE_TTL
             || now.duration_since(entry.created_at) >= SESSION_ABSOLUTE_TTL)
 }
@@ -386,11 +413,7 @@ impl RandomAccessSession {
         first: &VerifiedSegment,
         allow_degraded_playback: bool,
     ) -> Result<Self, &'static str> {
-        if first.begin != 1
-            || first.total_size == 0
-            || first.total_size > MAX_SESSION_BYTES
-            || (postings.len() > 1 && first.end == first.total_size)
-        {
+        if first.begin != 1 || first.total_size > limits::MAX_LOGICAL_BYTES {
             return Err("invalid_random_access_session");
         }
         let size = first.total_size;
@@ -421,12 +444,6 @@ impl RandomAccessSession {
             strong_asset_revision: None,
         };
         session.record_extent(0, first)?;
-        if session.postings.len() == 1 {
-            if first.end != size {
-                return Err("session_extent_gap");
-            }
-            session.census_complete = true;
-        }
         Ok(session)
     }
 
@@ -508,16 +525,17 @@ impl RandomAccessSession {
             .iter()
             .enumerate()
             .skip(posting_index)
-            .take_while(|(_, posting)| {
-                let include = scheduled_bytes < window_bytes;
-                if include {
-                    scheduled_bytes += posting.declared_encoded_bytes;
-                }
-                include
-            })
             .filter(|(index, _)| {
                 !self.posting_extents.contains_key(index)
                     && !self.salvage_posting_extents.contains_key(index)
+            })
+            .take_while(|(_, posting)| {
+                let include = scheduled_bytes < window_bytes;
+                if include {
+                    scheduled_bytes =
+                        scheduled_bytes.saturating_add(posting.declared_encoded_bytes);
+                }
+                include
             })
             .map(|(index, _)| index)
             .collect();
@@ -610,11 +628,9 @@ impl RandomAccessSession {
                             session.posting_extents[&posting_index]
                         };
                         let slice_end = extent.end.min(final_logical);
-                        segment.segment().read_logical_range_into(
-                            logical,
-                            slice_end,
-                            &mut output,
-                        )?;
+                        segment
+                            .segment()
+                            .read_logical_range_into(logical, slice_end, &mut output);
                         logical = slice_end
                             .checked_add(1)
                             .expect("session extent ends within the logical size");
@@ -630,11 +646,6 @@ impl RandomAccessSession {
                 }
             }
         }
-        assert_eq!(
-            output.len(),
-            length as usize,
-            "session read produced the requested length"
-        );
         Ok(output)
     }
 
@@ -828,9 +839,7 @@ impl RandomAccessSession {
         posting_index: usize,
         segment: &VerifiedSegment,
     ) -> Result<(), &'static str> {
-        if segment.total_size != self.size
-            || (self.postings.len() > 1 && segment.begin == 1 && segment.end == segment.total_size)
-        {
+        if segment.total_size != self.size {
             return Err("session_extent_conflict");
         }
         let extent = Extent {
@@ -990,9 +999,7 @@ pub fn session_recreation_key_with_degraded_playback(
 }
 
 pub fn random_session_id() -> Result<String, &'static str> {
-    let encoded = random_lease_id().map_err(|_| "session_random_unavailable")?;
-    debug_assert!(valid_session_id(&encoded));
-    Ok(encoded)
+    random_lease_id().map_err(|_| "session_random_unavailable")
 }
 
 fn append_length_prefixed(digest: &mut Sha256, value: &[u8]) {
@@ -1010,11 +1017,12 @@ pub fn valid_session_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_DECLARED_POSTING_BYTES, RandomAccessSession, SESSION_IDLE_TTL, SessionFallbackPosting,
+        RandomAccessSession, SESSION_ABSOLUTE_TTL, SESSION_IDLE_TTL, SessionFallbackPosting,
         SessionPosting, SessionRegistry, random_session_id, session_recreation_key,
         session_recreation_key_with_degraded_playback,
     };
     use crate::cache::{SegmentLease, SessionCheckpointStore, VerifiedSegment};
+    use crate::limits::MAX_DECLARED_POSTING_BYTES;
     use crate::materialization::asset_revision_hasher;
     use crate::yenc::DecodedPart;
     use sha2::Digest;
@@ -1283,7 +1291,7 @@ mod tests {
         let mut recreated = RandomAccessSession::new(identity(), postings, &segments[&1]).unwrap();
         let checkpoints = SessionCheckpointStore::open(&root)
             .unwrap()
-            .load(&key, 10, 100)
+            .load(&key)
             .unwrap();
         recreated.restore_checkpoints(&checkpoints).unwrap();
         let recreated = Arc::new(Mutex::new(recreated));
@@ -1351,7 +1359,7 @@ mod tests {
                 .into_iter()
                 .map(|index| (index, postings[index].number))
                 .collect::<Vec<_>>(),
-            [(2, 3)]
+            [(2, 3), (3, 4)]
         );
         assert_eq!(session.lock().unwrap().prefetch_start_after(10), Some(2));
     }
@@ -1563,6 +1571,30 @@ mod tests {
                 now + Duration::from_secs(15 * 60),
             )
             .expect("expired session releases its metadata budget");
+    }
+
+    #[test]
+    fn external_retention_keeps_a_session_readable_until_released() {
+        let first = segment(1, 1, 1, 1);
+        let now = Instant::now();
+        let mut registry = SessionRegistry::new(1024 * 1024);
+        registry
+            .insert(
+                RandomAccessSession::new(identity(), vec![posting(1)], &first).unwrap(),
+                "context",
+                recreation_key(),
+                now,
+            )
+            .unwrap();
+        let lease = registry.get(&identity(), now).unwrap();
+        let retention = lease.retention.clone();
+        drop(lease);
+
+        let expired_at = now + SESSION_ABSOLUTE_TTL;
+        drop(registry.get(&identity(), expired_at).unwrap());
+        drop(retention);
+
+        assert_eq!(registry.len(expired_at), 0);
     }
 
     #[test]

@@ -102,7 +102,7 @@ async def _database_schema_ready() -> tuple[bool, bool]:
                 {"version": MIGRATIONS[-1][0]},
                 force_primary=True,
             )
-    except (TimeoutError, OSError, sqlite3.Error, asyncpg.PostgresError):
+    except (OSError, sqlite3.Error, asyncpg.PostgresError):
         return False, False
     return True, row is not None
 

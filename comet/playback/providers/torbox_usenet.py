@@ -11,7 +11,7 @@ import aiohttp
 from comet.core.provider_json import (
     ProviderJsonError,
     is_success_status,
-    read_provider_json,
+    read_json_object,
 )
 from comet.core.sources import MAX_SIGNED_BIGINT
 from comet.playback.base import (
@@ -23,12 +23,12 @@ from comet.playback.base import (
     Readiness,
 )
 from comet.usenet.file_selection import FileSelectionError, select_remote_video_file
-from comet.usenet.limits import MAX_NZB_FILES, MAX_NZB_METADATA_BYTES
+from comet.usenet.limits import MAX_NZB_FILES
+from comet.utils.text import has_ascii_control
 
 _BASE_URL = "https://api.torbox.app/v1/api/usenet"
 _USER_URL = "https://api.torbox.app/v1/api/user/me"
 _LIBRARY_PAGE_SIZE = 1_000
-_MAX_LIBRARY_ITEMS = MAX_NZB_FILES
 _REMOTE_TERMINAL = frozenset(
     {"failed", "failed (processing)", "invalid", "expired", "(reported) missing"}
 )
@@ -70,14 +70,14 @@ def _api_key(value: object) -> str:
         not isinstance(value, str)
         or not value
         or len(value) > 512
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or has_ascii_control(value)
     ):
         raise ValueError("TorBox API key is invalid")
     return value
 
 
 async def _validation_data(response) -> object:
-    payload = await read_provider_json(response)
+    payload = await read_json_object(response)
     if payload.get("success") is False or "data" not in payload:
         raise ProviderJsonError("invalid TorBox envelope")
     return payload["data"]
@@ -92,7 +92,7 @@ async def _provider_data(response) -> object:
 
 async def _validation_error_code(response) -> str | None:
     try:
-        payload = await read_provider_json(response)
+        payload = await read_json_object(response)
     except ProviderJsonError as exc:
         raise TorBoxUsenetError("torbox_invalid_response") from exc
     error = payload.get("error")
@@ -129,7 +129,7 @@ def _item(value: object) -> TorBoxUsenetItem:
     files_value = value.get("files")
     if files_value is None:
         files = ()
-    elif not isinstance(files_value, list) or len(files_value) > MAX_NZB_FILES:
+    elif not isinstance(files_value, list):
         raise TorBoxUsenetError("torbox_invalid_response")
     else:
         files = files_value
@@ -153,10 +153,7 @@ def _item(value: object) -> TorBoxUsenetItem:
     if content_hash_value is not None and content_hash is None:
         raise TorBoxUsenetError("torbox_invalid_response")
     alternative_hash_values = value.get("alternative_hashes", [])
-    if (
-        not isinstance(alternative_hash_values, list)
-        or len(alternative_hash_values) > MAX_NZB_FILES
-    ):
+    if not isinstance(alternative_hash_values, list):
         raise TorBoxUsenetError("torbox_invalid_response")
     alternative_hashes = []
     seen_hashes = {content_hash} if content_hash is not None else set()
@@ -254,31 +251,6 @@ def cache_hashes_from_manifest(manifest: object) -> tuple[str, ...]:
             seen.add(content_hash)
             hashes.append(content_hash)
     return tuple(hashes)
-
-
-def cache_hash_from_alias(value: object) -> tuple[str, ...]:
-    """Return a cache-check key only for a canonical TorBox MD5 alias."""
-    if (
-        not isinstance(value, str)
-        or len(value) != 32
-        or any(character not in _LOWER_HEX for character in value)
-    ):
-        return ()
-    return (value,)
-
-
-def _requested_cache_hashes(hashes: object) -> tuple[str, ...]:
-    if not isinstance(hashes, tuple) or any(
-        not isinstance(value, str)
-        or len(value) != 32
-        or any(character not in _LOWER_HEX for character in value)
-        for value in hashes
-    ):
-        raise ValueError("TorBox cache hashes are invalid")
-    requested = tuple(dict.fromkeys(hashes))
-    if not 1 <= len(requested) <= MAX_NZB_FILES:
-        raise ValueError("TorBox cache hashes are invalid")
-    return requested
 
 
 def _download_target(value: object) -> TorBoxDownloadTarget:
@@ -478,9 +450,10 @@ class TorBoxUsenetProvider:
         hashes: tuple[str, ...],
     ) -> TorBoxUsenetItem | None:
         """Find an account-library item by an exact content identity."""
-        requested = frozenset(_requested_cache_hashes(hashes))
+        requested = frozenset(hashes)
         seen_ids = set()
-        for offset in range(0, _MAX_LIBRARY_ITEMS, _LIBRARY_PAGE_SIZE):
+        offset = 0
+        while True:
             try:
                 async with self._request(
                     "usenet_mylist",
@@ -517,14 +490,14 @@ class TorBoxUsenetProvider:
                 ) from exc
             if not isinstance(data, list):
                 raise TorBoxUsenetError("torbox_invalid_response")
-            if len(data) > _LIBRARY_PAGE_SIZE:
-                raise TorBoxUsenetError("torbox_invalid_response")
             hash_matches = []
+            found_new_item = False
             for value in data:
                 parsed = _item(value)
                 if parsed.usenet_id in seen_ids:
                     continue
                 seen_ids.add(parsed.usenet_id)
+                found_new_item = True
                 hash_match = (
                     parsed.content_hash in requested
                     or not requested.isdisjoint(parsed.alternative_hashes)
@@ -542,12 +515,9 @@ class TorBoxUsenetProvider:
                         item.usenet_id,
                     ),
                 )
-            if len(data) < _LIBRARY_PAGE_SIZE:
+            if len(data) < _LIBRARY_PAGE_SIZE or not found_new_item:
                 return None
-        raise TorBoxUsenetError(
-            "torbox_library_unavailable",
-            retryable=True,
-        )
+            offset += _LIBRARY_PAGE_SIZE
 
     @staticmethod
     def status(item: TorBoxUsenetItem) -> ProviderStatus:
@@ -579,12 +549,6 @@ class TorBoxUsenetProvider:
         governor=None,
         governor_scope: bytes | None = None,
     ) -> TorBoxUsenetItem:
-        if (
-            not isinstance(document, bytes)
-            or not document
-            or len(document) > MAX_NZB_METADATA_BYTES
-        ):
-            raise ValueError("NZB document is required")
         form = aiohttp.FormData()
         form.add_field(
             "file", document, filename="comet.nzb", content_type="application/x-nzb"
@@ -669,17 +633,10 @@ class TorBoxUsenetProvider:
                 "torbox_unavailable",
                 retryable=True,
             ) from exc
-        parsed = _created_item(data)
-        return parsed
+        return _created_item(data)
 
     async def delete_owned(self, usenet_id: int) -> None:
         """Delete one ledger-authorized item; callers must prove ownership."""
-        if (
-            isinstance(usenet_id, bool)
-            or not isinstance(usenet_id, int)
-            or not 0 <= usenet_id <= MAX_SIGNED_BIGINT
-        ):
-            raise ValueError("TorBox Usenet id is invalid")
         try:
             async with self._request(
                 "usenet_control",
@@ -723,12 +680,6 @@ class TorBoxUsenetProvider:
 
     async def get_item(self, usenet_id: int) -> TorBoxUsenetItem:
         """Read one exact TorBox item; global-library adoption is never permitted."""
-        if (
-            isinstance(usenet_id, bool)
-            or not isinstance(usenet_id, int)
-            or not 0 <= usenet_id <= MAX_SIGNED_BIGINT
-        ):
-            raise ValueError("TorBox Usenet id is invalid")
         try:
             async with self._request(
                 "usenet_mylist",
@@ -774,15 +725,6 @@ class TorBoxUsenetProvider:
         *,
         file_id: int,
     ) -> TorBoxDownloadTarget:
-        if (
-            isinstance(usenet_id, bool)
-            or not isinstance(usenet_id, int)
-            or not 0 <= usenet_id <= MAX_SIGNED_BIGINT
-            or isinstance(file_id, bool)
-            or not isinstance(file_id, int)
-            or not 0 <= file_id <= MAX_SIGNED_BIGINT
-        ):
-            raise ValueError("TorBox file id is invalid")
         params = {
             "token": self._api_key,
             "usenet_id": usenet_id,

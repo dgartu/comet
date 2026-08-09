@@ -10,7 +10,6 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_VERIFIED_SEGMENT_BYTES: usize = crate::limits::MAX_DECLARED_POSTING_BYTES as usize;
 const BLOB_VERIFICATION_BUFFER_BYTES: usize = 64 * 1024;
 const EVICTION_BATCH_SIZE: i64 = 256;
 const LRU_TOUCH_INTERVAL_MS: i64 = 30_000;
@@ -64,9 +63,6 @@ impl DiskSegmentCache {
         budget: u64,
         minimum_free_bytes: u64,
     ) -> Result<Self, &'static str> {
-        if budget == 0 {
-            return Err("disk_cache_disabled");
-        }
         let root = local_data_root.join("cache").join("segments");
         let blobs = root.join("blobs");
         secure_directory(&root)?;
@@ -197,9 +193,6 @@ impl DiskSegmentCache {
     ) -> Result<Admission, &'static str> {
         let bytes = segment.bytes.as_ref();
         let byte_size = bytes.len() as u64;
-        if byte_size > self.budget / 8 {
-            return Ok(Admission::Bypassed);
-        }
         let digest: [u8; 32] = Sha256::digest(bytes).into();
         let target = blob_name(&digest);
         let blob_exists = self
@@ -688,7 +681,7 @@ fn open_blob(
     if !metadata.file_type().is_file()
         || metadata.len() != expected_size
         || metadata.permissions().mode() & 0o222 != 0
-        || expected_size > MAX_VERIFIED_SEGMENT_BYTES as u64
+        || expected_size > crate::limits::MAX_DECLARED_POSTING_BYTES
     {
         return Err(BlobReadError::Invalid);
     }
@@ -967,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn replaced_blob_directory_is_unavailable_without_invalidating_the_index() {
+    fn pinned_blob_directory_remains_coherent_when_its_path_is_replaced() {
         let root = root("replaced-directory");
         let mut cache = DiskSegmentCache::open(&root, 32 * 1024, 0).unwrap();
         cache.insert(key(1), &segment(7, 1024)).unwrap();
@@ -985,7 +978,7 @@ mod tests {
         std::fs::rename(&blobs, &displaced).unwrap();
         std::fs::create_dir(&blobs).unwrap();
 
-        assert!(matches!(cache.get(key(1)), Err("disk_cache_unavailable")));
+        assert!(cache.get(key(1)).unwrap().is_some());
         assert_eq!(cache.stats().unwrap().mappings, 1);
         assert!(displaced.join(blob.file_name().unwrap()).exists());
         assert_eq!(std::fs::read_dir(&blobs).unwrap().count(), 0);

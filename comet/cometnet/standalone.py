@@ -56,7 +56,6 @@ configure_entrypoint(process_role="cometnet")
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
 
 try:
     from comet.core.models import (
@@ -83,6 +82,9 @@ from comet.cometnet.admin_contracts import (
 from comet.cometnet.admin_contracts import (
     StandaloneUpdateMemberRoleRequest as UpdateMemberRoleRequest,
 )
+from comet.cometnet.admin_contracts import (
+    StrictRequest,
+)
 from comet.cometnet.manager import CometNetService
 from comet.cometnet.protocol import TorrentMetadata
 from comet.core.database import setup_database, teardown_database
@@ -108,10 +110,6 @@ from comet.observability.startup import (
 )
 from comet.services.operator_commands import run_settings_command_dispatcher
 from comet.services.torrent_manager import check_torrents_exist, torrent_update_queue
-
-
-class StrictRequest(BaseModel):
-    model_config = ConfigDict(strict=True)
 
 
 class BroadcastRequest(StrictRequest):
@@ -144,11 +142,6 @@ async def _cancel_task(task: asyncio.Task) -> None:
     await asyncio.gather(task, return_exceptions=True)
 
 
-def _require_broadcast_media_id(imdb_id: str | None) -> None:
-    if not imdb_id:
-        raise HTTPException(status_code=400, detail="imdb_id is required")
-
-
 async def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
     """
     Verify API key.
@@ -166,8 +159,6 @@ async def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
             status_code=403,
             detail="Invalid API key.",
         )
-
-    return True
 
 
 class StandaloneCometNet:
@@ -196,7 +187,6 @@ class StandaloneCometNet:
         keys_dir: str | None = None,
         advertise_url: str | None = None,
     ):
-        self.ws_port = ws_port
         self.http_port = http_port
 
         self.service = self._build_service(
@@ -313,7 +303,7 @@ class StandaloneCometNet:
         """Create the FastAPI application with endpoints."""
 
         @asynccontextmanager
-        async def lifespan(app: FastAPI):
+        async def lifespan(_app: FastAPI):
             async with AsyncExitStack() as cleanup:
                 await setup_database()
                 cleanup.push_async_callback(teardown_database)
@@ -330,10 +320,7 @@ class StandaloneCometNet:
                 cleanup.callback(shutdown_executor)
                 cleanup.push_async_callback(torrent_update_queue.stop)
 
-                self.service.set_save_torrent_callback(
-                    torrent_update_queue.add_network_torrent
-                )
-                self.service.set_check_torrents_exist_callback(check_torrents_exist)
+                self._configure_service(self.service)
 
                 async def stop_current_service():
                     await self.service.stop()
@@ -382,7 +369,7 @@ class StandaloneCometNet:
                 "status": "healthy",
                 "service": "cometnet-standalone",
                 "uptime_seconds": int(time.time() - self._start_time),
-                "running": self.service._running,
+                "running": self.service.running,
             }
 
         @app.get("/stats", dependencies=[Depends(verify_api_key)])
@@ -565,22 +552,21 @@ class StandaloneCometNet:
             """
             self._broadcasts_received += 1
 
-            if not self.service._running:
+            if not self.service.running:
                 raise HTTPException(
                     status_code=503, detail="CometNet service not running"
                 )
 
-            _require_broadcast_media_id(request.imdb_id)
-
             try:
                 metadata = TorrentMetadata(**request.model_dump())
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=400, detail="Invalid torrent"
+                ) from error
 
-                await self.service.broadcast_torrent(metadata)
-                self._broadcasts_success += 1
-
-                return {"status": "queued", "info_hash": request.info_hash}
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
+            await self.service.broadcast_torrent(metadata)
+            self._broadcasts_success += 1
+            return {"status": "queued", "info_hash": request.info_hash}
 
         @app.post("/broadcast/batch", dependencies=[Depends(verify_api_key)])
         async def broadcast_batch(request: BroadcastBatchRequest):
@@ -591,7 +577,7 @@ class StandaloneCometNet:
             """
             self._broadcasts_received += len(request.torrents)
 
-            if not self.service._running:
+            if not self.service.running:
                 raise HTTPException(
                     status_code=503, detail="CometNet service not running"
                 )
@@ -601,13 +587,11 @@ class StandaloneCometNet:
 
             for torrent in request.torrents:
                 try:
-                    _require_broadcast_media_id(torrent.imdb_id)
-                    metadata = TorrentMetadata(**torrent.model_dump())
-                    metadata_batch.append(metadata)
-                except HTTPException as e:
-                    errors.append({"info_hash": torrent.info_hash, "error": e.detail})
-                except Exception as e:
-                    errors.append({"info_hash": torrent.info_hash, "error": str(e)})
+                    metadata_batch.append(TorrentMetadata(**torrent.model_dump()))
+                except ValueError:
+                    errors.append(
+                        {"info_hash": torrent.info_hash, "error": "Invalid torrent"}
+                    )
 
             if metadata_batch:
                 await self.service.broadcast_torrents(metadata_batch)
@@ -623,7 +607,7 @@ class StandaloneCometNet:
             }
 
         @app.exception_handler(Exception)
-        async def generic_exception_handler(request: Request, exc: Exception):
+        async def generic_exception_handler(_request: Request, _exc: Exception):
             return JSONResponse(
                 status_code=500,
                 content={"detail": "Internal server error"},

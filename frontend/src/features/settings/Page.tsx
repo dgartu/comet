@@ -53,11 +53,11 @@ export function SettingsPage() {
   const importInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (settings.data !== undefined) {
+    if (settings.data !== undefined && settings.data.stored_revision !== draftRevision) {
       setDrafts(initialDrafts(settings.data.settings));
       setDraftRevision(settings.data.stored_revision);
     }
-  }, [settings.data]);
+  }, [draftRevision, settings.data]);
 
   const save = useMutation({
     mutationFn: saveSettings,

@@ -10,8 +10,8 @@ from comet.discovery.torrent_models import ScrapeRequest
 class ZileanScraper(TorrentDiscoveryAdapter):
     url_setting = "ZILEAN_URL"
 
-    def __init__(self, manager, session, url: str):
-        super().__init__(manager, session, url)
+    def __init__(self, session, url: str):
+        super().__init__(session, url)
 
     @staticmethod
     def _parse_result(result):
@@ -44,8 +44,7 @@ class ZileanScraper(TorrentDiscoveryAdapter):
             ) as response:
                 if not is_success_status(response.status):
                     raise RuntimeError(f"HTTP {response.status}")
-                data = await response.json()
-                return data
+                return await response.json()
 
         responses = await gather_concurrently(
             fetch(title) for title in request.query_titles

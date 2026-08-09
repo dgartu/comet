@@ -3,20 +3,20 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if (($# > 1)); then
-    echo "usage: run_usenet_stress.sh [SECONDS: 5..900]" >&2
+    echo "usage: run_usenet_stress.sh [POSITIVE_SECONDS]" >&2
     exit 2
 fi
 seconds="${1:-120}"
 
 case "${seconds}" in
     *[!0-9]* | "")
-        echo "usage: run_usenet_stress.sh [SECONDS: 5..900]" >&2
+        echo "usage: run_usenet_stress.sh [POSITIVE_SECONDS]" >&2
         exit 2
         ;;
 esac
 seconds=$((10#${seconds}))
-if ((seconds < 5 || seconds > 900)); then
-    echo "stress duration must be between 5 and 900 seconds" >&2
+if ((seconds < 1)); then
+    echo "stress duration must be positive" >&2
     exit 2
 fi
 

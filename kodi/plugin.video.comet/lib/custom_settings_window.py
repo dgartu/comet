@@ -101,9 +101,6 @@ def _get_json(url: str):
 
 
 def _parse_setup_code_response(data):
-    if not isinstance(data, dict):
-        raise ValueError("Invalid response from /kodi/generate_setup_code")
-
     code = data.get("code")
     configure_url = data.get("configure_url")
     expires_in = data.get("expires_in")
@@ -127,8 +124,6 @@ def _parse_setup_code_response(data):
 
 
 def _parse_manifest_response(data):
-    if not isinstance(data, dict):
-        raise ValueError("Invalid response from /kodi/get_manifest")
     secret_string = data.get("secret_string")
     stremio_api_prefix = data.get("stremio_api_prefix", "")
     if (

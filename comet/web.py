@@ -39,7 +39,6 @@ except Exception as exc:
     configuration_invalid(exception=exc)
     raise SystemExit(78) from None
 
-from comet.core.server_settings import MAX_FASTAPI_WORKERS
 from comet.observability import clear_context, log
 from comet.observability.events import start_event_persistence, stop_event_persistence
 from comet.observability.metrics import mark_process_dead
@@ -58,10 +57,10 @@ def resolved_workers() -> int:
         workers = int(value)
     except (TypeError, ValueError):
         raise RuntimeError("FASTAPI_WORKERS must resolve to an integer") from None
-    if workers < 1:
-        return min((os.cpu_count() or 1) * 2 + 1, 12)
-    if workers > MAX_FASTAPI_WORKERS:
-        raise RuntimeError(f"FASTAPI_WORKERS cannot exceed {MAX_FASTAPI_WORKERS}")
+    if workers == 0:
+        return (os.cpu_count() or 1) * 2 + 1
+    if workers < 0:
+        raise RuntimeError("FASTAPI_WORKERS must be zero or a positive integer")
     return workers
 
 

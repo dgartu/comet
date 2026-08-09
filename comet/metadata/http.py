@@ -7,7 +7,7 @@ import aiohttp
 from comet.core.provider_json import (
     ProviderJsonError,
     is_success_status,
-    read_provider_json,
+    read_json_object,
 )
 
 _BASE_HEADERS = {
@@ -37,9 +37,7 @@ async def get_metadata_json(
     headers: dict[str, str] | None = None,
 ) -> MetadataHttpResponse:
     """Fetch one JSON object without following redirects."""
-    request_headers = {}
-    if headers:
-        request_headers.update(headers)
+    request_headers = dict(headers or {})
     request_headers.update(_BASE_HEADERS)
     try:
         async with session.get(
@@ -48,18 +46,14 @@ async def get_metadata_json(
             allow_redirects=False,
         ) as response:
             status = response.status
-            if type(status) is not int or not 100 <= status <= 599:
-                raise MetadataHttpError("metadata service returned an invalid status")
             if not is_success_status(status):
                 return MetadataHttpResponse(status, None)
             try:
-                payload = await read_provider_json(response)
+                payload = await read_json_object(response)
             except ProviderJsonError:
                 raise MetadataHttpError(
                     "metadata service returned an invalid response"
                 ) from None
             return MetadataHttpResponse(status, payload)
-    except MetadataHttpError:
-        raise
     except (TimeoutError, aiohttp.ClientError):
         raise MetadataHttpError("metadata service request failed") from None

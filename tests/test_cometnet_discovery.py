@@ -91,6 +91,28 @@ class CometNetDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(added, 1)
         self.assertEqual(set(service._known_peers), {"wss://valid.example"})
 
+    async def test_pex_catalog_evicts_oldest_peer_at_connection_capacity(self):
+        service = DiscoveryService(max_peers=2)
+        service._node_id = "self"
+
+        with patch(
+            "comet.cometnet.discovery.is_valid_peer_address",
+            new=AsyncMock(return_value=True),
+        ):
+            for index in range(3):
+                await service.add_peer_from_pex(
+                    PeerInfo(
+                        node_id=f"peer-{index}",
+                        address=f"wss://peer-{index}.example",
+                    )
+                )
+                service._known_peers[f"wss://peer-{index}.example"].last_seen = index
+
+        self.assertEqual(
+            set(service._known_peers),
+            {"wss://peer-1.example", "wss://peer-2.example"},
+        )
+
     def test_persistence_keeps_freshest_address_for_each_node(self):
         service = DiscoveryService()
         service._add_known_peer("wss://old.example", "peer", "pex")

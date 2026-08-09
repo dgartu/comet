@@ -92,7 +92,4 @@ def encode_configuration_segment(document: bytes) -> str:
     current = _COMPRESSED_PREFIX + base64.urlsafe_b64encode(compressed).decode(
         "ascii"
     ).rstrip("=")
-    segment = current if len(current) < len(legacy) else legacy
-    if len(segment) > MAX_CONFIG_SEGMENT_BYTES:
-        raise ConfigurationCodecError("oversized configuration")
-    return segment
+    return current if len(current) < len(legacy) else legacy

@@ -31,6 +31,9 @@ def _write_private_descriptor(path: Path, payload: bytes) -> None:
             descriptor.write(payload)
             descriptor.flush()
             os.fsync(file_fd)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
     finally:
         os.close(file_fd)
 
@@ -54,7 +57,6 @@ class EngineSupervisor:
         libarchive_library: str = "/app/lib/libarchive.so.13",
         parser_only: bool = False,
         log_profile: str = "normal",
-        log_format: str = "pretty",
         no_color: bool = False,
     ):
         self.runtime_dir = Path(runtime_dir).resolve()
@@ -75,14 +77,7 @@ class EngineSupervisor:
         self.par2_binary = par2_binary
         self.libarchive_library = libarchive_library
         self.parser_only = parser_only
-        if log_profile not in {"quiet", "normal", "verbose", "debug"}:
-            raise ValueError("invalid native logging profile")
-        if log_format not in {"pretty", "json"}:
-            raise ValueError("invalid native logging format")
-        if type(no_color) is not bool:
-            raise ValueError("invalid native color policy")
         self.log_profile = log_profile
-        self.log_format = log_format
         self.no_color = no_color
         self.engine_generation = 0
         self.socket_path = self.runtime_dir / "engine.sock"

@@ -37,7 +37,7 @@ def rank_release_records(
     )
     ranked = []
     for (record_id, parsed), (is_fetchable, _reasons, rank) in zip(
-        eligible, rank_results, strict=True
+        eligible, rank_results
     ):
         if remove_trash and not is_fetchable:
             continue

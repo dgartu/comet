@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -214,6 +215,35 @@ class StremThruResponseTests(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
+    async def test_failed_availability_batch_cancels_and_settles_siblings(self):
+        client = StremThru(None, None, None, "debridlink:token", "")
+        client.check_premium = AsyncMock()
+        second_started = asyncio.Event()
+        second_settled = asyncio.Event()
+        blocker = asyncio.Future()
+
+        async def get_instant(hashes):
+            if len(hashes) == 500:
+                await second_started.wait()
+                raise DebridLinkGenerationError("provider failure")
+            second_started.set()
+            try:
+                await blocker
+            finally:
+                second_settled.set()
+
+        client.get_instant = get_instant
+
+        with self.assertRaises(DebridLinkGenerationError):
+            await client.get_availability(
+                [f"{index:040x}" for index in range(501)],
+                {},
+                {},
+                {},
+            )
+
+        self.assertTrue(second_settled.is_set())
+
     async def test_availability_selects_feature_instead_of_last_sample(self):
         info_hash = "a" * 40
         client = StremThru(None, "tt1234567", "tt1234567", "torbox:token", "")
@@ -229,6 +259,15 @@ class StremThruResponseTests(unittest.IsolatedAsyncioTestCase):
                                     "index": 1,
                                     "name": "Movie.2026.2160p.WEB-DL-GROUP.mkv",
                                     "size": 19_000,
+                                    "media_info": {
+                                        "video": {
+                                            "codec": "hevc",
+                                            "hdr": ["DV"],
+                                            "w": 3840,
+                                            "h": 2160,
+                                        },
+                                        "v": 1,
+                                    },
                                 },
                                 {
                                     "index": 11,
@@ -251,6 +290,8 @@ class StremThruResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]["index"], 1)
         self.assertEqual(files[0]["title"], "Movie.2026.2160p.WEB-DL-GROUP.mkv")
+        self.assertEqual(files[0]["media_info"].video.codec, "hevc")
+        self.assertEqual(files[0]["media_info"].video.hdr, ("DV",))
         enqueue.assert_awaited_once_with(files[0], "tt1234567")
 
     async def test_store_json_response_closes_after_complete_payload_read(self):
@@ -549,6 +590,56 @@ class StremThruResponseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.upstream_error_code, "MEDIA_NOT_CACHED_YET")
         client._post_store_json.assert_awaited_once()
+
+    async def test_download_generation_honors_the_previously_selected_file(self):
+        client = StremThru(None, None, None, "torbox:token", "")
+        client._post_store_json = AsyncMock(
+            side_effect=[
+                {
+                    "data": {
+                        "files": [
+                            {
+                                "index": 1,
+                                "name": "Movie.2026.1080p.mkv",
+                                "size": 10_000,
+                                "link": "selected-link",
+                                "media_info": {
+                                    "video": {"codec": "hevc"},
+                                    "v": 1,
+                                },
+                            },
+                            {
+                                "index": 2,
+                                "name": "Movie.2026.1080p.Alternate.mkv",
+                                "size": 20_000,
+                                "link": "larger-link",
+                            },
+                        ]
+                    }
+                },
+                {"data": {"link": "https://download.test/selected"}},
+            ]
+        )
+
+        with patch("comet.debrid.stremthru.schedule_cache_availability") as cache:
+            result = await client.generate_download_link(
+                "a" * 40,
+                "1",
+                "Movie",
+                "Movie.2026.1080p.mkv",
+                None,
+                None,
+            )
+
+        self.assertEqual(result, "https://download.test/selected")
+        self.assertEqual(
+            client._post_store_json.await_args_list[1].args[1],
+            {"link": "selected-link"},
+        )
+        cached = cache.call_args.args[1]
+        self.assertEqual(len(cached), 1)
+        self.assertEqual(cached[0]["index"], 1)
+        self.assertEqual(cached[0]["media_info"].video.codec, "hevc")
 
     async def test_unexpected_link_error_is_not_hidden(self):
         client = StremThru(None, None, None, "realdebrid:token", "")

@@ -16,8 +16,8 @@ from comet.usenet.artifact_leases import (
     ArtifactReaderLease,
     RenewableArtifactLease,
 )
-from comet.usenet.identity import is_sha256_hex, partition_hex
-from comet.usenet.limits import MAX_NZB_FILES, MAX_USENET_LOGICAL_BYTES
+from comet.usenet.identity import partition_hex
+from comet.usenet.limits import MAX_NZB_FILES
 
 _MAX_PREPARATION_ARTIFACTS = MAX_NZB_FILES
 _PUBLICATION_LEASE_SECONDS = 5 * 60
@@ -29,41 +29,12 @@ class MaterializedArtifactError(RuntimeError):
     """The shared materialization ledger or physical object is inconsistent."""
 
 
-def _canonical_preparation_id(value: object) -> str:
-    try:
-        return str(uuid.UUID(value))
-    except (TypeError, ValueError, AttributeError) as exc:
-        raise ValueError("invalid playback preparation") from exc
-
-
-def _validate_manifest_identity(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 68
-        or not value.startswith("nm1:")
-        or any(character not in "0123456789abcdef" for character in value[4:])
-    ):
-        raise ValueError("invalid materialization source identity")
-    return value
-
-
 @dataclass(frozen=True, slots=True)
 class MaterializedArtifact:
     artifact_sha256: str
     byte_size: int
     selected_asset_id: str
     strong_asset_revision: str
-
-    def __post_init__(self) -> None:
-        if (
-            not is_sha256_hex(self.artifact_sha256)
-            or isinstance(self.byte_size, bool)
-            or not isinstance(self.byte_size, int)
-            or not 1 <= self.byte_size <= MAX_USENET_LOGICAL_BYTES
-            or not is_sha256_hex(self.selected_asset_id)
-            or not is_sha256_hex(self.strong_asset_revision)
-        ):
-            raise ValueError("invalid materialized artifact")
 
 
 class ArtifactPublicationLease(RenewableArtifactLease):
@@ -99,7 +70,6 @@ class MaterializedArtifactRepository:
         now: float | None = None,
     ) -> ArtifactPublicationLease:
         """Serialize a renewable publication claim against orphan cleanup."""
-        preparation_id = _canonical_preparation_id(preparation_id)
         partition = partition_hex(owner_configuration_partition)
         current_time = time.time() if now is None else now
         lease_id = str(uuid.uuid4())
@@ -183,11 +153,7 @@ class MaterializedArtifactRepository:
     def _canonical_artifacts(
         artifacts: tuple[MaterializedArtifact, ...],
     ) -> tuple[MaterializedArtifact, ...]:
-        if (
-            not isinstance(artifacts, tuple)
-            or not 1 <= len(artifacts) <= _MAX_PREPARATION_ARTIFACTS
-            or any(not isinstance(item, MaterializedArtifact) for item in artifacts)
-        ):
+        if not 1 <= len(artifacts) <= _MAX_PREPARATION_ARTIFACTS:
             raise ValueError("invalid preparation materializations")
         by_identity: dict[str, MaterializedArtifact] = {}
         for artifact in artifacts:
@@ -209,9 +175,7 @@ class MaterializedArtifactRepository:
         now: float | None = None,
     ) -> None:
         """Register already-published files and pin them to one preparation."""
-        preparation_id = _canonical_preparation_id(preparation_id)
         partition = partition_hex(owner_configuration_partition)
-        source_nm1 = _validate_manifest_identity(source_nm1)
         artifacts = self._canonical_artifacts(artifacts)
         current_time = time.time() if now is None else now
         try:
@@ -327,7 +291,6 @@ class MaterializedArtifactRepository:
         now: float | None = None,
     ) -> tuple[ArtifactReaderLease, ...]:
         """Lease every shared object used by an owner-bound preparation."""
-        preparation_id = _canonical_preparation_id(preparation_id)
         current_time = time.time() if now is None else now
         partition = partition_hex(owner_configuration_partition)
         leased: list[tuple[str, str, int, Path]] = []
@@ -476,12 +439,7 @@ class MaterializedArtifactRepository:
         now: float | None = None,
     ) -> None:
         """Release intermediate objects after the final byte path is known."""
-        preparation_id = _canonical_preparation_id(preparation_id)
-        if (
-            not isinstance(artifact_sha256s, tuple)
-            or len(artifact_sha256s) > _MAX_PREPARATION_ARTIFACTS
-            or any(not is_sha256_hex(value) for value in artifact_sha256s)
-        ):
+        if len(artifact_sha256s) > _MAX_PREPARATION_ARTIFACTS:
             raise ValueError("invalid preparation materializations")
         retained = frozenset(artifact_sha256s)
         current_time = time.time() if now is None else now

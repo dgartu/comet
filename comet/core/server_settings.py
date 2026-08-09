@@ -1,7 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-MAX_FASTAPI_WORKERS = 64
-
 
 class ServerSettings(BaseSettings):
     model_config = SettingsConfigDict(

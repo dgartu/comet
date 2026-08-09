@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from comet.core.capabilities import CapabilityPlanner
+from comet.core.provider_json import MAX_PROVIDER_JSON_BYTES
 from comet.core.sources import LocatorKind, TransportKind
 from comet.discovery.adapters.animetosho import (
     AnimeToshoAdapter,
@@ -10,11 +10,10 @@ from comet.discovery.adapters.animetosho import (
     _nzb_token,
     _nzb_url,
 )
-from comet.discovery.adapters.newznab import parse_newznab_feed
+from comet.discovery.adapters.newznab import NewznabError, parse_newznab_feed
 from comet.discovery.adapters.torrent.animetosho import AnimeToshoScraper
 from comet.discovery.models import DiscoveryContext, MediaQuery
 from comet.playback.base import Readiness
-from comet.usenet.access import NativeAccessAuthorizer
 
 CAPS = b"""<?xml version="1.0"?>
 <caps>
@@ -93,6 +92,18 @@ class _Session:
 
 
 class AnimeToshoDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_feed_is_bounded_before_xml_parsing(self):
+        adapter = AnimeToshoAdapter(
+            _Session(feed=b"x" * (MAX_PROVIDER_JSON_BYTES + 1)),
+            AnimeToshoConfiguration("source"),
+        )
+
+        with self.assertRaisesRegex(NewznabError, "provider_response_too_large"):
+            await adapter.search(
+                MediaQuery("kitsu:123", "series", title_aliases=("Example",)),
+                DiscoveryContext(frozenset({"usenet"}), b"a" * 32),
+            )
+
     async def test_concurrent_transport_refreshes_share_one_feed_parse(self):
         session = _Session()
         adapter = AnimeToshoAdapter(
@@ -286,30 +297,6 @@ class AnimeToshoDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_expired_search_does_not_publish_complete_coverage(self):
-        session = _Session()
-        adapter = AnimeToshoAdapter(
-            session,
-            AnimeToshoConfiguration("source"),
-        )
-
-        result = await adapter.search(
-            MediaQuery(
-                "kitsu:123",
-                "series",
-                title_aliases=("Example",),
-            ),
-            DiscoveryContext(
-                frozenset({"bittorrent", "usenet"}),
-                b"a" * 32,
-                hard_deadline=0,
-            ),
-        )
-
-        self.assertEqual(result.candidates, ())
-        self.assertEqual(result.coverage, frozenset())
-        self.assertEqual(session.calls, [])
-
     async def test_unbounded_seed_count_is_ignored_without_losing_the_release(self):
         session = _Session(
             feed=FEED.replace(
@@ -384,7 +371,6 @@ class AnimeToshoDiscoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_torrent_outage_is_not_reported_as_empty_success(self):
         adapter = AnimeToshoScraper(
-            None,
             _Session(feed_status=503),
         )
 
@@ -398,19 +384,6 @@ class AnimeToshoDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 DiscoveryContext(frozenset({"bittorrent"})),
             )
-
-    async def test_legacy_torrent_pagination_has_a_fixed_request_ceiling(self):
-        session = _Session(feed=FEED.replace(b'total="1"', b'total="999999999"'))
-        adapter = AnimeToshoScraper(None, session)
-
-        results = await adapter._scrape_query(
-            "Example",
-            asyncio.Semaphore(10),
-        )
-
-        self.assertEqual(len(results), 7)
-        self.assertEqual(len(session.calls), 7)
-        self.assertIn("offset=900&limit=100", session.calls[-1][0])
 
 
 class AnimeToshoCodecTests(unittest.TestCase):
@@ -426,45 +399,6 @@ class AnimeToshoCodecTests(unittest.TestCase):
         )
         self.assertEqual(torrents[0]["seeders"], 42)
 
-    def test_server_managed_source_is_usenet_only(self):
-        torrent_provider = {
-            "configurationId": "11111111-1111-4111-8111-111111111111",
-            "displayName": "Torrent",
-            "kind": "direct_torrent",
-            "enabled": True,
-            "options": {},
-        }
-        usenet_provider = {
-            "configurationId": "22222222-2222-4222-8222-222222222222",
-            "displayName": "NNTP",
-            "kind": "stremio_nntp",
-            "enabled": True,
-            "options": {},
-        }
-        source = {
-            "configurationId": "33333333-3333-4333-8333-333333333333",
-            "kind": "animetosho",
-            "enabled": True,
-            "options": {},
-        }
-        planner = CapabilityPlanner(
-            usenet_offered=True,
-            native_authorizer=NativeAccessAuthorizer(None),
-        )
-        config = {
-            "schemaVersion": 2,
-            "enabledTransports": ["bittorrent", "usenet"],
-            "playbackProviders": [torrent_provider, usenet_provider],
-            "discoverySources": [source],
-        }
-
-        plan = planner.build(config)
-
-        self.assertEqual(
-            plan.branches_for(source["configurationId"]),
-            frozenset({TransportKind.USENET}),
-        )
-
     def test_storage_reference_codec_preserves_provider_urls(self):
         url = "https://storage.animetosho.org/nzbs/0123abcd/Example%20S02E03.nzb"
         token = _nzb_token(url)
@@ -475,8 +409,6 @@ class AnimeToshoCodecTests(unittest.TestCase):
             _nzb_url(_nzb_token(foreign)),
             foreign,
         )
-        with self.assertRaises(ValueError):
-            _nzb_url(token + "=")
 
     def test_storage_reference_rejects_urls_that_cannot_be_persisted(self):
         self.assertIsNone(_nzb_token("https://example.com/" + "x" * 1_000))

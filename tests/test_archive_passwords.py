@@ -22,11 +22,15 @@ class ArchivePasswordTests(unittest.TestCase):
             "single secret",
         )
 
-    def test_rejects_empty_unclosed_control_and_oversized_tokens(self):
+    def test_rejects_empty_unclosed_nul_and_oversized_tokens(self):
         self.assertIsNone(resolve_archive_passphrase({}, "Release {}"))
         self.assertIsNone(resolve_archive_passphrase({}, "Release {{}}"))
         self.assertIsNone(resolve_archive_passphrase({}, "Release {unclosed"))
-        self.assertIsNone(resolve_archive_passphrase({}, "Release {line\nbreak}"))
+        self.assertIsNone(resolve_archive_passphrase({}, "Release {bad\x00secret}"))
+        self.assertEqual(
+            resolve_archive_passphrase({}, "Release {line\nbreak}"),
+            "line\nbreak",
+        )
         self.assertIsNone(
             resolve_archive_passphrase({}, "Release {" + "x" * 4097 + "}")
         )

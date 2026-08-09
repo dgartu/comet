@@ -30,14 +30,24 @@ GetRandomPeersCallback = Callable[[int, set[str] | None], list[str]]
 # Type for sending a message to peers
 SendMessageCallback = Callable[[str, TorrentAnnounce | bytes], Awaitable[None]]
 
-# Type for broadcasting a message
-BroadcastCallback = Callable[[TorrentAnnounce, set[str] | None], Awaitable[None]]
-
 # Type for disconnecting a peer
 DisconnectPeerCallback = Callable[[str], Awaitable[None]]
 
 # Type for checking if torrents exist locally (batch)
 CheckTorrentsExistCallback = Callable[[list[str]], Awaitable[set[str]]]
+
+GOSSIP_STAT_KEYS = (
+    "torrents_received",
+    "torrents_propagated",
+    "torrents_repropagated",
+    "messages_sent",
+    "messages_received",
+    "invalid_messages",
+    "duplicates_ignored",
+    "validation_skipped_exists",
+    "torrents_filtered_untrusted",
+    "torrents_skipped_mode",
+)
 
 
 def sign_object_sync(identity: NodeIdentity, obj: object) -> str:
@@ -97,7 +107,6 @@ class GossipEngine:
         # Callbacks (set by manager)
         self._get_random_peers: GetRandomPeersCallback | None = None
         self._send_message: SendMessageCallback | None = None
-        self._broadcast: BroadcastCallback | None = None
         self._save_torrent: SaveTorrentCallback | None = None
         self._disconnect_peer: DisconnectPeerCallback | None = None
         self._check_torrents_exist: CheckTorrentsExistCallback | None = None
@@ -108,26 +117,12 @@ class GossipEngine:
         self._cleanup_task: asyncio.Task | None = None
 
         # Statistics
-        self.stats = {
-            "torrents_received": 0,
-            "torrents_propagated": 0,  # Original torrents from this node
-            "torrents_repropagated": 0,  # Torrents received and forwarded to others
-            "messages_sent": 0,
-            "messages_received": 0,
-            "invalid_messages": 0,
-            "duplicates_ignored": 0,
-            "validation_skipped_exists": 0,
-            # stats
-            "torrents_filtered_untrusted": 0,
-            "torrents_filtered_blacklisted": 0,
-            "torrents_skipped_mode": 0,
-        }
+        self.stats = dict.fromkeys(GOSSIP_STAT_KEYS, 0)
 
     def set_callbacks(
         self,
         get_random_peers: GetRandomPeersCallback,
         send_message: SendMessageCallback,
-        broadcast: BroadcastCallback,
         save_torrent: SaveTorrentCallback,
         disconnect_peer: DisconnectPeerCallback | None = None,
         check_torrents_exist: CheckTorrentsExistCallback | None = None,
@@ -135,7 +130,6 @@ class GossipEngine:
         """Set the callbacks for network operations."""
         self._get_random_peers = get_random_peers
         self._send_message = send_message
-        self._broadcast = broadcast
         self._save_torrent = save_torrent
         self._disconnect_peer = disconnect_peer
         self._check_torrents_exist = check_torrents_exist
@@ -180,8 +174,9 @@ class GossipEngine:
         if self.contribution_mode not in ("full", "source"):
             self.stats["torrents_skipped_mode"] += len(metadata_list)
             return
+        if not metadata_list:
+            return
 
-        valid_list = []
         for metadata in metadata_list:
             # Sign the torrent with our identity
             metadata.contributor_id = self.identity.node_id
@@ -191,23 +186,18 @@ class GossipEngine:
             if pool_id and self._pool_store and self._pool_store.is_member_of(pool_id):
                 metadata.pool_id = pool_id
 
-            valid_list.append(metadata)
-
-        if not valid_list:
-            return
-
         signatures = await run_in_executor(
-            batch_sign_objects_sync, self.identity, valid_list
+            batch_sign_objects_sync, self.identity, metadata_list
         )
 
-        for metadata, signature in zip(valid_list, signatures):
+        for metadata, signature in zip(metadata_list, signatures):
             metadata.contributor_signature = signature
 
         # Record contributions
         if self._pool_store:
             # Group by pool_id
             pool_counts = {}
-            for metadata in valid_list:
+            for metadata in metadata_list:
                 pool_counts[metadata.pool_id] = pool_counts.get(metadata.pool_id, 0) + 1
 
             for pid, count in pool_counts.items():
@@ -218,19 +208,9 @@ class GossipEngine:
                 )
 
         # Add to outgoing queue
-        self._outgoing_queue.extend(valid_list)
+        self._outgoing_queue.extend(metadata_list)
 
-    async def queue_torrent(
-        self, metadata: TorrentMetadata, pool_id: str | None = None
-    ) -> None:
-        """
-        Queue a torrent for gossiping.
-        """
-        await self.queue_torrents([metadata], pool_id)
-
-    async def handle_announce(
-        self, sender_id: str, announce: TorrentAnnounce, sender_ip: str | None = None
-    ) -> None:
+    async def handle_announce(self, sender_id: str, announce: TorrentAnnounce) -> None:
         """
         Handle an incoming torrent announce message.
 
@@ -262,11 +242,10 @@ class GossipEngine:
         existing_hashes = set()
         if self._check_torrents_exist and announce.torrents:
             hashes = [t.info_hash for t in announce.torrents]
-            if hashes:
-                try:
-                    existing_hashes = await self._check_torrents_exist(hashes)
-                except Exception:
-                    pass
+            try:
+                existing_hashes = await self._check_torrents_exist(hashes)
+            except Exception:
+                pass
 
         torrents_to_verify = []
 
@@ -284,25 +263,15 @@ class GossipEngine:
                 self.stats["invalid_messages"] += 1
                 continue
 
-            # Require valid signature and public key on all torrents
-            if (
-                not torrent.contributor_id
-                or not torrent.contributor_signature
-                or not torrent.contributor_public_key
-            ):
-                peer_rep.add_invalid_contribution()
-                self.stats["invalid_messages"] += 1
-                continue
-
             torrents_to_verify.append(torrent)
 
         # Batch verify signatures in executor
         if torrents_to_verify:
             verification_results = await asyncio.gather(
-                *[
+                *(
                     run_in_executor(verify_torrent_signature_sync, t)
                     for t in torrents_to_verify
-                ]
+                )
             )
 
             for torrent, is_valid in zip(torrents_to_verify, verification_results):
@@ -370,12 +339,10 @@ class GossipEngine:
             current_visited.add(self.identity.node_id)
 
             # Combine visited nodes with the explicit exclude set
-            exclude_set = {sender_id}.union(current_visited)
-
             peers_reached = await self._repropagate(
                 torrents_to_repropagate,
                 announce.ttl - 1,
-                exclude=exclude_set,
+                exclude=current_visited,
                 visited_history=list(current_visited),
             )
             # Track re-propagations separately from original contributions
@@ -409,7 +376,7 @@ class GossipEngine:
 
         # Select random peers
         # Check visited history to avoid loops
-        exclude = exclude or set()
+        exclude = set(exclude or ())
         if visited_history:
             exclude.update(visited_history)
 
@@ -442,73 +409,53 @@ class GossipEngine:
 
         results = await asyncio.gather(
             *(send_to_peer(peer_id) for peer_id in peers),
-            return_exceptions=True,
         )
-        successful_sends = sum(1 for r in results if r is True)
+        successful_sends = sum(results)
         self.stats["messages_sent"] += successful_sends
         return successful_sends
 
     async def _gossip_loop(self) -> None:
         """Main gossip loop - periodically sends queued torrents."""
         while self._running:
-            try:
-                await asyncio.sleep(self.gossip_interval)
+            await asyncio.sleep(self.gossip_interval)
 
-                # Check if we have torrents to gossip
-                if not self._outgoing_queue:
-                    continue
-                if not self._get_random_peers or not self._send_message:
-                    continue
+            # Check if we have torrents to gossip
+            if not self._outgoing_queue:
+                continue
+            if not self._get_random_peers or not self._send_message:
+                continue
 
-                total_sent = 0
-                while self._outgoing_queue:
-                    # Take up to MAX_TORRENTS_PER_MESSAGE from queue
-                    to_send: list[TorrentMetadata] = []
-                    for _ in range(
-                        min(self.max_torrents_per_message, len(self._outgoing_queue))
-                    ):
-                        to_send.append(self._outgoing_queue.popleft())
+            while self._outgoing_queue:
+                # Take up to MAX_TORRENTS_PER_MESSAGE from queue
+                to_send: list[TorrentMetadata] = []
+                for _ in range(
+                    min(self.max_torrents_per_message, len(self._outgoing_queue))
+                ):
+                    to_send.append(self._outgoing_queue.popleft())
 
-                    # Create and send announce
-                    if to_send:
-                        try:
-                            peers_reached = await self._repropagate(
-                                to_send, self.message_ttl
-                            )
-                        except asyncio.CancelledError:
-                            self._outgoing_queue.extendleft(reversed(to_send))
-                            raise
-                        except Exception:
-                            self._outgoing_queue.extendleft(reversed(to_send))
-                            raise
+                # Create and send announce
+                try:
+                    peers_reached = await self._repropagate(to_send, self.message_ttl)
+                except BaseException:
+                    self._outgoing_queue.extendleft(reversed(to_send))
+                    raise
 
-                        if peers_reached == 0:
-                            self._outgoing_queue.extendleft(reversed(to_send))
-                            break
+                if peers_reached == 0:
+                    self._outgoing_queue.extendleft(reversed(to_send))
+                    break
 
-                        # Only count torrents as propagated if at least one peer received them
-                        self.stats["torrents_propagated"] += len(to_send)
-                        total_sent += len(to_send)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                pass
+                # Only count torrents as propagated if at least one peer received them
+                self.stats["torrents_propagated"] += len(to_send)
 
     async def _cleanup_loop(self) -> None:
         """Periodically clean up keystore."""
         while self._running:
-            try:
-                await asyncio.sleep(60.0)
+            await asyncio.sleep(60.0)
 
-                if self._keystore:
-                    self._keystore.cleanup_old_keys(max_age_days=30.0)
+            if self._keystore:
+                self._keystore.cleanup_old_keys(max_age_days=30.0)
 
-                if self.reputation:
-                    self.reputation.cleanup_old_peers(max_age_days=30.0)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                pass
+            self.reputation.cleanup_old_peers(max_age_days=30.0)
 
     def get_stats(self) -> dict:
         """Get gossip statistics."""
@@ -523,6 +470,19 @@ class GossipEngine:
             "stats": self.stats,
         }
 
+    @staticmethod
+    def validate_persisted(data: object) -> dict[str, int]:
+        if type(data) is not dict or type(data.get("stats")) is not dict:
+            raise ValueError("gossip state does not match the current schema")
+        stats = data["stats"]
+        if not set(GOSSIP_STAT_KEYS) <= stats.keys():
+            raise ValueError("gossip stats do not match the current schema")
+        if any(
+            type(stats[key]) is not int or stats[key] < 0 for key in GOSSIP_STAT_KEYS
+        ):
+            raise ValueError("gossip stats must be non-negative integers")
+        return {key: stats[key] for key in GOSSIP_STAT_KEYS}
+
     def from_dict(self, data: dict) -> None:
         """Load the gossip engine state from a dictionary."""
-        self.stats = {key: data["stats"][key] for key in self.stats}
+        self.stats = self.validate_persisted(data)

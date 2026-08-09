@@ -5,9 +5,17 @@ from decimal import Decimal
 from RTN import ParsedData
 
 from comet.core.models import settings
+from comet.core.sources import MAX_SIGNED_BIGINT
+from comet.metadata.media_info import MediaInfo
 from comet.utils.languages import LANGUAGE_EMOJIS
 
-_MAX_SIGNED_64 = 2**63 - 1
+_SIZE_MULTIPLIERS = {
+    "b": 1,
+    "kb": 1024,
+    "mb": 1024**2,
+    "gb": 1024**3,
+    "tb": 1024**4,
+}
 
 
 def normalize_info_hash(info_hash: str) -> str:
@@ -16,7 +24,7 @@ def normalize_info_hash(info_hash: str) -> str:
             info_hash = base64.b16encode(base64.b32decode(info_hash.upper())).decode(
                 "utf-8"
             )
-        except (ValueError, UnicodeError):
+        except ValueError:
             pass
 
     if len(info_hash) == 80:
@@ -26,7 +34,7 @@ def normalize_info_hash(info_hash: str) -> str:
             if len(decoded_str) == 40:
                 int(decoded_str, 16)  # Validate it's hex
                 info_hash = decoded_str
-        except (ValueError, UnicodeError):
+        except ValueError:
             pass
 
     return info_hash.lower()
@@ -43,7 +51,7 @@ def format_bytes(bytes_value):
     if not math.isfinite(bytes_value) or bytes_value < 0:
         return None
 
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
         if bytes_value < 1024.0:
             return f"{bytes_value:.1f} {unit}"
         bytes_value /= 1024.0
@@ -51,8 +59,6 @@ def format_bytes(bytes_value):
 
 
 def size_to_bytes(size_str: str):
-    sizes = ["b", "kb", "mb", "gb", "tb"]
-
     if type(size_str) is not str:
         return None
     parts = size_str.split()
@@ -66,12 +72,12 @@ def size_to_bytes(size_str: str):
         return None
     unit = unit.lower()
 
-    if unit not in sizes or not math.isfinite(value) or value < 0:
+    multiplier = _SIZE_MULTIPLIERS.get(unit)
+    if multiplier is None or not math.isfinite(value) or value < 0:
         return None
 
-    multiplier = 1024 ** sizes.index(unit)
     size_bytes = value * multiplier
-    if not math.isfinite(size_bytes) or size_bytes > _MAX_SIGNED_64:
+    if not math.isfinite(size_bytes) or size_bytes > MAX_SIGNED_BIGINT:
         return None
     return int(size_bytes)
 
@@ -89,13 +95,13 @@ def format_video_info(data: ParsedData):
     if data.bit_depth:
         video_parts.append(data.bit_depth)
 
-    return " • ".join(video_parts) if video_parts else ""
+    return " • ".join(video_parts)
 
 
 def format_audio_info(data: ParsedData):
     audio_parts = [*data.audio, *data.channels]
 
-    return " • ".join(audio_parts) if audio_parts else ""
+    return " • ".join(audio_parts)
 
 
 def format_quality_info(data: ParsedData):
@@ -116,7 +122,7 @@ def format_quality_info(data: ParsedData):
     if data.extended:
         quality_parts.append("EXTENDED")
 
-    return " • ".join(quality_parts) if quality_parts else ""
+    return " • ".join(quality_parts)
 
 
 def format_group_info(data: ParsedData):
@@ -134,6 +140,7 @@ _STYLE_EMOJI = {
     "tracker": "🔎 {}",
     "tracker_clean": "🔎 Comet|{}",
     "languages": None,
+    "subtitles": "💬 {}",
 }
 
 _STYLE_PLAIN = {
@@ -147,6 +154,7 @@ _STYLE_PLAIN = {
     "tracker": "Source: {}",
     "tracker_clean": "Source: Comet|{}",
     "languages": "Languages: {}",
+    "subtitles": "Subtitles: {}",
 }
 
 
@@ -158,48 +166,50 @@ def _get_formatted_components(
     tracker: str,
     result_format: list,
     style: dict,
+    media_info: MediaInfo | None = None,
 ):
-    has_all = "all" in result_format
+    requested = set(result_format)
+    has_all = "all" in requested
     components = {}
 
-    if has_all or "title" in result_format:
+    if has_all or "title" in requested:
         components["title"] = style["title"].format(ttitle)
 
-    if has_all or "video_info" in result_format:
+    if has_all or "video_info" in requested:
         info = format_video_info(data)
         if info:
             components["video"] = style["video"].format(info)
 
-    if has_all or "audio_info" in result_format:
+    if has_all or "audio_info" in requested:
         info = format_audio_info(data)
         if info:
             components["audio"] = style["audio"].format(info)
 
-    if has_all or "quality_info" in result_format:
+    if has_all or "quality_info" in requested:
         info = format_quality_info(data)
         if info:
             components["quality"] = style["quality"].format(info)
 
-    if has_all or "release_group" in result_format:
+    if has_all or "release_group" in requested:
         info = format_group_info(data)
         if info:
             components["group"] = style["group"].format(info)
 
-    if (has_all or "seeders" in result_format) and seeders is not None:
+    if (has_all or "seeders" in requested) and seeders is not None:
         components["seeders"] = style["seeders"].format(seeders)
 
-    if (has_all or "size" in result_format) and size is not None:
+    if (has_all or "size" in requested) and size is not None:
         components["size"] = style["size"].format(format_bytes(size))
 
-    if (has_all or "tracker" in result_format) and tracker:
-        if settings.COMET_CLEAN_TRACKER and tracker[:6] == "Comet|":
+    if (has_all or "tracker" in requested) and tracker:
+        if settings.COMET_CLEAN_TRACKER and tracker.startswith("Comet|"):
             components["tracker"] = style["tracker_clean"].format(
                 tracker.rsplit("|", 1)[-1]
             )
         else:
             components["tracker"] = style["tracker"].format(tracker)
 
-    if (has_all or "languages" in result_format) and data.languages:
+    if (has_all or "languages" in requested) and data.languages:
         lang_fmt = style["languages"]
         if lang_fmt is None:
             components["languages"] = "/".join(
@@ -207,6 +217,17 @@ def _get_formatted_components(
             )
         else:
             components["languages"] = lang_fmt.format("/".join(data.languages))
+
+    if (
+        (has_all or "subtitles" in requested)
+        and media_info is not None
+        and media_info.subtitle_languages
+    ):
+        subtitles = "/".join(
+            (get_language_emoji(language) if style["languages"] is None else language)
+            for language in media_info.subtitle_languages
+        )
+        components["subtitles"] = style["subtitles"].format(subtitles)
 
     return components
 
@@ -218,9 +239,17 @@ def get_formatted_components(
     size: int,
     tracker: str,
     result_format: list,
+    media_info: MediaInfo | None = None,
 ):
     return _get_formatted_components(
-        data, ttitle, seeders, size, tracker, result_format, _STYLE_EMOJI
+        data,
+        ttitle,
+        seeders,
+        size,
+        tracker,
+        result_format,
+        _STYLE_EMOJI,
+        media_info,
     )
 
 
@@ -231,9 +260,17 @@ def get_formatted_components_plain(
     size: int,
     tracker: str,
     result_format: list,
+    media_info: MediaInfo | None = None,
 ):
     return _get_formatted_components(
-        data, ttitle, seeders, size, tracker, result_format, _STYLE_PLAIN
+        data,
+        ttitle,
+        seeders,
+        size,
+        tracker,
+        result_format,
+        _STYLE_PLAIN,
+        media_info,
     )
 
 
@@ -258,6 +295,9 @@ def format_title(components: dict):
     if "languages" in components:
         lines.append(components["languages"])
 
+    if "subtitles" in components:
+        lines.append(components["subtitles"])
+
     if not lines:
         return "Empty result format configuration"
 
@@ -265,12 +305,7 @@ def format_title(components: dict):
 
 
 def format_chilllink(components: dict, cached: bool):
-    metadata = []
-
-    if cached:
-        metadata.append("⚡ Instant")
-    else:
-        metadata.append("⬇️ Not Cached")
+    metadata = ["⚡ Instant" if cached else "⬇️ Not Cached"]
 
     for key, value in components.items():
         if key != "title":

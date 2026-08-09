@@ -6,8 +6,6 @@ from urllib.parse import urlencode
 import aiohttp
 
 from comet.core.provider_json import is_success_status
-from comet.usenet.limits import MAX_NZB_DOCUMENT_BYTES
-from comet.utils.http_client import read_bounded_body
 
 GENERATE_NZB_URL = "https://members.easynews.com/2.0/api/dl-nzb"
 
@@ -30,58 +28,29 @@ class EasynewsNzbError(RuntimeError):
         self.auth_failed = auth_failed
 
 
-def _bounded_utf8(
-    value: object,
-    maximum_characters: int,
-    label: str,
-    *,
-    forbid_controls: bool = False,
-) -> bytes:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"Easynews {label} is invalid")
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"Easynews {label} is invalid") from exc
-    if len(value) > maximum_characters or (
-        forbid_controls
-        and any(ord(character) < 32 or ord(character) == 127 for character in value)
-    ):
-        raise ValueError(f"Easynews {label} is invalid")
-    return encoded
-
-
 def credential(value: object) -> str:
-    _bounded_utf8(value, 512, "credential", forbid_controls=True)
+    if not isinstance(value, str) or not value:
+        raise ValueError("Easynews credential is invalid")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Easynews credential is invalid") from exc
     return value
 
 
-def authorization_header(username: object, password: object) -> dict[str, str]:
-    normalized_username = credential(username)
-    normalized_password = credential(password)
-    token = base64.b64encode(
-        f"{normalized_username}:{normalized_password}".encode()
-    ).decode()
+def authorization_header(username: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
 
 
-def generated_nzb_form(payload: object) -> bytes:
+def generated_nzb_form(payload: dict) -> bytes:
     """Encode the exact closed Easynews single-item form."""
-    if not isinstance(payload, dict):
-        raise ValueError("Easynews locator is invalid")
-    content_hash = payload.get("hash")
-    filename = payload.get("filename")
-    extension = payload.get("extension")
+    content_hash = payload["hash"]
+    filename = payload["filename"]
+    extension = payload["extension"]
     signature = payload.get("signature")
-    _bounded_utf8(content_hash, 256, "hash")
-    encoded_filename = (
-        base64.b64encode(_bounded_utf8(filename, 512, "filename")).decode().rstrip("=")
-    )
-    encoded_extension = (
-        base64.b64encode(_bounded_utf8(extension, 32, "extension")).decode().rstrip("=")
-    )
-    if signature is not None:
-        _bounded_utf8(signature, 512, "signature")
+    encoded_filename = base64.b64encode(filename.encode()).decode().rstrip("=")
+    encoded_extension = base64.b64encode(extension.encode()).decode().rstrip("=")
     item_field = "0" if signature is None else f"0&sig={signature}"
     return urlencode(
         (
@@ -135,13 +104,7 @@ async def generate_nzb(
                 )
             if not is_success_status(response.status):
                 raise EasynewsNzbError("easynews_generate_rejected")
-            try:
-                document = await read_bounded_body(
-                    response,
-                    MAX_NZB_DOCUMENT_BYTES,
-                )
-            except ValueError as exc:
-                raise EasynewsNzbError("easynews_generate_too_large") from exc
+            document = await response.read()
     except (aiohttp.ClientError, TimeoutError) as exc:
         raise EasynewsNzbError(
             "easynews_generate_unavailable",

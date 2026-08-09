@@ -1,6 +1,5 @@
 import pytest
 
-from comet.discovery.adapters.animetosho import AnimeToshoAdapter
 from comet.discovery.adapters.easynews import EasynewsSearchAdapter
 from comet.discovery.adapters.newznab import NewznabAdapter
 from comet.discovery.adapters.stremio_addon import StremioAddonAdapter
@@ -35,26 +34,6 @@ def test_registry_does_not_hide_invalid_adapter_configuration():
 
     with pytest.raises(ValueError):
         build_discovery_adapters(config, object())
-
-
-def test_registry_builds_the_server_managed_animetosho_source():
-    config = {
-        "schemaVersion": 2,
-        "discoverySources": [
-            {
-                "configurationId": "source",
-                "kind": "animetosho",
-                "enabled": True,
-                "options": {"maxResults": 100, "pageSize": 50},
-            }
-        ],
-    }
-
-    adapter = build_discovery_adapters(config, object())["source"]
-
-    assert isinstance(adapter, AnimeToshoAdapter)
-    assert adapter._configuration.max_results == 100
-    assert adapter._configuration.page_size == 50
 
 
 def test_registry_resolves_the_configured_stremio_addon_account():

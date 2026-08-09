@@ -1,4 +1,4 @@
-"""Bounded JSON response primitives shared by external providers."""
+"""JSON object codecs with opt-in bounds for untrusted provider responses."""
 
 import json
 
@@ -19,6 +19,27 @@ def _reject_constant(_value):
     raise ProviderJsonError("invalid JSON constant")
 
 
+def decode_json_object(body: bytes) -> dict:
+    """Decode a JSON object without imposing a transport-size policy."""
+    if not body:
+        raise ProviderJsonError("invalid provider body")
+    try:
+        payload = json.loads(
+            body.decode("utf-8"),
+            parse_constant=_reject_constant,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise ProviderJsonError("invalid provider JSON") from exc
+    if not isinstance(payload, dict):
+        raise ProviderJsonError("invalid provider JSON object")
+    return payload
+
+
+async def read_json_object(response) -> dict:
+    """Read an unbounded response from a trusted origin and decode its object."""
+    return decode_json_object(await response.read())
+
+
 async def read_provider_body(
     response,
     *,
@@ -37,19 +58,9 @@ def decode_provider_json(
     maximum: int = MAX_PROVIDER_JSON_BYTES,
 ) -> dict:
     """Decode one already-read bounded JSON object."""
-    if not body or len(body) > maximum:
+    if len(body) > maximum:
         raise ProviderJsonError("invalid provider body")
-    try:
-        text = body.decode("utf-8")
-        payload = json.loads(
-            text,
-            parse_constant=_reject_constant,
-        )
-    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise ProviderJsonError("invalid provider JSON") from exc
-    if not isinstance(payload, dict):
-        raise ProviderJsonError("invalid provider JSON object")
-    return payload
+    return decode_json_object(body)
 
 
 def decode_provider_data(
@@ -70,19 +81,6 @@ async def read_provider_json(
     maximum: int = MAX_PROVIDER_JSON_BYTES,
 ) -> dict:
     """Read and decode one bounded JSON object."""
-    return decode_provider_json(
+    return decode_json_object(
         await read_provider_body(response, maximum=maximum),
-        maximum=maximum,
-    )
-
-
-async def read_provider_data(
-    response,
-    *,
-    maximum: int = MAX_PROVIDER_JSON_BYTES,
-) -> dict:
-    """Read one JSON envelope containing a named data object."""
-    return decode_provider_data(
-        await read_provider_body(response, maximum=maximum),
-        maximum=maximum,
     )

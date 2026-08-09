@@ -39,9 +39,6 @@ impl MultilineBodyDecoder {
     /// Returns `true` only for the terminating dot line. Dot-stuffing is
     /// removed before the decoded article bytes are appended.
     pub fn push_line(&mut self, line: &[u8]) -> Result<bool, &'static str> {
-        if self.complete {
-            return Err("nntp_invalid_response");
-        }
         let Some(value) = multiline_value(line)? else {
             self.complete = true;
             return Ok(true);

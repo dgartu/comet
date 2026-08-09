@@ -32,25 +32,27 @@ ScraperMode = Annotated[
 
 def normalize_scraper_name(name: str) -> str:
     normalized = name.strip().casefold()
-    if normalized.endswith("scraper"):
-        normalized = normalized.removesuffix("scraper")
-    if not normalized or not normalized.isascii() or not normalized.isalnum():
-        raise ValueError("scraper name is invalid")
+    for suffix in ("scraper", "adapter"):
+        if normalized.endswith(suffix):
+            normalized = normalized.removesuffix(suffix)
+            break
     return normalized
 
 
-def normalize_scraper_timeout_selector(selector: str) -> str:
-    selector = selector.strip()
-    parts = selector.split(":")
-    if len(parts) > 2:
-        raise ValueError("scraper timeout selector is invalid")
+def scraper_timeout(name: str, context: ScrapeContext) -> float:
+    """Resolve the sole provider runtime budget for one scrape context."""
+    from comet.core.models import settings
 
-    scraper_name = normalize_scraper_name(parts[0])
-    if len(parts) == 1:
-        return scraper_name
-
-    try:
-        context = ScrapeContext(parts[1].strip().casefold())
-    except ValueError:
-        raise ValueError("scraper timeout selector is invalid") from None
-    return f"{scraper_name}:{context.value}"
+    normalized_name = normalize_scraper_name(name.partition(" #")[0])
+    overrides = settings.SCRAPER_TIMEOUT_OVERRIDES
+    return overrides.get(
+        f"{normalized_name}:{context.value}",
+        overrides.get(
+            normalized_name,
+            (
+                settings.LIVE_SCRAPE_TIMEOUT
+                if context is ScrapeContext.LIVE
+                else settings.BACKGROUND_SCRAPE_TIMEOUT
+            ),
+        ),
+    )

@@ -143,6 +143,7 @@
     "preview": {
       "audio": "DDP 5.1 · أتموس",
       "languages": "🇬🇧 / 🇫🇷",
+      "subtitles": "💬 🇬🇧 / 🇫🇷",
       "quality": "بلو راي",
       "releaseGroup": "YTS",
       "seeders": "1,234 موزّعًا",
@@ -846,7 +847,6 @@
     },
     "detail": {
       "timestamp": "الوقت",
-      "context": "السياق",
       "process": "العملية",
       "errorCode": "رمز الخطأ",
       "safeDetails": "تفاصيل منظّمة وآمنة",

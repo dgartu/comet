@@ -38,6 +38,9 @@ class _Response:
     async def __aexit__(self, exc_type, exc, traceback):
         return False
 
+    async def read(self):
+        return await self.content.read(-1)
+
 
 class _Session:
     def __init__(self, *responses):

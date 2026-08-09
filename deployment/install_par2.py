@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -88,7 +89,13 @@ def _write_exclusive(path: Path, payload: bytes, mode: int) -> None:
         mode,
     )
     try:
-        with os.fdopen(descriptor, "wb") as stream:
+        stream = os.fdopen(descriptor, "wb")
+    except BaseException:
+        os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
+    try:
+        with stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -98,12 +105,7 @@ def _write_exclusive(path: Path, payload: bytes, mode: int) -> None:
 
 
 def install(architecture: str, output: Path) -> None:
-    try:
-        filename, expected_release_sha256 = RELEASES[architecture]
-    except KeyError as error:
-        raise RuntimeError(
-            f"unsupported target architecture: {architecture}"
-        ) from error
+    filename, expected_release_sha256 = RELEASES[architecture]
 
     release = download_https(
         f"{RELEASE_BASE_URL}/{filename}",
@@ -117,31 +119,35 @@ def install(architecture: str, output: Path) -> None:
     authors = _source_member(source, "AUTHORS")
 
     output.mkdir(mode=0o755, parents=True, exist_ok=False)
-    bin_directory = output / "bin"
-    documentation = output / "share" / "doc" / "par2cmdline-turbo"
-    bin_directory.mkdir(mode=0o755)
-    documentation.mkdir(mode=0o755, parents=True)
-    executable_path = bin_directory / "par2"
-    _write_exclusive(executable_path, executable, 0o755)
-    _write_exclusive(documentation / "COPYING", copying, 0o644)
-    _write_exclusive(documentation / "AUTHORS", authors, 0o644)
-    _write_exclusive(documentation / "source.tar.gz", source, 0o644)
+    try:
+        bin_directory = output / "bin"
+        documentation = output / "share" / "doc" / "par2cmdline-turbo"
+        bin_directory.mkdir(mode=0o755)
+        documentation.mkdir(mode=0o755, parents=True)
+        executable_path = bin_directory / "par2"
+        _write_exclusive(executable_path, executable, 0o755)
+        _write_exclusive(documentation / "COPYING", copying, 0o644)
+        _write_exclusive(documentation / "AUTHORS", authors, 0o644)
+        _write_exclusive(documentation / "source.tar.gz", source, 0o644)
 
-    completed = subprocess.run(
-        [executable_path, "-V"],
-        check=False,
-        close_fds=True,
-        capture_output=True,
-        env={"LANG": "C", "LC_ALL": "C"},
-        text=True,
-        timeout=5,
-    )
-    if (
-        completed.returncode != 0
-        or completed.stdout.strip() != EXPECTED_VERSION
-        or completed.stderr
-    ):
-        raise RuntimeError("installed calculator failed its exact version check")
+        completed = subprocess.run(
+            [executable_path, "-V"],
+            check=False,
+            close_fds=True,
+            capture_output=True,
+            env={"LANG": "C", "LC_ALL": "C"},
+            text=True,
+            timeout=5,
+        )
+        if (
+            completed.returncode != 0
+            or completed.stdout.strip() != EXPECTED_VERSION
+            or completed.stderr
+        ):
+            raise RuntimeError("installed calculator failed its exact version check")
+    except BaseException:
+        shutil.rmtree(output)
+        raise
 
 
 def main() -> None:

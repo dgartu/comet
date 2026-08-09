@@ -6,6 +6,7 @@ import uuid
 import xml.etree.ElementTree as element_tree
 from collections import deque
 from dataclasses import dataclass
+from itertools import count
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import aiohttp
@@ -26,10 +27,10 @@ from comet.playback.base import (
     Readiness,
 )
 from comet.usenet.file_selection import FileSelectionError, select_remote_video_file
-from comet.usenet.limits import MAX_NZB_METADATA_BYTES
 from comet.usenet.outbound import configured_http_origin, http_url_with_basic_auth
 from comet.usenet.upstream import UpstreamUrlError, normalize_upstream_base_url
 from comet.utils.http_client import read_bounded_body
+from comet.utils.text import has_ascii_control
 
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
 _MAX_DAV_RESPONSE_BYTES = 1024 * 1024
@@ -37,7 +38,6 @@ _MAX_DAV_TRAVERSAL_BYTES = 4 * 1024 * 1024
 _MAX_DAV_ENTRIES = 2048
 _MAX_DAV_DEPTH = 16
 _SAB_PAGE_SIZE = 200
-_MAX_SAB_RECONCILIATION_ITEMS = 2_000
 _SAB_RECONCILIATION_TIMEOUT_SECONDS = 20
 
 
@@ -73,9 +73,7 @@ def _bounded_text(value: object, maximum_bytes: int) -> bool:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return len(encoded) <= maximum_bytes and not any(
-        ord(character) < 32 or ord(character) == 127 for character in value
-    )
+    return len(encoded) <= maximum_bytes
 
 
 def _base_url(value: object, *, server_reachable: bool) -> str | None:
@@ -98,8 +96,6 @@ def parse_webdav_entries(
     root_url: str, document: bytes
 ) -> tuple[NzbDavWebDavEntry, ...]:
     """Parse one bounded DAV multistatus document below a fixed completed job."""
-    if not isinstance(document, bytes) or not document or len(document) > 1024 * 1024:
-        raise ValueError("invalid NzbDAV WebDAV response")
     if b"<!ENTITY" in document.upper():
         raise ValueError("invalid NzbDAV WebDAV response")
     root_parts = urlsplit(root_url)
@@ -168,14 +164,7 @@ def parse_webdav_entries(
             continue
         parts = relative.split("/")
         if (
-            any(
-                not part
-                or part in {".", ".."}
-                or any(
-                    ord(character) < 32 or ord(character) == 127 for character in part
-                )
-                for part in parts
-            )
+            any(not part or part in {".", ".."} or "\x00" in part for part in parts)
             or "\\" in relative
             or len(relative.encode("utf-8")) > 2048
         ):
@@ -273,7 +262,7 @@ class NzbDavProvider:
         ]
         if not all(_bounded_text(value, 1024) for value in values):
             return None
-        if not values[0].isascii() or ":" in values[1]:
+        if not values[0].isascii() or has_ascii_control(values[0]) or ":" in values[1]:
             return None
         return values[0], values[1], values[2]
 
@@ -344,16 +333,6 @@ class NzbDavProvider:
         options = cls._options(config)
         if options is None:
             raise ValueError("NzbDAV configuration is unavailable")
-        if (
-            not isinstance(verified_name, str)
-            or not verified_name.startswith("comet-")
-            or len(verified_name) != 70
-            or any(
-                character not in "0123456789abcdef" for character in verified_name[6:]
-            )
-        ):
-            raise ValueError("invalid NzbDAV completed job")
-        category = cls._category(category, "")
         return f"{options[0]}/content/{quote(category, safe='')}/{quote(verified_name, safe='')}"
 
     @classmethod
@@ -375,16 +354,7 @@ class NzbDavProvider:
         cls, config: dict, verified_name: str, category: str, relative_path: str
     ) -> str:
         root = cls.verified_content_root(config, verified_name, category)
-        if (
-            not isinstance(relative_path, str)
-            or not relative_path
-            or not _bounded_text(relative_path, 2048)
-            or "\\" in relative_path
-        ):
-            raise ValueError("invalid NzbDAV file path")
         parts = relative_path.split("/")
-        if any(not part or part in {".", ".."} for part in parts):
-            raise ValueError("invalid NzbDAV file path")
         return f"{root}/{'/'.join(quote(part, safe='') for part in parts)}"
 
     @classmethod
@@ -581,7 +551,6 @@ class NzbDavProvider:
             )
         api_key, username, password = credentials
         sab_ok = False
-        sab_auth = False
         try:
             headers = {
                 "X-Api-Key": api_key,
@@ -595,18 +564,17 @@ class NzbDavProvider:
                 allow_redirects=False,
                 timeout=_REQUEST_TIMEOUT,
             ) as categories_response:
-                sab_auth = categories_response.status in {401, 403}
+                if categories_response.status in {401, 403}:
+                    return ProviderStatus(
+                        Readiness.TERMINAL_FAILURE,
+                        Actionability.NONE,
+                        code="credentials_rejected",
+                        auth_failed=True,
+                    )
                 category_payload = (
                     await read_provider_json(categories_response)
                     if is_success_status(categories_response.status)
                     else {}
-                )
-            if sab_auth:
-                return ProviderStatus(
-                    Readiness.TERMINAL_FAILURE,
-                    Actionability.NONE,
-                    code="credentials_rejected",
-                    auth_failed=True,
                 )
             categories = category_payload.get("categories")
             sab_ok = isinstance(categories, list) and all(
@@ -633,7 +601,7 @@ class NzbDavProvider:
                 dav_auth = dav_response.status in {401, 403}
         except (aiohttp.ClientError, TimeoutError):
             pass
-        if sab_auth or dav_auth:
+        if dav_auth:
             return ProviderStatus(
                 Readiness.TERMINAL_FAILURE,
                 Actionability.NONE,
@@ -654,19 +622,6 @@ class NzbDavProvider:
         options = self._options(config)
         if options is None or self._session is None:
             raise ValueError("NzbDAV configuration is unavailable")
-        if (
-            not isinstance(document, bytes)
-            or not document
-            or len(document) > MAX_NZB_METADATA_BYTES
-            or not isinstance(artifact_sha256, str)
-            or len(artifact_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in artifact_sha256)
-        ):
-            raise ValueError("invalid NzbDAV artifact submission")
-        try:
-            category = self._category(category, "")
-        except ValueError as exc:
-            raise ValueError("invalid NzbDAV artifact submission") from exc
         base_url, api_key, _username, _password = options
         filename = f"comet-{artifact_sha256}.nzb"
         form = aiohttp.FormData()
@@ -742,15 +697,8 @@ class NzbDavProvider:
     ) -> NzbDavReconciliation | None:
         """Reconcile one sealed deterministic submission without global adoption."""
         options = self._options(config)
-        if (
-            options is None
-            or self._session is None
-            or not isinstance(artifact_sha256, str)
-            or len(artifact_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in artifact_sha256)
-        ):
+        if options is None or self._session is None:
             raise ValueError("NzbDAV reconciliation is unavailable")
-        category = self._category(category, "")
         base_url, api_key, _username, _password = options
         headers = {
             "X-Api-Key": api_key,
@@ -758,16 +706,10 @@ class NzbDavProvider:
             "Accept-Encoding": "identity",
         }
         filename = f"comet-{artifact_sha256}.nzb"
-        queue_matches = []
-        history_matches = []
         try:
             async with asyncio.timeout(_SAB_RECONCILIATION_TIMEOUT_SECONDS):
                 for mode in ("queue", "history"):
-                    for start in range(
-                        0,
-                        _MAX_SAB_RECONCILIATION_ITEMS,
-                        _SAB_PAGE_SIZE,
-                    ):
+                    for start in count(step=_SAB_PAGE_SIZE):
                         async with self._session.get(
                             f"{base_url}/api",
                             params={
@@ -819,28 +761,24 @@ class NzbDavProvider:
                                     slot.get("filename") == filename
                                     and slot_category == category
                                 ):
-                                    queue_matches.append(_job_uuid(slot.get("nzo_id")))
+                                    return NzbDavReconciliation(
+                                        _job_uuid(slot.get("nzo_id")),
+                                        "queued",
+                                    )
                             elif (
                                 slot.get("nzb_name") == filename
                                 and slot_category == category
                             ):
                                 status = _sab_history_status(slot.get("status"))
                                 job_id = _job_uuid(slot.get("nzo_id"))
-                                history_matches.append(
-                                    NzbDavReconciliation(
-                                        job_id,
-                                        status
-                                        if status in {"completed", "failed"}
-                                        else "queued",
-                                    )
+                                return NzbDavReconciliation(
+                                    job_id,
+                                    status
+                                    if status in {"completed", "failed"}
+                                    else "queued",
                                 )
                         if len(page) < _SAB_PAGE_SIZE:
                             break
-                    else:
-                        raise NzbDavError(
-                            "nzbdav_reconciliation_unavailable",
-                            retryable=True,
-                        )
         except ProviderJsonError:
             raise NzbDavError(
                 "nzbdav_invalid_response",
@@ -848,11 +786,7 @@ class NzbDavProvider:
             ) from None
         except (aiohttp.ClientError, TimeoutError):
             raise NzbDavError("nzbdav_unavailable", retryable=True) from None
-        if queue_matches:
-            return NzbDavReconciliation(queue_matches[0], "queued")
-        if not history_matches:
-            return None
-        return history_matches[0]
+        return None
 
     async def poll_artifact(
         self, config: dict, job_id: str, artifact_sha256: str, category: str
@@ -860,20 +794,6 @@ class NzbDavProvider:
         options = self._options(config)
         if options is None or self._session is None:
             raise ValueError("NzbDAV configuration is unavailable")
-        try:
-            normalized_job_id = str(uuid.UUID(job_id))
-        except ValueError as exc:
-            raise ValueError("invalid NzbDAV job") from exc
-        if job_id != normalized_job_id:
-            raise ValueError("invalid NzbDAV job")
-        job_id = normalized_job_id
-        if (
-            not isinstance(artifact_sha256, str)
-            or len(artifact_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in artifact_sha256)
-        ):
-            raise ValueError("invalid NzbDAV job")
-        category = self._category(category, "")
         base_url, api_key, _username, _password = options
         slots_by_mode: dict[str, list] = {}
         for mode in ("queue", "history"):

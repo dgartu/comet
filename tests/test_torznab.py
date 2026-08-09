@@ -111,6 +111,9 @@ class _Response:
     async def __aexit__(self, exc_type, exc, traceback):
         return False
 
+    async def read(self):
+        return await self.content.read(-1)
+
 
 @contextmanager
 def _uncached_title_lookups():
@@ -206,11 +209,9 @@ class TorznabPureTests(unittest.IsolatedAsyncioTestCase):
                 parse_torznab_query(_request(query))
             self.assertEqual(context.exception.code, 201)
 
-    def test_parser_bounds_query_fanout_and_text_before_resolution(self):
+    def test_parser_bounds_total_query_and_parameter_fanout(self):
         invalid_queries = (
             "&".join(f"p{index}=x" for index in range(33)),
-            f"t=search&q={'x' * 513}",
-            "t=search&" + "&".join("cat=5000" for _ in range(65)),
             f"t=search&unused={'x' * 8_193}",
         )
         for query in invalid_queries:
@@ -220,6 +221,14 @@ class TorznabPureTests(unittest.IsolatedAsyncioTestCase):
             ):
                 parse_torznab_query(_request(query))
             self.assertEqual(context.exception.code, 201)
+
+    def test_parser_has_no_sub_limits_inside_the_bounded_query(self):
+        parsed = parse_torznab_query(
+            _request(f"t=search&q={'x' * 513}&cat=" + ",".join(["5000"] * 65))
+        )
+
+        self.assertEqual(len(parsed.query), 513)
+        self.assertEqual(len(parsed.categories), 65)
 
     def test_parser_ignores_bounded_unconsumed_parameters(self):
         parsed = parse_torznab_query(_request(f"t=caps&future={'x' * 7_000}"))

@@ -14,6 +14,7 @@ from comet.core.capabilities import (
     EligibleProvider,
 )
 from comet.core.db_router import ReplicaAwareDatabase
+from comet.core.models import settings
 from comet.core.schema_migrations import (
     MigrationContext,
     _ensure_managed_table,
@@ -148,7 +149,6 @@ class SearchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(failed.contexts), 1)
         self.assertEqual(disabled.contexts, [])
         self.assertEqual(successful.contexts[0].configuration_id, "ok")
-        self.assertIsNotNone(successful.contexts[0].hard_deadline)
 
     async def test_planned_source_requires_its_adapter(self):
         plan = CapabilityPlan(
@@ -246,9 +246,7 @@ class SearchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        with patch.object(
-            discovery_manager.settings, "BACKGROUND_SCRAPE_TIMEOUT", 0.02
-        ):
+        with patch.object(settings, "BACKGROUND_SCRAPE_TIMEOUT", 0.02):
             result = await SearchCoordinator(
                 {"slow": SlowAdapter(), "fast": fast}
             ).search(
@@ -381,7 +379,7 @@ class CachedSearchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             _torrent_candidate().candidate_id,
         )
 
-    async def test_oversized_source_is_bounded_before_persistence(self):
+    async def test_source_cardinality_is_preserved_through_persistence(self):
         base = _torrent_candidate()
         candidates = tuple(
             replace(

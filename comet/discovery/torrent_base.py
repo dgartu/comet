@@ -1,7 +1,7 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Iterable
 from typing import TypeVar
 
 from comet.core.sources import TransportKind
@@ -58,29 +58,16 @@ async def gather_concurrently[T](
     return successful
 
 
-def parse_valid_items[T, R](items: Iterable[T], parser: Callable[[T], R]) -> list[R]:
-    """Parse provider siblings independently and discard only malformed items."""
-    parsed = []
-    for item in items:
-        try:
-            parsed.append(parser(item))
-        except (AttributeError, KeyError, TypeError, ValueError):
-            continue
-    return parsed
-
-
 class TorrentDiscoveryAdapter(ABC):
     url_setting: str | None = None
     credential_setting: str | None = None
     anime_only_setting: str | None = None
     impersonate: str | None = None
 
-    def __init__(self, manager, session: AsyncClientWrapper, url: str | None = None):
-        del manager
+    def __init__(self, session: AsyncClientWrapper, url: str | None = None):
         self.session = session
         self.url = url
         self.discovery_name = type(self).__name__.removesuffix("Scraper")
-        self.discovery_timeout: float | None = None
 
     async def search(
         self,

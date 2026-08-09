@@ -211,6 +211,27 @@ class ApiV1Tests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
 
+    async def test_login_does_not_impose_an_arbitrary_password_cap(self):
+        password = "x" * 1024
+        with patch.object(api_v1.settings, "ADMIN_DASHBOARD_PASSWORD", password):
+            response = await self.client.post(
+                "/api/v1/auth/login",
+                headers={"Origin": "http://testserver"},
+                json={"password": password},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_login_rejects_an_origin_with_an_invalid_port(self):
+        response = await self.client.post(
+            "/api/v1/auth/login",
+            headers={"Origin": "http://testserver:99999"},
+            json={"password": app_module.settings.ADMIN_DASHBOARD_PASSWORD},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "origin_mismatch")
+
     async def test_login_cookie_session_and_origin_csrf_policy(self):
         no_origin = await self.client.post(
             "/api/v1/auth/login",
@@ -1133,7 +1154,7 @@ class ApiV1Tests(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, *_args):
                 return None
 
-            async def read(self, _size):
+            async def read(self, _size=None):
                 body, self._body = self._body, b""
                 return body
 
@@ -1220,8 +1241,7 @@ class ApiV1Tests(unittest.IsolatedAsyncioTestCase):
                     "location": ["USENET_NATIVE_ACCESS_TOKEN"],
                     "type": "value_error",
                     "message": (
-                        "USENET_NATIVE_ACCESS_TOKEN must be a non-empty opaque value "
-                        "of at most 256 bytes"
+                        "USENET_NATIVE_ACCESS_TOKEN must be a non-empty opaque value"
                     ),
                 }
             ],
@@ -1509,7 +1529,13 @@ class PostgresAggregateTests(unittest.IsolatedAsyncioTestCase):
                             "count": 1,
                             "average_size": Decimal(42),
                             "total_size": Decimal(42),
-                        }
+                        },
+                        {
+                            "service": "offcloud",
+                            "count": 1,
+                            "average_size": None,
+                            "total_size": None,
+                        },
                     ],
                 ]
             ),
@@ -1531,3 +1557,4 @@ class PostgresAggregateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(snapshot.debrid_cache.by_service[0].total_size, 42)
+        self.assertIsNone(snapshot.debrid_cache.by_service[1].total_size)

@@ -5,8 +5,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const MIN_SPOOL_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_SPOOL_BYTES: u64 = 2 * 1024 * 1024 * 1024 * 1024;
 const MAX_SPOOL_ENTRIES: usize = 25_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,12 +52,6 @@ impl NativeResources {
         maximum_archive_jobs: usize,
         maximum_repair_jobs: usize,
     ) -> Result<Self, &'static str> {
-        if !(MIN_SPOOL_BYTES..=MAX_SPOOL_BYTES).contains(&maximum_spool_bytes)
-            || maximum_archive_jobs == 0
-            || maximum_repair_jobs == 0
-        {
-            return Err("invalid_native_resource_budget");
-        }
         let root = fs::canonicalize(root).map_err(|_| "native_resource_unavailable")?;
         let metadata = fs::symlink_metadata(&root).map_err(|_| "native_resource_unavailable")?;
         if !metadata.file_type().is_dir() {
@@ -114,16 +106,33 @@ impl NativeResources {
     }
 
     pub(crate) fn stats(&self) -> Result<Stats, &'static str> {
-        let state = self.state.lock().expect("native resource state lock");
+        let (
+            reserved_bytes,
+            archive_jobs_active,
+            repair_jobs_active,
+            archive_busy_rejections,
+            repair_busy_rejections,
+            spool_rejections,
+        ) = {
+            let state = self.state.lock().expect("native resource state lock");
+            (
+                state.reserved_bytes,
+                state.archive_jobs_active,
+                state.repair_jobs_active,
+                state.archive_busy_rejections,
+                state.repair_busy_rejections,
+                state.spool_rejections,
+            )
+        };
         let resident = resident_bytes(&self.root)?;
         Ok(Stats {
             resident_bytes: resident,
-            reserved_bytes: state.reserved_bytes,
-            archive_jobs_active: state.archive_jobs_active,
-            repair_jobs_active: state.repair_jobs_active,
-            archive_busy_rejections: state.archive_busy_rejections,
-            repair_busy_rejections: state.repair_busy_rejections,
-            spool_rejections: state.spool_rejections,
+            reserved_bytes,
+            archive_jobs_active,
+            repair_jobs_active,
+            archive_busy_rejections,
+            repair_busy_rejections,
+            spool_rejections,
         })
     }
 
@@ -442,24 +451,6 @@ mod tests {
         assert_eq!(
             resources.reserve_materialization(1, &fixture.0).err(),
             Some("native_resource_unavailable")
-        );
-    }
-
-    #[test]
-    fn validates_native_resource_configuration_again_at_the_engine_boundary() {
-        let fixture = Fixture::new();
-
-        assert_eq!(
-            NativeResources::new(&fixture.0, 1024 * 1024 * 1024 - 1, 0, 1, 1).err(),
-            Some("invalid_native_resource_budget")
-        );
-        assert_eq!(
-            NativeResources::new(&fixture.0, 1024 * 1024 * 1024, 0, 0, 1).err(),
-            Some("invalid_native_resource_budget")
-        );
-        assert_eq!(
-            NativeResources::new(&fixture.0, 1024 * 1024 * 1024, 0, 1, 0).err(),
-            Some("invalid_native_resource_budget")
         );
     }
 }

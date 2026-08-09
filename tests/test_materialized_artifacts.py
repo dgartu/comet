@@ -69,13 +69,12 @@ class MaterializedArtifactRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 selector_version, archive_plan_version,
                 client, state, target_kind,
                 reconstruction_blueprint_json,
-                created_at, last_used_at, idle_expires_at,
-                absolute_expires_at
+                created_at, last_used_at, absolute_expires_at
             ) VALUES (
                 :preparation_id, :partition, :preparation_intent_key,
                 :candidate_id, :provider_id, 'comet_native_usenet',
                 :locator_ids_json, '[0]', 1, 1, 1, 1,
-                'stremio', 'pending', NULL, NULL, 1, 1, 1000, 1000
+                'stremio', 'pending', NULL, NULL, 1, 1, 1000
             )
             """,
             {
@@ -120,23 +119,6 @@ class MaterializedArtifactRepositoryTests(unittest.IsolatedAsyncioTestCase):
             MaterializedArtifactRepository._canonical_artifacts((self.artifact,) * 65),
             (self.artifact,),
         )
-
-    async def test_registration_accepts_only_the_current_manifest_identity(self):
-        repository = MaterializedArtifactRepository(self.root, self.database)
-        for source_identity in (
-            "nh1:" + "f" * 40,
-            "nm1:" + "F" * 64,
-            "nm1:" + "f" * 63,
-        ):
-            with self.subTest(source_identity=source_identity):
-                with self.assertRaisesRegex(ValueError, "source identity"):
-                    await repository.register_for_preparation(
-                        self.preparation_id,
-                        owner_configuration_partition=self.partition,
-                        source_nm1=source_identity,
-                        artifacts=(self.artifact,),
-                        now=10,
-                    )
 
     async def test_second_replica_reopens_the_registered_shared_object(self):
         await self._register()

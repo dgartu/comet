@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import idna
 
+from comet.utils.text import has_ascii_control
+
 _SERVER_FIELDS = {
     "name",
     "host",
@@ -46,9 +48,10 @@ def valid_nntp_credential(value: object) -> bool:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return len(encoded) <= _MAX_NNTP_CREDENTIAL_BYTES and not any(
-        character.isspace() or ord(character) < 32 or ord(character) == 127
-        for character in value
+    return (
+        len(encoded) <= _MAX_NNTP_CREDENTIAL_BYTES
+        and not has_ascii_control(value)
+        and not any(character.isspace() for character in value)
     )
 
 
@@ -57,7 +60,8 @@ def canonical_nntp_host(value: object, label: str) -> str:
         not isinstance(value, str)
         or not value
         or len(value) > 253
-        or any(character.isspace() or ord(character) < 33 for character in value)
+        or has_ascii_control(value)
+        or any(character.isspace() for character in value)
         or "://" in value
         or "/" in value
         or "%" in value

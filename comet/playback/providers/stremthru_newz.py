@@ -31,6 +31,7 @@ from comet.usenet.file_selection import FileSelectionError, select_remote_video_
 from comet.usenet.limits import MAX_NZB_FILES
 from comet.usenet.provider_exports import NzbProviderExportError, export_base_url
 from comet.usenet.upstream import UpstreamUrlError, normalize_upstream_base_url
+from comet.utils.text import has_ascii_control
 
 _TERMINAL_STATUSES = frozenset({"failed", "invalid"})
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10, connect=3, sock_read=5)
@@ -172,7 +173,7 @@ def _authorization(value: object) -> str:
         not isinstance(value, str)
         or not value
         or len(value) > 1024
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or has_ascii_control(value)
     ):
         raise ValueError("StremThru authorization is invalid")
     try:
@@ -203,34 +204,6 @@ def _base_url(value: object) -> str:
         value,
         allowed_http_origins=settings.USENET_PRIVATE_UPSTREAM_ORIGINS,
     )
-
-
-def _provider_export_url(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 4096
-        or "\\" in value
-        or any(
-            character.isspace() or ord(character) < 32 or ord(character) == 127
-            for character in value
-        )
-    ):
-        raise ValueError("StremThru export URL is invalid")
-    try:
-        parsed = urlsplit(value)
-        _ = parsed.port
-    except ValueError as exc:
-        raise ValueError("StremThru export URL is invalid") from exc
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.fragment
-    ):
-        raise ValueError("StremThru export URL is invalid")
-    return value
 
 
 def options(config: dict) -> StremThruNewzOptions:
@@ -333,18 +306,20 @@ class StremThruNewzProvider:
         if json_body is not None:
             request_kwargs["json"] = json_body
         try:
-            async with self._control_permit():
-                async with getattr(self._session, method)(
+            async with (
+                self._control_permit(),
+                getattr(self._session, method)(
                     f"{effective.base_url}{path}",
                     **request_kwargs,
-                ) as response:
-                    status = response.status
-                    retry_after = response.headers.get("Retry-After")
-                    body = (
-                        await read_provider_body(response)
-                        if is_success_status(status)
-                        else None
-                    )
+                ) as response,
+            ):
+                status = response.status
+                retry_after = response.headers.get("Retry-After")
+                body = (
+                    await read_provider_body(response)
+                    if is_success_status(status)
+                    else None
+                )
             data = decode_provider_data(body) if body is not None else None
         except ProviderJsonError as exc:
             raise StremThruNewzError("stremthru_invalid_response") from exc
@@ -451,7 +426,6 @@ class StremThruNewzProvider:
 
     async def submit_export(self, export_url: str) -> StremThruNewzSubmission:
         """Submit the stable broker export once and retain only opaque remote state."""
-        export_url = _provider_export_url(export_url)
         status, retry_after, data = await self._control_data(
             "post",
             "/v0/store/newz",
@@ -477,11 +451,6 @@ class StremThruNewzProvider:
         self, remote_id: str, remote_hash: str
     ) -> StremThruNewzRemoteItem:
         """Read only the item sealed by this configuration's remote-work ledger."""
-        try:
-            remote_id = _opaque(remote_id, "remote id")
-            remote_hash = _opaque(remote_hash, "remote hash")
-        except ValueError as exc:
-            raise StremThruNewzError("stremthru_invalid_response") from exc
         status, retry_after, data = await self._control_data(
             "get",
             f"/v0/store/newz/{quote(remote_id, safe='')}",
@@ -540,10 +509,6 @@ class StremThruNewzProvider:
             ) from None
 
     async def generate_link(self, locked_link: str) -> StremThruGeneratedLink:
-        try:
-            locked_link = _locked_link(locked_link)
-        except ValueError as exc:
-            raise StremThruNewzError("stremthru_invalid_response") from exc
         status, retry_after, data = await self._control_data(
             "post",
             "/v0/store/newz/link/generate",

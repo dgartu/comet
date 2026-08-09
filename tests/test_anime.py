@@ -1,10 +1,46 @@
 import asyncio
+import inspect
 import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
+
 from comet.services import anime
 from comet.services.anime import AnimeMapper
+
+
+class _HttpResponse:
+    def __init__(self, value):
+        self._value = value
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    async def read(self):
+        value = self._value() if callable(self._value) else self._value
+        return await value if inspect.isawaitable(value) else value
+
+
+class _HttpSession:
+    def __init__(self, responses):
+        self._responses = responses
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        value = (
+            self._responses[url]
+            if isinstance(self._responses, dict)
+            else lambda: self._responses(url)
+        )
+        return _HttpResponse(value)
 
 
 class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
@@ -47,17 +83,6 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "anime JSON"):
                 await mapper.get_aliases("tt123")
 
-    async def test_oversized_cached_entry_is_not_treated_as_no_aliases(self):
-        mapper = AnimeMapper()
-        mapper.loaded = True
-
-        with patch(
-            "comet.services.anime.database.fetch_one",
-            return_value={"data_json": "x" * (anime._MAX_ENTRY_JSON_BYTES + 1)},
-        ):
-            with self.assertRaisesRegex(ValueError, "cached anime entry"):
-                await mapper.get_aliases("tt123")
-
     async def test_aliases_keep_ordered_unique_current_strings(self):
         mapper = AnimeMapper()
         mapper.loaded = True
@@ -71,7 +96,7 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(aliases, {"original": ["Main"], "ez": ["Alt"]})
 
-    async def test_optional_aliases_keep_only_bounded_usable_titles(self):
+    async def test_optional_aliases_keep_all_usable_titles(self):
         mapper = AnimeMapper()
         mapper.loaded = True
         cases = (
@@ -86,7 +111,7 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
                 },
                 {
                     "original": ["Main"],
-                    "ez": [f"Alias {index}" for index in range(64)],
+                    "ez": [f"Alias {index}" for index in range(65)],
                 },
             ),
         )
@@ -291,13 +316,14 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_remote_refresh_uses_bounded_pinned_fetches(self):
+    async def test_remote_refresh_uses_shared_official_api_session(self):
         mapper = AnimeMapper()
         payloads = {
             mapper._aod_url: b'{"data":[]}',
             mapper._fribb_url: b"[]",
             mapper._kitsu_imdb_url: b"[]",
         }
+        session = _HttpSession(payloads)
 
         @asynccontextmanager
         async def refresh_lock():
@@ -323,16 +349,17 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
                 "comet.services.anime._anime_refresh_lock",
                 new=refresh_lock,
             ),
-            patch(
-                "comet.services.anime.fetch_http_bytes",
-                new=AsyncMock(side_effect=lambda url, **_kwargs: payloads[url]),
-            ) as fetch,
+            patch.object(
+                anime.http_client_manager,
+                "get_session",
+                new=AsyncMock(return_value=session),
+            ),
             patch("comet.services.anime.log.info") as info,
         ):
             self.assertTrue(await mapper._refresh_from_remote())
 
         persist.assert_awaited_once_with([], [], [])
-        self.assertEqual(fetch.await_count, 3)
+        self.assertEqual(len(session.calls), 3)
         self.assertEqual(
             [call.args[0] for call in info.call_args_list],
             [
@@ -344,15 +371,9 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(info.call_args_list[1].kwargs["response_bytes"], 15)
         self.assertEqual(info.call_args_list[2].kwargs["item_count"], 0)
         self.assertEqual(info.call_args_list[2].kwargs["outcome"], "ok")
-        expected_limits = {
-            mapper._aod_url: anime._AOD_MAX_BYTES,
-            mapper._fribb_url: anime._FRIBB_MAX_BYTES,
-            mapper._kitsu_imdb_url: anime._KITSU_MAX_BYTES,
-        }
-        for call in fetch.await_args_list:
-            self.assertEqual(call.kwargs["max_bytes"], expected_limits[call.args[0]])
-            self.assertEqual(call.kwargs["headers"], {"Accept": "application/json"})
-            self.assertEqual(call.kwargs["redirects"], 3)
+        for _url, kwargs in session.calls:
+            self.assertEqual(kwargs["headers"], {"Accept": "application/json"})
+            self.assertNotIn("timeout", kwargs)
 
     async def test_remote_refresh_cancels_sibling_fetches_after_failure(self):
         mapper = AnimeMapper()
@@ -360,11 +381,11 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
         both_siblings_started = asyncio.Event()
         cancelled = 0
 
-        async def fetch(url, **_kwargs):
+        async def fetch(url):
             nonlocal siblings_started, cancelled
             if url == mapper._aod_url:
                 await both_siblings_started.wait()
-                raise anime.OutboundUrlError("source failed")
+                raise aiohttp.ClientError("source failed")
             siblings_started += 1
             if siblings_started == 2:
                 both_siblings_started.set()
@@ -377,6 +398,7 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
         async def refresh_lock():
             yield
 
+        session = _HttpSession(fetch)
         with (
             patch.object(
                 mapper,
@@ -387,7 +409,11 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
                 "comet.services.anime._anime_refresh_lock",
                 new=refresh_lock,
             ),
-            patch("comet.services.anime.fetch_http_bytes", new=fetch),
+            patch.object(
+                anime.http_client_manager,
+                "get_session",
+                new=AsyncMock(return_value=session),
+            ),
             patch("comet.services.anime.log.warning") as warning,
         ):
             self.assertFalse(await mapper._refresh_from_remote())
@@ -447,6 +473,11 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
     async def test_unexpected_download_failure_surfaces(self):
         mapper = AnimeMapper()
 
+        def fail(_url):
+            raise RuntimeError("download bug")
+
+        session = _HttpSession(fail)
+
         @asynccontextmanager
         async def refresh_lock():
             yield
@@ -461,9 +492,10 @@ class AnimeMapperTests(unittest.IsolatedAsyncioTestCase):
                 "comet.services.anime._anime_refresh_lock",
                 new=refresh_lock,
             ),
-            patch(
-                "comet.services.anime.fetch_http_bytes",
-                new=AsyncMock(side_effect=RuntimeError("download bug")),
+            patch.object(
+                anime.http_client_manager,
+                "get_session",
+                new=AsyncMock(return_value=session),
             ),
             self.assertRaises(ExceptionGroup) as raised,
         ):

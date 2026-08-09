@@ -51,11 +51,11 @@ background searches use their resolved provider budgets. A timeout cancels only
 the affected adapter invocation; other providers continue and their results are
 retained.
 
-Jackett and Prowlarr bound cold indexer-manager initialization with
-`INDEXER_MANAGER_WAIT_TIMEOUT`, within the provider's overall scrape budget.
-
-`HTTP_CLIENT_TIMEOUT_TOTAL` remains the timeout for one HTTP request. Scraper
-budgets cover the complete provider operation, including pagination and retries.
+Jackett and Prowlarr include cold indexer-manager initialization in that same
+provider budget; initialization does not add a second wait allowance. Scraper
+HTTP clients have no independent total timeout, so pagination and retries are
+governed by the resolved provider deadline alone. Fixed-origin official API
+clients inherit `HTTP_CLIENT_TIMEOUT_TOTAL` from the shared HTTP session.
 
 ## Indexer Manager (Jackett/Prowlarr)
 
@@ -115,8 +115,6 @@ Relevant controls:
 
 - `DEBRID_ACCOUNT_SCRAPE_REFRESH_INTERVAL`
 - `DEBRID_ACCOUNT_SCRAPE_CACHE_TTL`
-- `DEBRID_ACCOUNT_SCRAPE_MAX_SNAPSHOT_ITEMS`
-- `DEBRID_ACCOUNT_SCRAPE_MAX_MATCH_ITEMS`
 
 ## Next
 

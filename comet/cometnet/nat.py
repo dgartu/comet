@@ -44,16 +44,14 @@ class UPnPManager:
 
         return self._external_ip
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         """Stop the UPnP manager and remove port mapping."""
         self._running = False
         self._stop_event.set()
         if self._thread:
-            self._thread.join(timeout=2.0)
+            await asyncio.to_thread(self._thread.join, 2.0)
 
-        # Remove mapping in background
-        if miniupnpc:
-            threading.Thread(target=self._remove_mapping, daemon=True).start()
+        await asyncio.to_thread(self._remove_mapping)
 
     def _setup_upnp(self) -> str | None:
         """Sync function to discover UPnP device and map port."""
@@ -68,14 +66,10 @@ class UPnPManager:
             lan_addr = upnp.lanaddr
             ext_ip = upnp.externalipaddress()
 
-            # Add port mapping
-            try:
-                upnp.addportmapping(
-                    self.port, "TCP", lan_addr, self.port, "CometNet P2P", ""
-                )
-                return ext_ip
-            except Exception:
-                return None
+            upnp.addportmapping(
+                self.port, "TCP", lan_addr, self.port, "CometNet P2P", ""
+            )
+            return ext_ip
         except Exception:
             return None
 
@@ -93,13 +87,7 @@ class UPnPManager:
     def _keepalive_loop(self) -> None:
         """Periodically renew the port mapping."""
         while not self._stop_event.is_set():
-            try:
-                # Wait for half the lease duration or 30 minutes
-                sleep_time = min(self.lease_duration / 2, 1800)
-                if self._stop_event.wait(sleep_time):
-                    break
-
-                # Renew mapping
-                self._setup_upnp()
-            except Exception:
-                pass
+            sleep_time = min(self.lease_duration / 2, 1800)
+            if self._stop_event.wait(sleep_time):
+                break
+            self._setup_upnp()

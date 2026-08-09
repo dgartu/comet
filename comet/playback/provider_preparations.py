@@ -18,7 +18,7 @@ _OWNERSHIP_STATES = {"created", "adopted", "unknown"}
 
 
 def provider_selection_json(selection: tuple[object, ...]) -> str:
-    return orjson.dumps(list(selection), option=orjson.OPT_SORT_KEYS).decode()
+    return orjson.dumps(selection).decode()
 
 
 def _provider_status(value: object) -> str:
@@ -59,10 +59,9 @@ class ProviderPreparationRepository:
         candidate_id: str,
         locator_id: str,
         artifact_grant_id: str | None,
-        selection_json: str,
         mutation_idempotency_key: str,
         provider_kind: str,
-    ) -> tuple[dict[str, str | None], str]:
+    ) -> dict[str, str | None]:
         try:
             values = {
                 "provider_configuration_id": str(uuid.UUID(provider_configuration_id)),
@@ -90,7 +89,7 @@ class ProviderPreparationRepository:
             }
         ):
             raise ValueError("invalid provider preparation")
-        return values, selection_json
+        return values
 
     @staticmethod
     def _binding_conflicts(
@@ -166,13 +165,12 @@ class ProviderPreparationRepository:
         provider_kind: str = "stremthru_newz",
     ) -> ProviderPreparation | None:
         """Read an exact durable mutation binding without creating one."""
-        values, selection_json = self._binding(
+        values = self._binding(
             provider_configuration_id=provider_configuration_id,
             credential_fingerprint=credential_fingerprint,
             candidate_id=candidate_id,
             locator_id=locator_id,
             artifact_grant_id=artifact_grant_id,
-            selection_json=selection_json,
             mutation_idempotency_key=mutation_idempotency_key,
             provider_kind=provider_kind,
         )
@@ -218,13 +216,12 @@ class ProviderPreparationRepository:
         provider_kind: str = "stremthru_newz",
         now: float | None = None,
     ) -> tuple[ProviderPreparation, bool]:
-        values, selection_json = self._binding(
+        values = self._binding(
             provider_configuration_id=provider_configuration_id,
             credential_fingerprint=credential_fingerprint,
             candidate_id=candidate_id,
             locator_id=locator_id,
             artifact_grant_id=artifact_grant_id,
-            selection_json=selection_json,
             mutation_idempotency_key=mutation_idempotency_key,
             provider_kind=provider_kind,
         )
@@ -500,12 +497,7 @@ class ProviderPreparationRepository:
         error_code: str,
         now: float | None = None,
     ) -> None:
-        if (
-            status not in {"failed", "invalid"}
-            or not isinstance(error_code, str)
-            or not 1 <= len(error_code) <= 128
-            or any(ord(character) < 32 for character in error_code)
-        ):
+        if status not in {"failed", "invalid"}:
             raise ValueError("invalid AltMount failure")
         current_time = time.time() if now is None else now
         payload = orjson.dumps({"status": status, "error_code": error_code}).decode()
@@ -669,10 +661,7 @@ class ProviderPreparationRepository:
         ownership: str,
         now: float | None = None,
     ) -> None:
-        if ownership not in _OWNERSHIP_STATES or not all(
-            isinstance(value, str) and 1 <= len(value) <= 512
-            for value in (remote_id, remote_hash, status)
-        ):
+        if ownership not in _OWNERSHIP_STATES:
             raise ValueError("invalid provider submission")
         current_time = time.time() if now is None else now
         updated = await self._database.fetch_one(
@@ -720,7 +709,7 @@ class ProviderPreparationRepository:
             },
             force_primary=True,
         )
-        if current is None or current["state"] != "submitted":
+        if current is None or current["state"] not in {"submitted", "terminal"}:
             raise ValueError("provider submission is unavailable")
         payload = self._payload(current["provider_payload_json"])
         if (
@@ -730,26 +719,18 @@ class ProviderPreparationRepository:
         ):
             raise ValueError("provider submission conflicts")
         if payload["ownership"] == "unknown" and ownership == "created":
-            replacement = {**payload, "ownership": "created"}
             await self._database.execute(
                 """
                 UPDATE provider_preparations
-                SET provider_payload_json = :payload, updated_at = :now,
-                    cleanup_state = CASE
-                        WHEN provider_kind = 'torbox_usenet'
-                        THEN 'required'
-                        ELSE cleanup_state
-                    END
+                SET cleanup_state = 'required', updated_at = :now
                 WHERE preparation_id = :preparation_id
                   AND owner_configuration_partition = :partition
-                  AND state = 'submitted'
-                  AND provider_payload_json = :previous_payload
+                  AND provider_kind = 'torbox_usenet'
+                  AND cleanup_state IN ('ownership_pending', 'not_required')
                 """,
                 {
                     "preparation_id": str(uuid.UUID(preparation_id)),
                     "partition": self._partition(owner_configuration_partition),
-                    "payload": orjson.dumps(replacement).decode(),
-                    "previous_payload": current["provider_payload_json"],
                     "now": current_time,
                 },
                 force_primary=True,
@@ -825,8 +806,7 @@ class ProviderPreparationRepository:
         payload = self._payload(row["provider_payload_json"])
         remote_id = payload.get("remote_id")
         if (
-            payload.get("ownership") != "created"
-            or not isinstance(remote_id, str)
+            not isinstance(remote_id, str)
             or not remote_id.isascii()
             or not remote_id.isdigit()
             or str(int(remote_id)) != remote_id
@@ -847,12 +827,6 @@ class ProviderPreparationRepository:
         now: float | None = None,
     ) -> None:
         """Retire cleanup authority only after the exact remote delete succeeds."""
-        if (
-            isinstance(usenet_id, bool)
-            or not isinstance(usenet_id, int)
-            or not 0 <= usenet_id <= MAX_SIGNED_BIGINT
-        ):
-            raise ValueError("invalid TorBox cleanup target")
         values = {
             "preparation_id": str(uuid.UUID(preparation_id)),
             "partition": self._partition(owner_configuration_partition),
@@ -873,9 +847,7 @@ class ProviderPreparationRepository:
         if row is None:
             raise ValueError("TorBox cleanup target is unavailable")
         payload = self._payload(row["provider_payload_json"])
-        if payload.get("ownership") != "created" or payload.get("remote_id") != str(
-            usenet_id
-        ):
+        if payload.get("remote_id") != str(usenet_id):
             raise ValueError("TorBox cleanup authority conflicts")
         current_time = time.time() if now is None else now
         updated = await self._database.fetch_one(
@@ -1052,11 +1024,6 @@ class ProviderPreparationRepository:
         status: str,
         now: float | None = None,
     ) -> None:
-        if not all(
-            isinstance(value, str) and 1 <= len(value) <= 512
-            for value in (remote_id, remote_hash, status)
-        ):
-            raise ValueError("invalid provider resubmission")
         current_time = time.time() if now is None else now
         values = {
             "preparation_id": str(uuid.UUID(preparation_id)),
@@ -1453,26 +1420,6 @@ class ProviderPreparationRepository:
         locked_link: str | None,
         now: float | None = None,
     ) -> None:
-        if (
-            not all(
-                isinstance(value, str) and 1 <= len(value) <= 512
-                for value in (remote_id, remote_hash)
-            )
-            or (
-                locked_link is not None
-                and (
-                    not isinstance(locked_link, str)
-                    or not 1 <= len(locked_link) <= 4096
-                )
-            )
-            or isinstance(file_index, bool)
-            or not isinstance(file_index, int)
-            or not 0 <= file_index <= MAX_SIGNED_BIGINT
-            or isinstance(file_size, bool)
-            or not isinstance(file_size, int)
-            or not 1 <= file_size <= MAX_SIGNED_BIGINT
-        ):
-            raise ValueError("invalid provider file")
         current_time = time.time() if now is None else now
         values = {
             "preparation_id": str(uuid.UUID(preparation_id)),
@@ -1666,7 +1613,7 @@ class ProviderPreparationRepository:
                 payload,
                 float(row["created_at"]),
             )
-        except (TypeError, ValueError, orjson.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError("provider preparation is corrupt") from exc
 
     @staticmethod

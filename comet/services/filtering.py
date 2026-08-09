@@ -19,7 +19,6 @@ from comet.observability import log
 from comet.utils.languages import alias_language
 from comet.utils.parsing import ensure_multi_language
 
-_TITLE_MATCH_CACHE_MAX_ENTRIES = 65_536
 _NORMALIZATION_PIPELINE_VERSION = 2
 _FILTER_MESSAGES = {
     "adult_content": "Rejected adult release",
@@ -142,7 +141,6 @@ class TitleMatcher:
     """Prepared title/year matcher shared by live and persisted torrents."""
 
     __slots__ = (
-        "_matches_cache",
         "aliases",
         "aliases_normalized",
         "max_year",
@@ -153,7 +151,6 @@ class TitleMatcher:
     )
 
     def __init__(self, title, year, year_end, media_type, aliases):
-        self._matches_cache = None
         self.title = title
         self.year = year
         self.year_end = year_end
@@ -191,28 +188,6 @@ class TitleMatcher:
             and not (self.min_year <= parsed_year <= self.max_year)
         )
 
-    def matches(
-        self, torrent_title: str, parsed_title: str, parsed_year: int | None
-    ) -> bool:
-        cache_key = (
-            torrent_title if "/" in torrent_title else None,
-            parsed_title,
-            parsed_year,
-        )
-        cache = self._matches_cache
-        if cache is None:
-            cache = self._matches_cache = {}
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        matched = self.matches_title(torrent_title, parsed_title) and self.matches_year(
-            parsed_year
-        )
-        if len(cache) < _TITLE_MATCH_CACHE_MAX_ENTRIES:
-            cache[cache_key] = matched
-        return matched
-
 
 class _ParseCacheShard:
     __slots__ = ("data", "inflight", "lock")
@@ -224,7 +199,6 @@ class _ParseCacheShard:
 
 
 _PARSE_CACHE_DEDUP_TIMEOUT = 5.0
-_PARSE_CACHE_SIZE = 0
 _PARSE_CACHE_EFFECTIVE_SHARDS = 0
 _PARSE_CACHE_DEDUP_INFLIGHT = False
 _PARSE_CACHE_SHARD_SIZES = []
@@ -233,7 +207,7 @@ _parse_cache = []
 
 def configure_filtering(config) -> None:
     global _PARSE_CACHE_DEDUP_INFLIGHT, _PARSE_CACHE_EFFECTIVE_SHARDS
-    global _PARSE_CACHE_SHARD_SIZES, _PARSE_CACHE_SIZE, _log_filter_decision
+    global _PARSE_CACHE_SHARD_SIZES, _log_filter_decision
     global _parse_cache
 
     size = config.FILTER_PARSE_CACHE_SIZE
@@ -243,7 +217,6 @@ def configure_filtering(config) -> None:
         (size // effective_shards) + (1 if i < size % effective_shards else 0)
         for i in range(effective_shards)
     ]
-    _PARSE_CACHE_SIZE = size
     _PARSE_CACHE_EFFECTIVE_SHARDS = effective_shards
     _PARSE_CACHE_DEDUP_INFLIGHT = config.FILTER_PARSE_CACHE_DEDUP_INFLIGHT
     _PARSE_CACHE_SHARD_SIZES = shard_sizes
@@ -258,7 +231,7 @@ configure_filtering(settings)
 
 def _parse_cache_shard_for(title: str):
     shard_idx = hash(title) % _PARSE_CACHE_EFFECTIVE_SHARDS
-    return shard_idx, _parse_cache[shard_idx], _PARSE_CACHE_SHARD_SIZES[shard_idx]
+    return _parse_cache[shard_idx], _PARSE_CACHE_SHARD_SIZES[shard_idx]
 
 
 def _clone_parsed(parsed):
@@ -269,17 +242,14 @@ def _clone_parsed(parsed):
 
 
 def _parse_with_cache(title: str):
-    if _PARSE_CACHE_SIZE <= 0 or _PARSE_CACHE_EFFECTIVE_SHARDS <= 0:
+    if _PARSE_CACHE_EFFECTIVE_SHARDS <= 0:
         return parse(title)
 
-    _, shard, max_size = _parse_cache_shard_for(title)
-    if max_size <= 0:
-        return parse(title)
+    shard, max_size = _parse_cache_shard_for(title)
 
     if _PARSE_CACHE_DEDUP_INFLIGHT:
         return _parse_with_cache_dedup(title, shard, max_size)
-    else:
-        return _parse_with_cache_simple(title, shard, max_size)
+    return _parse_with_cache_simple(title, shard, max_size)
 
 
 def _parse_with_cache_simple(title: str, shard: _ParseCacheShard, max_size: int):

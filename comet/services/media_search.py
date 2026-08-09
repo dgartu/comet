@@ -56,7 +56,7 @@ from comet.playback.repository import RenderedCandidateIds, RenderedReleaseRepos
 from comet.playback.tokens import CapabilityCodec
 from comet.services.anime import anime_mapper
 from comet.services.cache_state import CacheStateManager, mark_scope_scraped
-from comet.services.debrid import DebridService
+from comet.services.debrid import DebridService, prefer_torrent_update
 from comet.services.debrid_account_scraper import (
     ensure_account_snapshot_ready,
     get_account_torrents_for_media,
@@ -74,8 +74,6 @@ from comet.utils.http_client import http_client_manager
 from comet.utils.parsing import MediaScope, parse_media_id, resolve_media_scope
 
 BackgroundTaskAdder = Callable[..., Any]
-_MAX_DISCOVERY_DIAGNOSTICS = 12
-_MAX_DISCOVERY_DIAGNOSTIC_LENGTH = 256
 
 
 class MediaSearchStatus(StrEnum):
@@ -127,9 +125,19 @@ class _DiscoveryTaskOwner:
     async def close(self) -> None:
         if self.task is None:
             return
-        if not self.task.done():
-            self.task.cancel()
+        self.task.cancel()
         await asyncio.gather(self.task, return_exceptions=True)
+
+
+async def _gather_owned(*coroutines):
+    tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 class SearchCapacityTracker:
@@ -199,31 +207,13 @@ def _public_discovery_diagnostics(
     *,
     has_candidates: bool,
 ) -> tuple[str, ...]:
-    """Retain configured failures and at most one safe all-source outage."""
-
-    def normalize(value: object) -> str | None:
-        if not isinstance(value, str):
-            return None
-        value = value.strip()
-        if not 1 <= len(value) <= _MAX_DISCOVERY_DIAGNOSTIC_LENGTH or any(
-            ord(character) < 32 for character in value
-        ):
-            return None
-        return value
-
-    diagnostics = []
-    for value in plan_diagnostics:
-        normalized = normalize(value)
-        if normalized is not None and normalized not in diagnostics:
-            diagnostics.append(normalized)
-        if len(diagnostics) == _MAX_DISCOVERY_DIAGNOSTICS:
-            return tuple(diagnostics)
+    """Retain configured failures and at most one all-source outage."""
+    diagnostics = dict.fromkeys(plan_diagnostics)
     if has_candidates:
         return tuple(diagnostics)
-    for value in runtime_diagnostics:
-        normalized = normalize(value)
-        if normalized is not None and normalized not in diagnostics:
-            diagnostics.append(normalized)
+    for diagnostic in runtime_diagnostics:
+        if diagnostic not in diagnostics:
+            diagnostics[diagnostic] = None
             break
     return tuple(diagnostics)
 
@@ -294,9 +284,7 @@ async def _search_configured_sources(
         )
         capability_states = CapabilityStateSnapshot(provider_states, discovery_states)
     account_partition = (
-        codec.configuration_partition_for_config(dict(config))
-        if codec is not None
-        else None
+        codec.configuration_partition_for_config(config) if codec is not None else None
     )
 
     async def record_runtime_discovery_failure(
@@ -334,7 +322,7 @@ async def _search_configured_sources(
         native_instance_pool_available=bool(settings.USENET_NATIVE_SERVERS),
         native_user_servers_allowed=settings.USENET_NATIVE_ALLOW_USER_SERVERS,
     )
-    plan = planner.build(dict(config), capability_states)
+    plan = planner.build(config, capability_states)
     branch_fingerprints = (
         {
             (
@@ -424,7 +412,6 @@ async def _filter_and_rank_discovery_candidates(
     """Apply request policy and ranking to normalized discovery candidates."""
     if not candidates:
         return ()
-    candidates = _coalesce_private_torrent_candidates(candidates)
     if not settings.INDEXER_PRIVATE_TORRENTS_ENABLED:
         candidates = tuple(
             candidate for candidate in candidates if not candidate.is_private
@@ -453,7 +440,7 @@ async def _filter_and_rank_discovery_candidates(
         remove_adult_content=remove_adult_content,
     )
     loop = asyncio.get_running_loop()
-    ranked = await loop.run_in_executor(
+    return await loop.run_in_executor(
         get_executor(),
         sort_candidates,
         filtered,
@@ -463,7 +450,6 @@ async def _filter_and_rank_discovery_candidates(
         config["maxSize"],
         config["removeTrash"],
     )
-    return ranked
 
 
 def _coalesce_private_torrent_candidates(candidates: tuple) -> tuple:
@@ -488,26 +474,21 @@ async def _apply_private_torrent_result_policy(torrents: dict) -> None:
     private_hashes = await TorrentReleaseRepository(database).private_hashes(
         tuple(torrents)
     )
-    for info_hash in private_hashes:
-        torrent = torrents.get(info_hash)
-        if torrent is not None:
-            torrent["isPrivate"] = True
-    if not settings.INDEXER_PRIVATE_TORRENTS_ENABLED:
+    if settings.INDEXER_PRIVATE_TORRENTS_ENABLED:
         for info_hash in private_hashes:
-            torrents.pop(info_hash, None)
+            torrents[info_hash]["isPrivate"] = True
+    else:
+        for info_hash in private_hashes:
+            del torrents[info_hash]
 
 
 async def _persist_rendered_candidates(
-    config: Mapping[str, Any], candidates: tuple
+    candidates: tuple,
+    owner_configuration_partition: bytes,
 ) -> dict[str, RenderedCandidateIds]:
-    if not candidates or not settings.COMET_CAPABILITY_SECRET:
-        return {}
-    codec = CapabilityCodec(settings.COMET_CAPABILITY_SECRET)
     return await RenderedReleaseRepository(database).persist(
         candidates,
-        owner_configuration_partition=codec.configuration_partition_for_config(
-            dict(config)
-        ),
+        owner_configuration_partition=owner_configuration_partition,
     )
 
 
@@ -534,7 +515,8 @@ def _apply_torrent_cache_facts(
 
 
 def _issue_provider_capabilities(
-    config: Mapping[str, Any],
+    codec: CapabilityCodec,
+    partition: bytes,
     options: tuple[ProviderOption, ...],
     persisted_candidates: Mapping[str, RenderedCandidateIds],
     *,
@@ -542,10 +524,6 @@ def _issue_provider_capabilities(
     season: int | None,
     episode: int | None,
 ) -> dict[tuple[str, str], str]:
-    if not settings.COMET_CAPABILITY_SECRET:
-        return {}
-    codec = CapabilityCodec(settings.COMET_CAPABILITY_SECRET)
-    partition = codec.configuration_partition_for_config(dict(config))
     selection_intent = [0] if media_type == "movie" else [1, season or 0, episode or 0]
     capabilities = {}
     for option in options:
@@ -598,15 +576,24 @@ async def _prepare_provider_view(
         season_norm=season_norm,
         episode_norm=episode_norm,
     )
-    rendered_candidate_ids = await _persist_rendered_candidates(config, candidates)
-    provider_capabilities = _issue_provider_capabilities(
-        config,
-        provider_options,
-        rendered_candidate_ids,
-        media_type=media_type,
-        season=season,
-        episode=episode,
-    )
+    rendered_candidate_ids = {}
+    provider_capabilities = {}
+    if candidates and settings.COMET_CAPABILITY_SECRET:
+        codec = CapabilityCodec(settings.COMET_CAPABILITY_SECRET)
+        partition = codec.configuration_partition_for_config(config)
+        rendered_candidate_ids = await _persist_rendered_candidates(
+            candidates,
+            partition,
+        )
+        provider_capabilities = _issue_provider_capabilities(
+            codec,
+            partition,
+            provider_options,
+            rendered_candidate_ids,
+            media_type=media_type,
+            season=season,
+            episode=episode,
+        )
     return (
         candidates,
         provider_options,
@@ -633,7 +620,7 @@ async def _prepare_discovery_only_view(
 ):
     """Build the independent Usenet view when the torrent branch cannot proceed."""
     candidates = await _filter_and_rank_discovery_candidates(
-        discovery_result.candidates,
+        _coalesce_private_torrent_candidates(discovery_result.candidates),
         title=title,
         year=year,
         year_end=year_end,
@@ -827,14 +814,12 @@ async def check_multi_service_availability(
         return cached_hashes, torrent_updates
 
     service_groups = group_debrid_entries_by_service(debrid_entries)
-    results = await asyncio.gather(
+    results = await _gather_owned(
         *(check_service(entries[0]) for _key, _service, entries in service_groups)
     )
 
-    enriched_hashes = set()
-    for (provider_key, service, _entries), result in zip(
-        service_groups, results, strict=True
-    ):
+    merged_updates = {}
+    for (provider_key, service, _entries), result in zip(service_groups, results):
         cached_hashes, torrent_updates = result
         _log_debrid_check(
             "debrid.cache.checked",
@@ -847,14 +832,14 @@ async def check_multi_service_availability(
             cache_state="hit" if cached_hashes else "miss",
         )
         for info_hash, update in torrent_updates.items():
-            if info_hash in enriched_hashes:
-                continue
-            torrent = torrents.get(info_hash)
-            if torrent is not None:
-                torrent.update(update)
-                enriched_hashes.add(info_hash)
+            merged_updates[info_hash] = prefer_torrent_update(
+                merged_updates.get(info_hash), update
+            )
         for info_hash in cached_hashes:
             service_cache_status[info_hash][provider_key] = True
+
+    for info_hash, update in merged_updates.items():
+        torrents[info_hash].update(update)
 
     return service_cache_status
 
@@ -933,17 +918,15 @@ async def get_and_cache_multi_service_availability(
 
         return None, None, auth_error
 
-    results = await asyncio.gather(
+    results = await _gather_owned(
         *(
             check_service(provider_key, service, entries)
             for provider_key, service, entries in service_groups
         )
     )
 
-    enriched_hashes = set()
-    for (provider_key, service, _entries), result in zip(
-        service_groups, results, strict=True
-    ):
+    merged_updates = {}
+    for (provider_key, service, _entries), result in zip(service_groups, results):
         cache_map, torrent_updates, error = result
         if error:
             _log_debrid_check(
@@ -975,16 +958,15 @@ async def get_and_cache_multi_service_availability(
         )
 
         for info_hash, update in torrent_updates.items():
-            if info_hash in enriched_hashes:
-                continue
-            torrent = torrents.get(info_hash)
-            if torrent is not None:
-                torrent.update(update)
-                enriched_hashes.add(info_hash)
+            merged_updates[info_hash] = prefer_torrent_update(
+                merged_updates.get(info_hash), update
+            )
 
-        if cache_map:
-            for info_hash in cache_map:
-                service_cache_status[info_hash][provider_key] = True
+        for info_hash in cache_map:
+            service_cache_status[info_hash][provider_key] = True
+
+    for info_hash, update in merged_updates.items():
+        torrents[info_hash].update(update)
 
     return service_cache_status, errors
 
@@ -1131,13 +1113,7 @@ async def _search_media(
         status = {
             MetadataFetchStatus.NOT_FOUND: MediaSearchStatus.METADATA_NOT_FOUND,
             MetadataFetchStatus.UNSUPPORTED: MediaSearchStatus.METADATA_UNSUPPORTED,
-            MetadataFetchStatus.PROVIDER_UNAVAILABLE: (
-                MediaSearchStatus.METADATA_UNAVAILABLE
-            ),
-            MetadataFetchStatus.TIMEOUT: MediaSearchStatus.METADATA_UNAVAILABLE,
-            MetadataFetchStatus.INVALID_RESPONSE: (
-                MediaSearchStatus.METADATA_UNAVAILABLE
-            ),
+            MetadataFetchStatus.UNAVAILABLE: MediaSearchStatus.METADATA_UNAVAILABLE,
         }[metadata_status]
         return MediaSearchResult(
             status,
@@ -1264,7 +1240,7 @@ async def _search_media(
             if kitsu_ids:
                 cache_media_ids.extend(kitsu_ids)
             kitsu_id = await anime_mapper.get_kitsu_from_imdb(media_only_id)
-            if kitsu_id and kitsu_id not in cache_media_ids:
+            if kitsu_id:
                 cache_media_ids.append(kitsu_id)
 
     is_imdb_episode_request, reject_unknown_episode_files = episode_matching_policy(
@@ -1322,7 +1298,6 @@ async def _search_media(
     force_scrape_now = not torrent_manager.primary_cached
     account_snapshot_ready = False
     torrent_discovery_inflight = False
-    discovery_result = None
     if cache_result.should_scrape_background and not force_scrape_now:
         add_background_task(
             background_scrape,
@@ -1335,9 +1310,9 @@ async def _search_media(
 
     if cache_result.should_scrape_now or force_scrape_now:
         if use_account_scrape:
-            torrent_discovery_result, _ = await asyncio.gather(
+            torrent_discovery_result, _ = await _gather_owned(
                 torrent_manager.scrape_torrents(ScrapeContext.LIVE),
-                ensure_account_snapshot_ready(session, debrid_entries, ip),
+                ensure_account_snapshot_ready(debrid_entries, ip),
             )
             account_snapshot_ready = True
         else:
@@ -1347,8 +1322,7 @@ async def _search_media(
         torrent_discovery_inflight = torrent_discovery_result.inflight
         await _mark_scope_scraped_if_populated(media_id, torrent_manager.torrents)
 
-    if discovery_result is None:
-        discovery_result = await discovery_task
+    discovery_result = await discovery_task
     discovery_candidates = _coalesce_private_torrent_candidates(
         discovery_result.candidates
     )
@@ -1371,10 +1345,8 @@ async def _search_media(
     verified_service_cache_status = defaultdict(dict)
     if use_account_scrape:
         if not account_snapshot_ready:
-            await ensure_account_snapshot_ready(session, debrid_entries, ip)
-        schedule_account_snapshot_refresh(
-            add_background_task, session, debrid_entries, ip
-        )
+            await ensure_account_snapshot_ready(debrid_entries, ip)
+        schedule_account_snapshot_refresh(add_background_task, debrid_entries, ip)
         account_torrents = await get_account_torrents_for_media(
             debrid_entries,
             media_type,
@@ -1414,7 +1386,7 @@ async def _search_media(
             ):
                 existing_torrent["size"] = account_torrent["size"]
             existing_parsed = existing_torrent.get("parsed")
-            if existing_parsed is None or str(existing_parsed.resolution) == "unknown":
+            if existing_parsed is None or existing_parsed.resolution == "unknown":
                 existing_torrent["parsed"] = account_torrent["parsed"]
 
     await _apply_private_torrent_result_policy(torrent_manager.torrents)
@@ -1487,7 +1459,7 @@ async def _search_media(
     provider_options = ()
     rendered_candidate_ids = {}
     provider_capabilities = {}
-    ranked_info_hashes = list(torrent_manager.ranked_torrents)
+    ranked_info_hashes = torrent_manager.ranked_torrents
     if config["schemaVersion"] == 2:
         torrent_candidates = tuple(
             torrent_candidate_from_runtime(

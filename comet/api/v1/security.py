@@ -176,13 +176,13 @@ async def revoke_session(
 def _origin(value: str) -> str | None:
     try:
         parsed = urlsplit(value)
+        port = parsed.port
     except ValueError:
         return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
     if parsed.username is not None or parsed.password is not None:
         return None
-    port = parsed.port
     if port is None:
         port = 443 if parsed.scheme == "https" else 80
     return f"{parsed.scheme}://{parsed.hostname.lower()}:{port}"

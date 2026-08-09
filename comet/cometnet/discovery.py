@@ -69,8 +69,8 @@ def resolve_discovery_configuration(
     max_peers: int | None,
 ) -> tuple[list[str], list[str], int, int]:
     return (
-        list(dict.fromkeys([] if manual_peers is None else manual_peers)),
-        list(dict.fromkeys([] if bootstrap_nodes is None else bootstrap_nodes)),
+        list(dict.fromkeys(manual_peers or ())),
+        list(dict.fromkeys(bootstrap_nodes or ())),
         settings.COMETNET_MIN_PEERS if min_peers is None else min_peers,
         settings.COMETNET_MAX_PEERS if max_peers is None else max_peers,
     )
@@ -92,9 +92,10 @@ class KnownPeer:
         """Check if we should attempt to connect to this peer."""
         # Don't retry too quickly after failures
         if self.connect_failures > 0:
+            max_backoff = settings.COMETNET_PEER_CONNECT_BACKOFF_MAX
             backoff = min(
-                settings.COMETNET_PEER_CONNECT_BACKOFF_MAX,
-                30 * (2 ** (self.connect_failures - 1)),
+                max_backoff,
+                30 * (2 ** min(self.connect_failures - 1, max_backoff.bit_length())),
             )
             if time.time() - self.last_connect_attempt < backoff:
                 return False
@@ -102,10 +103,11 @@ class KnownPeer:
 
     def record_connect_attempt(self, success: bool) -> None:
         """Record the result of a connection attempt."""
-        self.last_connect_attempt = time.time()
+        now = time.time()
+        self.last_connect_attempt = now
         if success:
             self.connect_failures = 0
-            self.last_seen = time.time()
+            self.last_seen = now
         else:
             self.connect_failures += 1
 
@@ -139,9 +141,6 @@ class DiscoveryService:
         # Known peers by address
         self._known_peers: dict[str, KnownPeer] = {}
 
-        # Node ID to address mapping (for deduplication)
-        self._node_id_to_address: dict[str, str] = {}
-
         # Callbacks
         self._connect_callback: Callable[[str], Awaitable[str | None]] | None = None
         self._get_connected_count: Callable[[], int] | None = None
@@ -170,14 +169,13 @@ class DiscoveryService:
         self._send_message_callback = send_message_callback
         self._sign_callback = sign_callback
 
-    async def start(self, node_id: str, listen_port: int) -> None:
+    async def start(self, node_id: str) -> None:
         """Start the discovery service."""
         if self._running:
             return
 
         self._running = True
         self._node_id = node_id
-        self._listen_port = listen_port
 
         # Add manual peers
         for address in self.manual_peers:
@@ -220,9 +218,6 @@ class DiscoveryService:
         elif node_id and not self._known_peers[address].node_id:
             self._known_peers[address].node_id = node_id
 
-        if node_id:
-            self._node_id_to_address[node_id] = address
-
     async def add_peer_from_pex(self, peer_info: PeerInfo) -> bool:
         """
         Add a peer discovered through Peer Exchange.
@@ -241,6 +236,15 @@ class DiscoveryService:
             return False
 
         is_new = peer_info.address not in self._known_peers
+        if is_new:
+            pex_peers = [
+                peer for peer in self._known_peers.values() if peer.source == "pex"
+            ]
+            if self.max_peers <= 0:
+                return False
+            if len(pex_peers) >= self.max_peers:
+                oldest = min(pex_peers, key=lambda peer: peer.last_seen)
+                del self._known_peers[oldest.address]
         self._add_known_peer(
             address=peer_info.address, node_id=peer_info.node_id, source="pex"
         )
@@ -299,13 +303,6 @@ class DiscoveryService:
 
         return PeerResponse(peers=peers)
 
-    async def request_peers_from(
-        self, node_id: str, send_callback: Callable[[str, PeerRequest], Awaitable[Any]]
-    ) -> None:
-        """Request peers from a connected peer."""
-        request = PeerRequest(max_peers=settings.COMETNET_PEX_BATCH_SIZE)
-        await send_callback(node_id, request)
-
     async def handle_peer_response(self, response: PeerResponse) -> int:
         """
         Handle a peer response from PEX.
@@ -323,36 +320,28 @@ class DiscoveryService:
         await asyncio.sleep(2.0)
 
         while self._running:
-            try:
-                connected_count = (
-                    self._get_connected_count() if self._get_connected_count else 0
-                )
+            connected_count = (
+                self._get_connected_count() if self._get_connected_count else 0
+            )
 
-                # If we need more peers, try to connect
-                if connected_count < self.min_peers:
-                    await self._try_connect_to_peers()
+            # If we need more peers, try to connect
+            if connected_count < self.min_peers:
+                await self._try_connect_to_peers()
 
-                # Periodic maintenance
-                self._cleanup_old_peers()
+            # Periodic maintenance
+            self._cleanup_old_peers()
 
-                # PEX: Ask connected peers for more peers
-                if connected_count > 0:
-                    await self._perform_pex()
+            # PEX: Ask connected peers for more peers
+            if connected_count > 0:
+                await self._perform_pex()
 
-                # Adaptive interval: faster when disconnected, slower when healthy
-                if connected_count == 0:
-                    # Aggressive reconnection when we have no peers
-                    await asyncio.sleep(5.0)
-                elif connected_count < self.min_peers:
-                    # Medium pace when below minimum
-                    await asyncio.sleep(15.0)
-                else:
-                    # Normal pace when healthy
-                    await asyncio.sleep(30.0)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                await asyncio.sleep(10.0)
+            # Adaptive interval: faster when disconnected, slower when healthy
+            if connected_count == 0:
+                await asyncio.sleep(5.0)
+            elif connected_count < self.min_peers:
+                await asyncio.sleep(15.0)
+            else:
+                await asyncio.sleep(30.0)
 
     async def _perform_pex(self) -> None:
         """Periodically ask connected peers for their peer lists."""
@@ -424,7 +413,6 @@ class DiscoveryService:
 
                 if success and result:
                     known_peer.node_id = result
-                    self._node_id_to_address[result] = known_peer.address
                     connected_ids.add(result)
                     connected_count += 1
 
@@ -443,8 +431,6 @@ class DiscoveryService:
             and peer.source not in ("manual", "bootstrap")
         ]
         for addr in to_remove:
-            if self._known_peers[addr].node_id:
-                self._node_id_to_address.pop(self._known_peers[addr].node_id, None)
             del self._known_peers[addr]
 
     def get_stats(self) -> dict:
@@ -461,10 +447,10 @@ class DiscoveryService:
     def to_dict(self) -> dict:
         """Serialize known peers for persistence."""
         peers_data = []
-        for addr, peer in sorted(self._known_peers.items()):
-            # Only persist peers that are worth reconnecting to
-            # Skip incoming (ephemeral) and failed peers
-            if peer.source in ("incoming",) or peer.connect_failures > 3:
+        for peer in sorted(self._known_peers.values(), key=lambda peer: peer.address):
+            # Configured peers are restored from settings; incoming and failed
+            # peers aren't useful reconnect candidates.
+            if peer.source != "pex" or peer.connect_failures:
                 continue
             peers_data.append(
                 {
@@ -528,11 +514,5 @@ class DiscoveryService:
 
         canonical_peers, _ = canonicalize_persisted_peers(validated_peers)
         known_peers = {peer["address"]: KnownPeer(**peer) for peer in canonical_peers}
-        node_id_to_address = {
-            peer["node_id"]: peer["address"]
-            for peer in canonical_peers
-            if peer["node_id"]
-        }
 
         self._known_peers = known_peers
-        self._node_id_to_address = node_id_to_address

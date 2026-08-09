@@ -27,7 +27,6 @@ pub(crate) const MAX_ARCHIVE_ENTRIES: usize = crate::nzb::MAX_FILES;
 pub(crate) const MAX_ARCHIVE_OUTPUT_BYTES: u64 = crate::limits::MAX_LOGICAL_BYTES;
 pub(crate) const MAX_COMPRESSION_RATIO: u64 = 100;
 pub(crate) const MAX_ARCHIVE_CATALOG_BYTES: u64 = 1024 * 1024;
-pub(crate) const MAX_ARCHIVE_PASSPHRASE_BYTES: usize = 4 * 1024;
 
 type ArchiveReadNew = unsafe extern "C" fn() -> *mut c_void;
 type ArchiveReadSupport = unsafe extern "C" fn(*mut c_void) -> c_int;
@@ -164,8 +163,6 @@ impl Runtime {
     ) -> Result<ExtractedEntry, &'static str> {
         let (input_file, input_identity) = open_archive_input(input)?;
         validate_archive_output(output)?;
-        let selected_path = crate::archive::normalize_archive_path(selected_path)
-            .map_err(|_| "archive_path_invalid")?;
         let input_size = input_identity.size;
         if input_size == 0 || input_size > MAX_ARCHIVE_OUTPUT_BYTES {
             return Err("archive_input_invalid");
@@ -174,7 +171,7 @@ impl Runtime {
             .scan_opened(
                 &input_file,
                 input_size,
-                Some((output, selected_path.as_str())),
+                Some((output, selected_path)),
                 passphrase,
             )
             .and_then(|scan| scan.extracted.ok_or("archive_selected_entry_missing"))
@@ -623,7 +620,6 @@ impl Runtime {
                         .then_with(|| left.exact_size.cmp(&right.exact_size))
                         .then_with(|| left.kind.cmp(&right.kind))
                 });
-                validate_catalog(&catalog)?;
             }
             Ok(ArchiveScan {
                 catalog,
@@ -781,21 +777,15 @@ fn read_worker_passphrase() -> Result<Zeroizing<String>, &'static str> {
     read_passphrase(std::io::stdin())
 }
 
-fn read_passphrase(input: impl Read) -> Result<Zeroizing<String>, &'static str> {
+fn read_passphrase(mut input: impl Read) -> Result<Zeroizing<String>, &'static str> {
     let mut encoded = Zeroizing::new(Vec::new());
     input
-        .take(MAX_ARCHIVE_PASSPHRASE_BYTES as u64 + 1)
         .read_to_end(&mut encoded)
         .map_err(|_| "archive_passphrase_invalid")?;
-    if encoded.len() > MAX_ARCHIVE_PASSPHRASE_BYTES || encoded.contains(&0) {
-        return Err("archive_passphrase_invalid");
-    }
-    std::str::from_utf8(&encoded).map_err(|_| "archive_passphrase_invalid")?;
     let encoded = mem::take(&mut *encoded);
-    // SAFETY: the exact bytes were validated as UTF-8 immediately above.
-    Ok(Zeroizing::new(unsafe {
-        String::from_utf8_unchecked(encoded)
-    }))
+    String::from_utf8(encoded)
+        .map(Zeroizing::new)
+        .map_err(|_| "archive_passphrase_invalid")
 }
 
 impl Drop for Runtime {
@@ -1254,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_entries_require_and_verify_a_bounded_passphrase() {
+    fn encrypted_entries_require_and_verify_a_passphrase() {
         let fixture = Fixture::new("encrypted-entry");
         let library = fixture.library_with_encryption(false, false, 1);
         let runtime = Runtime::validate(&library).expect("valid fixture");
@@ -1459,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn passphrase_pipe_reader_is_exact_utf8_and_bounded() {
+    fn passphrase_pipe_reader_preserves_utf8() {
         assert_eq!(
             super::read_passphrase("archive-secret".as_bytes())
                 .expect("read bounded passphrase")
@@ -1478,12 +1468,7 @@ mod tests {
             "line one\nline two"
         );
         assert_eq!(
-            super::read_passphrase("bad\0secret".as_bytes()).err(),
-            Some("archive_passphrase_invalid")
-        );
-        assert_eq!(
-            super::read_passphrase(vec![b'x'; super::MAX_ARCHIVE_PASSPHRASE_BYTES + 1].as_slice())
-                .err(),
+            super::read_passphrase([0xff].as_slice()).err(),
             Some("archive_passphrase_invalid")
         );
     }

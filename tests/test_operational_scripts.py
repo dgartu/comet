@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import json
 import os
 import subprocess
@@ -6,9 +7,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from scripts import generate_status_videos
+from comet.usenet.supervisor import EngineSupervisor
+from scripts import generate_status_videos, live_usenet_compatibility_probe
 
 
 class _Response:
@@ -229,6 +231,56 @@ class StatusVideoGeneratorTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "non-empty"),
             ):
                 generate_status_videos.main()
+
+
+class LiveUsenetProbeTests(unittest.TestCase):
+    def test_engine_spawn_failure_releases_runtime_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            servers = root / "servers.json"
+            servers.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "test",
+                            "host": "news.example",
+                            "port": 563,
+                            "tls_mode": "implicit",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                indexers=None,
+                servers=servers,
+                resume_work_dir=root,
+                work_root=None,
+                keep_work=False,
+                engine=root / "missing-engine",
+                memory_cache_mib=64,
+                connections=1,
+                spool_gib=1,
+                archive_jobs=1,
+                par2=root / "par2",
+                libarchive=root / "libarchive.so",
+            )
+
+            with (
+                patch.object(
+                    live_usenet_compatibility_probe.asyncio,
+                    "create_subprocess_exec",
+                    AsyncMock(side_effect=OSError("spawn failed")),
+                ),
+                self.assertRaisesRegex(OSError, "spawn failed"),
+            ):
+                asyncio.run(live_usenet_compatibility_probe._run(args))
+
+            supervisor = EngineSupervisor(
+                str(root / "run"), str(root / "data"), str(root / "missing-engine")
+            )
+            supervisor.prepare_runtime_dir()
+            supervisor.close()
 
 
 if __name__ == "__main__":

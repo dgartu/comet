@@ -3,11 +3,12 @@ import unittest
 from comet.cometnet.utils import (
     extract_ip_from_address,
     format_websocket_url,
+    is_valid_peer_address,
     replace_websocket_url_port,
 )
 
 
-class CometNetUtilsTests(unittest.TestCase):
+class CometNetUtilsTests(unittest.IsolatedAsyncioTestCase):
     def test_format_websocket_url_supports_ipv4_hostname_and_ipv6(self):
         cases = [
             ("192.0.2.1", 8765, "ws", "ws://192.0.2.1:8765"),
@@ -43,3 +44,15 @@ class CometNetUtilsTests(unittest.TestCase):
         for address, expected in cases:
             with self.subTest(address=address):
                 self.assertEqual(extract_ip_from_address(address), expected)
+
+    async def test_peer_address_rejects_credentials_not_at_signs_in_paths(self):
+        self.assertFalse(
+            await is_valid_peer_address(
+                "wss://user@peer.example/socket", allow_private=True
+            )
+        )
+        self.assertTrue(
+            await is_valid_peer_address(
+                "wss://peer.example/socket@v1", allow_private=True
+            )
+        )

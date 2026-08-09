@@ -22,20 +22,16 @@ def resolve_archive_passphrase(
     if not candidate:
         return None
     candidate = candidate.strip()
+    if not candidate or "\x00" in candidate:
+        return None
     try:
-        encoded = candidate.encode("utf-8")
+        return (
+            candidate
+            if len(candidate.encode("utf-8")) <= MAX_ARCHIVE_PASSPHRASE_BYTES
+            else None
+        )
     except UnicodeEncodeError:
         return None
-    if (
-        not candidate
-        or len(encoded) > MAX_ARCHIVE_PASSPHRASE_BYTES
-        or any(
-            character.isascii() and not character.isprintable()
-            for character in candidate
-        )
-    ):
-        return None
-    return candidate
 
 
 def _title_token(value: str, opening: str, closing: str) -> str | None:

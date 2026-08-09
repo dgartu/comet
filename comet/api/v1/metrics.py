@@ -27,7 +27,7 @@ from comet.observability.database_metrics import (
     current_database_metrics,
 )
 from comet.observability.metric_snapshot import current_metric_samples
-from comet.utils.http_client import http_client_manager, read_bounded_body
+from comet.utils.http_client import http_client_manager
 
 router = APIRouter(prefix="/admin/metrics", tags=["API v1 Metrics"])
 MetricRange = Literal["15m", "1h", "6h", "24h", "7d", "30d"]
@@ -145,7 +145,6 @@ _QUERIES: dict[MetricName, str] = {
         "max(comet_usenet_engine_last_snapshot_timestamp_seconds), 0)"
     ),
 }
-_MAX_QUERY_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 class _PrometheusSeries(BaseModel):
@@ -262,9 +261,7 @@ async def range_metrics(
                     message="Historical metrics could not be queried.",
                 )
             document = _PrometheusResponse.model_validate(
-                orjson.loads(
-                    await read_bounded_body(response, _MAX_QUERY_RESPONSE_BYTES)
-                )
+                orjson.loads(await response.read())
             )
             series = [
                 MetricSeriesData(

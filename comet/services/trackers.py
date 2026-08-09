@@ -1,13 +1,15 @@
 from urllib.parse import urlsplit
 
+import aiohttp
+
 from comet.observability import log
-from comet.usenet.outbound import OutboundUrlError, fetch_http_bytes
+from comet.utils.http_client import http_client_manager
+from comet.utils.text import has_ascii_control
 
 trackers = []
 _TRACKERS_URL = (
     "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
 )
-_MAX_TRACKER_DOCUMENT_BYTES = 64 * 1024
 _MAX_TRACKERS = 1_024
 _MAX_TRACKER_URL_BYTES = 2_048
 
@@ -34,7 +36,7 @@ def _decode_trackers(document: bytes) -> list[str]:
             continue
         if (
             len(value.encode("utf-8")) > _MAX_TRACKER_URL_BYTES
-            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            or has_ascii_control(value)
             or parsed.scheme.casefold() not in {"http", "https", "udp"}
             or not parsed.hostname
         ):
@@ -52,16 +54,17 @@ def _decode_trackers(document: bytes) -> list[str]:
 
 async def download_best_trackers():
     try:
-        document = await fetch_http_bytes(
+        session = await http_client_manager.get_session()
+        async with session.get(
             _TRACKERS_URL,
-            max_bytes=_MAX_TRACKER_DOCUMENT_BYTES,
             headers={"Accept": "text/plain"},
-            redirects=1,
-        )
+        ) as response:
+            response.raise_for_status()
+            document = await response.read()
         downloaded = _decode_trackers(document)
 
         trackers[:] = downloaded
-    except (OutboundUrlError, InvalidTrackerDocument) as exc:
+    except (aiohttp.ClientError, TimeoutError, InvalidTrackerDocument) as exc:
         log.warning(
             "trackers.download.failed",
             "Tracker download failed",

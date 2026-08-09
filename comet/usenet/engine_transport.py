@@ -15,6 +15,7 @@ from comet.usenet.limits import (
     MAX_NZB_METADATA_BYTES,
     MAX_UNIX_SOCKET_PATH_BYTES,
 )
+from comet.utils.text import has_ascii_control
 
 MAX_ENGINE_HEADER_BYTES = 16 * 1024
 MAX_ENGINE_CONTROL_BYTES = 1024 * 1024
@@ -284,10 +285,9 @@ class EngineTransport:
             method not in {"GET", "POST", "PUT", "DELETE"}
             or not isinstance(path, str)
             or not path.startswith("/v1/")
-            or any(
-                not character.isascii() or character.isspace() or ord(character) < 33
-                for character in path
-            )
+            or not path.isascii()
+            or has_ascii_control(path)
+            or any(character.isspace() for character in path)
             or not isinstance(body, bytes)
             or len(body) > MAX_ENGINE_NZB_METADATA_BYTES
         ):
@@ -404,7 +404,6 @@ class EngineTransport:
                     )
             return status, response_headers, response_body
         except (
-            TimeoutError,
             OSError,
             ValueError,
             asyncio.IncompleteReadError,

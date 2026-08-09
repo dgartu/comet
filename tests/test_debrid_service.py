@@ -3,11 +3,62 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from RTN import parse
 
-from comet.services.debrid import DebridService
+from comet.metadata.media_info import media_info_from_stremthru
+from comet.services.debrid import DebridService, prefer_torrent_update
 from comet.utils.parsing import MediaScope
 
 
 class DebridServiceCacheTests(unittest.IsolatedAsyncioTestCase):
+    def test_file_media_info_enriches_the_runtime_parse(self):
+        original = parse("Movie.2026.1080p.H264.AC3.mkv")
+        media_info = media_info_from_stremthru(
+            {
+                "video": {
+                    "codec": "hevc",
+                    "hdr": ["HDR10+"],
+                    "w": 3840,
+                    "h": 2160,
+                },
+                "audio": [{"codec": "eac3", "lang": "fra", "ch": 6}],
+                "v": 1,
+            }
+        )
+
+        update = DebridService._build_torrent_update(
+            {
+                "title": original.raw_title,
+                "size": 100,
+                "fileIndex": None,
+                "parsed": original,
+            },
+            file_index=1,
+            title="Movie.2026.mkv",
+            size=90,
+            parsed=parse("Movie.2026.mkv"),
+            media_info=media_info,
+        )
+
+        self.assertIs(update["mediaInfo"], media_info)
+        self.assertEqual(update["parsed"].resolution, "2160p")
+        self.assertEqual(update["parsed"].codec, "hevc")
+        self.assertEqual(update["parsed"].hdr, ["HDR10+"])
+        self.assertEqual(update["parsed"].languages, ["fr"])
+        self.assertEqual(update["parsed"].audio, ["Dolby Digital Plus"])
+        self.assertEqual(update["parsed"].channels, ["5.1"])
+        self.assertEqual(original.resolution, "1080p")
+
+    def test_multi_service_merge_only_upgrades_the_same_file_observation(self):
+        store = media_info_from_stremthru(
+            {"video": {"codec": "avc"}, "src": "realdebrid", "v": 1}
+        )
+        native = media_info_from_stremthru({"video": {"codec": "hevc"}, "v": 1})
+        current = {"fileIndex": 1, "title": "Movie.mkv", "mediaInfo": store}
+        upgraded = {"fileIndex": 1, "title": "Movie.mkv", "mediaInfo": native}
+        other_file = {"fileIndex": 2, "title": "Movie.alt.mkv", "mediaInfo": native}
+
+        self.assertIs(prefer_torrent_update(current, upgraded), upgraded)
+        self.assertIs(prefer_torrent_update(current, other_file), current)
+
     def test_invalid_cached_file_index_is_not_converted_to_absence(self):
         with self.assertRaises(ValueError):
             DebridService._build_torrent_update(

@@ -967,10 +967,10 @@ RELEASE_LOCATORS_TABLE_SPEC = ManagedTableSpec(
             ),
             candidate_id VARCHAR(36) NOT NULL
                 REFERENCES release_candidates(candidate_id) ON DELETE CASCADE,
-            origin_kind VARCHAR(32) NOT NULL CHECK (origin_kind IN (
-                'discovery', 'manual_upload', 'manual_url'
-            )),
-            discovery_configuration_id VARCHAR(36),
+            origin_kind VARCHAR(32) NOT NULL CHECK (
+                origin_kind = 'discovery'
+            ),
+            discovery_configuration_id VARCHAR(36) NOT NULL,
             owner_configuration_partition CHAR(64) NOT NULL CHECK (
                 {_lower_hex_check("owner_configuration_partition", 64)}
             ),
@@ -999,13 +999,6 @@ RELEASE_LOCATORS_TABLE_SPEC = ManagedTableSpec(
             updated_at_ms BIGINT NOT NULL CHECK (updated_at_ms >= 0),
             tombstoned_at_ms BIGINT CHECK (
                 tombstoned_at_ms IS NULL OR tombstoned_at_ms >= 0
-            ),
-            CHECK (
-                (origin_kind = 'discovery'
-                 AND discovery_configuration_id IS NOT NULL)
-                OR
-                (origin_kind IN ('manual_upload', 'manual_url')
-                 AND discovery_configuration_id IS NULL)
             ),
             UNIQUE (
                 candidate_id, locator_kind, content_key,
@@ -1234,14 +1227,13 @@ ASSET_PREPARATIONS_TABLE_SPEC = ManagedTableSpec(
             refcount BIGINT NOT NULL DEFAULT 0 CHECK (refcount >= 0),
             created_at DOUBLE PRECISION NOT NULL,
             last_used_at DOUBLE PRECISION NOT NULL,
-            idle_expires_at DOUBLE PRECISION NOT NULL,
             absolute_expires_at DOUBLE PRECISION NOT NULL
         )
     """,
     index_sql=(
         """
             CREATE INDEX IF NOT EXISTS idx_asset_preparations_expiry_v1
-            ON {table_name} (absolute_expires_at, idle_expires_at)
+            ON {table_name} (absolute_expires_at, preparation_id)
         """,
         """
             CREATE INDEX IF NOT EXISTS idx_asset_preparations_readiness_v1
@@ -1470,6 +1462,7 @@ DEBRID_AVAILABILITY_TABLE_SPEC = ManagedTableSpec(
             title TEXT,
             size BIGINT,
             parsed_json TEXT,
+            media_info_json TEXT,
             updated_at DOUBLE PRECISION NOT NULL,
             CHECK ((season IS NULL AND season_norm = -1) OR season = season_norm),
             CHECK ((episode IS NULL AND episode_norm = -1) OR episode = episode_norm)
@@ -1485,6 +1478,7 @@ DEBRID_AVAILABILITY_TABLE_SPEC = ManagedTableSpec(
             column_sql="parsed_json TEXT",
             legacy_name="parsed",
         ),
+        LegacyColumnMigration("media_info_json", "media_info_json TEXT"),
         LegacyColumnMigration(
             column_name="updated_at",
             column_sql="updated_at DOUBLE PRECISION",

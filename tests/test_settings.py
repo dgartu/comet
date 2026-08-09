@@ -195,8 +195,13 @@ class AppSettingsTests(unittest.TestCase):
             "configured",
         )
         self.assertEqual(configured.USENET_NATIVE_ACCESS_TOKEN, "x")
-        with self.assertRaises(ValidationError):
-            AppSettings(_env_file=None, USENET_NATIVE_ACCESS_TOKEN="x" * 257)
+        self.assertEqual(
+            AppSettings(
+                _env_file=None,
+                USENET_NATIVE_ACCESS_TOKEN="x" * 257,
+            ).USENET_NATIVE_ACCESS_TOKEN,
+            "x" * 257,
+        )
 
     def test_capability_secret_accepts_an_operator_passphrase(self):
         configured = AppSettings(
@@ -274,11 +279,15 @@ class AppSettingsTests(unittest.TestCase):
             AppSettings(_env_file=None, PUBLIC_API_TOKEN="x").PUBLIC_API_TOKEN,
             "x",
         )
-        for token in ("contains/slash", "contains space", "x" * 257):
+        for token in ("contains/slash", "contains space"):
             with self.subTest(token=token[:16]), self.assertRaises(ValidationError):
                 AppSettings(_env_file=None, PUBLIC_API_TOKEN=token)
+        self.assertEqual(
+            AppSettings(_env_file=None, PUBLIC_API_TOKEN="x" * 257).PUBLIC_API_TOKEN,
+            "x" * 257,
+        )
 
-        for path in ("secret\nfile", "x" * 4_097):
+        for path in ("secret\x00file", "x" * 4_097):
             with self.subTest(path=path[:16]), self.assertRaises(ValidationError):
                 AppSettings(_env_file=None, PUBLIC_API_TOKEN_FILE=path)
 

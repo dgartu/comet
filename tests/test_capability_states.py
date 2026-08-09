@@ -336,6 +336,35 @@ class CapabilityStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(values["error_code"], "validation_timeout")
         self.assertNotIn("exception", values)
 
+    async def test_first_use_failure_settles_sibling_validations(self):
+        repository = CapabilityStateRepository(object())
+        pending = EffectiveCapabilityState("pending_validation", False, False, False)
+        repository.effective = AsyncMock(return_value=pending)
+        sibling_started = asyncio.Event()
+        sibling_finished = asyncio.Event()
+
+        async def validate(binding, _validator, *, now):
+            if binding.binding_fingerprint.startswith("a"):
+                await sibling_started.wait()
+                raise RuntimeError("validation failed")
+            sibling_started.set()
+            try:
+                await asyncio.sleep(0.01)
+                return pending
+            finally:
+                sibling_finished.set()
+
+        repository._validate_pending = validate
+        bindings = [
+            CapabilityBinding(character * 64, "easynews", 2, "easynews-v1")
+            for character in "ab"
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "validation failed"):
+            await repository.ensure_validated(bindings, AsyncMock(), now=100)
+
+        self.assertTrue(sibling_finished.is_set())
+
     async def test_explicit_retest_replaces_a_terminal_state(self):
         database = type("Database", (), {"execute": AsyncMock()})()
         repository = CapabilityStateRepository(database)

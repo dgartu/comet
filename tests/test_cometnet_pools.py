@@ -133,33 +133,6 @@ class CometNetPoolStoreTests(unittest.IsolatedAsyncioTestCase):
                 "creator-key",
             )
 
-    async def test_load_migrates_verified_legacy_derived_node_ids(self):
-        with tempfile.TemporaryDirectory() as directory:
-            store = PoolStore(directory)
-            manifest_path = Path(directory, "manifests", "pool-a.json")
-            manifest_path.write_text(self._manifest().model_dump_json(indent=2))
-
-            await store.load()
-
-            self.assertIsNotNone(store.get_manifest("pool-a"))
-            persisted = json.loads(manifest_path.read_text())
-            self.assertNotIn("node_id", persisted["members"][0])
-
-    async def test_load_rejects_inconsistent_legacy_derived_node_id(self):
-        with tempfile.TemporaryDirectory() as directory:
-            store = PoolStore(directory)
-            manifest_path = Path(directory, "manifests", "pool-a.json")
-            legacy = self._manifest().model_dump()
-            legacy["members"][0]["node_id"] = "not-derived-from-public-key"
-            manifest_path.write_text(json.dumps(legacy))
-
-            await store.load()
-
-            self.assertIsNone(store.get_manifest("pool-a"))
-            self.assertIn(
-                "node_id", json.loads(manifest_path.read_text())["members"][0]
-            )
-
     async def test_remote_manifest_requires_existing_pool_authority(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PoolStore(directory)
@@ -211,6 +184,42 @@ class CometNetPoolStoreTests(unittest.IsolatedAsyncioTestCase):
             verify_takeover.assert_not_awaited()
             self.assertEqual(store.get_manifest("pool-a").creator_key, "creator-key")
 
+    async def test_remote_manifest_preserves_local_contribution_stats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PoolStore(directory)
+            current = self._manifest()
+            current.members[0].contribution_count = 7
+            current.members[0].last_seen = 123
+            await store.store_manifest(current)
+
+            update = current.model_copy(deep=True)
+            update.version = 2
+            update.updated_at += 1
+            update.members[0].contribution_count = 99
+            update.members[0].last_seen = 999
+            update.members.append(
+                PoolMember(
+                    public_key="new-member",
+                    added_by="creator-key",
+                    contribution_count=42,
+                    last_seen=456,
+                )
+            )
+            update.signatures = {"creator-key": "signature"}
+
+            with patch(
+                "comet.cometnet.pools.NodeIdentity.verify_hex_async",
+                new=AsyncMock(return_value=True),
+            ):
+                accepted, _ = await store.accept_remote_manifest(update)
+
+            self.assertTrue(accepted)
+            stored = store.get_manifest("pool-a")
+            creator = stored.get_member("creator-key")
+            newcomer = stored.get_member("new-member")
+            self.assertEqual((creator.contribution_count, creator.last_seen), (7, 123))
+            self.assertEqual((newcomer.contribution_count, newcomer.last_seen), (0, 0))
+
     async def test_manifest_model_rejects_non_current_or_inconsistent_data(self):
         valid = self._manifest().to_persisted_dict()
         malformed = []
@@ -248,6 +257,10 @@ class CometNetPoolStoreTests(unittest.IsolatedAsyncioTestCase):
         non_canonical_id = copy.deepcopy(valid)
         non_canonical_id["pool_id"] = " Pool-A "
         malformed.append(non_canonical_id)
+
+        non_ascii_id = copy.deepcopy(valid)
+        non_ascii_id["pool_id"] = "poöl"
+        malformed.append(non_ascii_id)
 
         for data in malformed:
             with self.subTest(data=data), self.assertRaises(ValueError):
@@ -400,38 +413,37 @@ class CometNetPoolStoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.get_memberships(), {"pool-a", "pool-b"})
             self.assertEqual(store.get_subscriptions(), {"pool-a", "pool-b"})
             self.assertEqual(
-                store.get_pool_peers("pool-a"),
+                store.get_all_pool_peers()["pool-a"],
                 {"wss://one", "wss://two"},
             )
 
-    async def test_save_serializes_auxiliary_snapshots(self):
+    async def test_pool_peer_retention_tracks_connection_capacity(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("comet.cometnet.pools.settings.COMETNET_MAX_PEERS", 2),
+        ):
+            store = PoolStore(directory)
+            await store.add_membership("pool-a")
+            await store.add_pool_peer("pool-a", "wss://one")
+            await store.add_pool_peer("pool-a", "wss://two")
+            await store.add_pool_peer("pool-a", "wss://three")
+
+            self.assertEqual(
+                store.get_all_pool_peers()["pool-a"],
+                {"wss://three", "wss://two"},
+            )
+
+    async def test_save_does_not_rewrite_eager_auxiliary_state(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PoolStore(directory)
             await store.add_membership("pool-a")
-            save_started = asyncio.Event()
-            release_save = asyncio.Event()
-            first_membership_write = True
 
-            async def yielding_write(path, content):
-                nonlocal first_membership_write
-                if path.name == "memberships.json" and first_membership_write:
-                    first_membership_write = False
-                    save_started.set()
-                    await release_save.wait()
-                await write_text_atomic(path, content)
+            with patch(
+                "comet.cometnet.pools.write_text_atomic", new=AsyncMock()
+            ) as write:
+                await store.save()
 
-            with patch("comet.cometnet.pools.write_text_atomic", new=yielding_write):
-                save_task = asyncio.create_task(store.save())
-                await save_started.wait()
-                addition_task = asyncio.create_task(store.add_membership("pool-b"))
-                await asyncio.sleep(0)
-
-                self.assertFalse(addition_task.done())
-                release_save.set()
-                await asyncio.gather(save_task, addition_task)
-
-            persisted = json.loads(Path(directory, "memberships.json").read_text())
-            self.assertEqual(persisted, ["pool-a", "pool-b"])
+            write.assert_not_awaited()
 
     async def test_delete_pool_cleans_persisted_and_published_state(self):
         class Identity:
@@ -664,24 +676,3 @@ class CometNetPoolStoreTests(unittest.IsolatedAsyncioTestCase):
                 .contribution_count,
                 2,
             )
-
-    async def test_invite_links_accept_only_the_current_exact_shape(self):
-        self.assertEqual(
-            PoolInvite.parse_link(
-                "cometnet://join?pool=pool-a&code=invite-code&node=wss%3A%2F%2Fpeer"
-            ),
-            {"pool": "pool-a", "code": "invite-code", "node": "wss://peer"},
-        )
-
-        invalid_links = [
-            "cometnet://pool/pool-a/invite/invite-code",
-            "cometnet://join?pool=Pool-A&code=invite-code",
-            "cometnet://join?pool=pool-a&code=",
-            "cometnet://join?pool=pool-a&code=one&code=two",
-            "cometnet://join?pool=pool-a&code=invite-code&legacy=true",
-            "cometnet://join/path?pool=pool-a&code=invite-code",
-            "cometnet://join?pool=pool-a&code=invite-code#fragment",
-        ]
-        for link in invalid_links:
-            with self.subTest(link=link):
-                self.assertIsNone(PoolInvite.parse_link(link))

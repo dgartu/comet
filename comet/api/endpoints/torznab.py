@@ -2,7 +2,6 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from email.utils import format_datetime
-from functools import lru_cache
 from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, Request, Response
@@ -33,15 +32,13 @@ RECENT_CANDIDATE_LIMIT = 20
 FEED_LIMIT = 10_000
 _MAX_QUERY_STRING_BYTES = 8 * 1024
 _MAX_QUERY_PARAMETERS = 32
-_MAX_SEARCH_QUERY_BYTES = 512
-_MAX_CATEGORIES = 64
 
 _IMDB_ID = re.compile(r"tt([0-9]{7,10})", re.IGNORECASE)
 _IMDB_ID_WITHOUT_PREFIX = re.compile(r"[0-9]{7,10}")
-_NONNEGATIVE_INTEGER = re.compile(r"[0-9]{1,18}", re.ASCII)
+_NONNEGATIVE_INTEGER = re.compile(r"[0-9]+", re.ASCII)
 _YEAR = re.compile(r"[0-9]{4}", re.ASCII)
 _DAILY_EPISODE = re.compile(r"([0-9]{1,2})/([0-9]{1,2})", re.ASCII)
-_TITLE_SCOPE = re.compile(r"(?i)(?:[ ._-]+)S([0-9]{1,18})(?:E([0-9]{1,18}))?\s*$")
+_TITLE_SCOPE = re.compile(r"(?i)(?:[ ._-]+)S([0-9]+)(?:E([0-9]+))?\s*$")
 _ILLEGAL_XML_CHARACTER = re.compile(
     "[^\t\n\r\x20-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]"
 )
@@ -125,7 +122,10 @@ def _parse_coordinate(value: str, prefix: str) -> int:
         normalized = normalized[1:]
     if _NONNEGATIVE_INTEGER.fullmatch(normalized) is None:
         raise TorznabProtocolError(201, "Invalid parameter")
-    return int(normalized)
+    significant = normalized.lstrip("0") or "0"
+    if len(significant) > 5 or (len(significant) == 5 and significant > "65535"):
+        raise TorznabProtocolError(201, "Invalid parameter")
+    return int(significant)
 
 
 def parse_torznab_query(request: Request) -> TorznabQuery:
@@ -162,8 +162,6 @@ def parse_torznab_query(request: Request) -> TorznabQuery:
             if not category.strip():
                 raise TorznabProtocolError(201, "Invalid parameter")
             categories.append(_parse_category(category))
-            if len(categories) > _MAX_CATEGORIES:
-                raise TorznabProtocolError(201, "Invalid parameter")
 
     raw_season = values.get("season")
     season = None
@@ -203,12 +201,6 @@ def parse_torznab_query(request: Request) -> TorznabQuery:
     query = values.get("q")
     if query is not None:
         query = query.strip()
-        try:
-            query_size = len(query.encode("utf-8"))
-        except UnicodeError:
-            raise TorznabProtocolError(201, "Invalid parameter") from None
-        if query_size > _MAX_SEARCH_QUERY_BYTES:
-            raise TorznabProtocolError(201, "Invalid parameter")
 
     return TorznabQuery(
         function,
@@ -249,9 +241,9 @@ def _extract_title_scope(
         return query, season, episode
     title = query[: match.start()].strip(" ._-")
     if season is None:
-        season = int(match.group(1))
+        season = _parse_coordinate(match.group(1), "")
     if episode is None and match.group(2) is not None:
-        episode = int(match.group(2))
+        episode = _parse_coordinate(match.group(2), "")
     return title, season, episode
 
 
@@ -429,12 +421,7 @@ def _valid_tracker(value: object) -> str | None:
     return normalized
 
 
-@lru_cache(maxsize=1024)
 def _encoded_trackers(candidates: tuple[str, ...]) -> str:
-    """Encode a tracker list as magnet `&tr=` parameters.
-
-    Cached because a feed reuses the same list across every one of its items.
-    """
     trackers = dict.fromkeys(
         tracker for tracker in map(_valid_tracker, candidates) if tracker is not None
     )

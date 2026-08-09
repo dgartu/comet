@@ -49,8 +49,6 @@ def validate_http_url(url: str, *, base_only: bool = False):
 def normalize_api_prefix(value: str):
     if not isinstance(value, str):
         raise JsonHttpError("invalid API prefix")
-    if value and not value.strip():
-        raise JsonHttpError("invalid API prefix")
     normalized = value.strip().strip("/")
     try:
         normalized.encode("ascii")
@@ -86,15 +84,10 @@ def response_status(error):
 
 
 def _decode_json_response(response):
-    raw = getattr(response, "raw", None)
-    if raw is None or not hasattr(raw, "read"):
-        raise JsonHttpError("invalid response body")
     try:
-        payload = raw.read(decode_content=True)
+        payload = response.raw.read(decode_content=True)
     except Exception as exc:
         raise JsonHttpError("response read failed") from exc
-    if not isinstance(payload, bytes):
-        raise JsonHttpError("invalid response body")
     try:
         decoded = json.loads(
             payload.decode("utf-8"),
@@ -102,7 +95,7 @@ def _decode_json_response(response):
                 ValueError(f"invalid constant {value}")
             ),
         )
-    except (UnicodeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise JsonHttpError("invalid JSON response") from exc
     if not isinstance(decoded, dict):
         raise JsonHttpError("invalid JSON response")
@@ -111,9 +104,6 @@ def _decode_json_response(response):
 
 def request_json(session, method: str, url: str, *, timeout: int, payload=None):
     target = validate_http_url(url)
-    if method not in {"GET", "POST"}:
-        raise JsonHttpError("unsupported HTTP method")
-    request = session.get if method == "GET" else session.post
     kwargs = {
         "timeout": timeout,
         "allow_redirects": False,
@@ -126,10 +116,9 @@ def request_json(session, method: str, url: str, *, timeout: int, payload=None):
     if method == "POST":
         kwargs["json"] = payload
 
-    response = request(target, **kwargs)
+    response = session.request(method, target, **kwargs)
     try:
-        status = getattr(response, "status_code", None)
-        if type(status) is not int or not 200 <= status <= 299:
+        if not 200 <= response.status_code <= 299:
             response.raise_for_status()
             raise JsonHttpError("unexpected HTTP status")
         return _decode_json_response(response)

@@ -5,23 +5,14 @@ from __future__ import annotations
 import hashlib
 import itertools
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from RTN import parse
 
 from comet.usenet.archive_paths import normalize_archive_relative_path
-from comet.usenet.identity import archive_member_id as _archive_member_id
-from comet.usenet.identity import is_sha256_hex as _is_sha256_hex
-from comet.usenet.limits import (
-    MAX_ARCHIVE_VOLUMES,
-    MAX_NZB_FILES,
-    MAX_USENET_LOGICAL_BYTES,
-)
+from comet.usenet.limits import MAX_ARCHIVE_VOLUMES
 from comet.utils.parsing import is_video
-
-MAX_CATALOG_FILES = MAX_NZB_FILES
-
 
 _EPISODE_ABSOLUTE_RE = re.compile(
     r"\[\s*0*([0-9]+)(?:v\d+)?\s*\]"
@@ -81,67 +72,22 @@ def _asset_id(artifact_sha256: str, file_index: int, relative_path: str) -> byte
     return digest.digest()
 
 
-def _valid_logical_size(value: object) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, int)
-        and 1 <= value <= MAX_USENET_LOGICAL_BYTES
-    )
-
-
 def catalog_engine_source_assets(
     artifact_sha256: str, engine_assets: Sequence[object]
 ) -> tuple[UsenetAsset, ...]:
-    if (
-        not isinstance(artifact_sha256, str)
-        or not _is_sha256_hex(artifact_sha256)
-        or not isinstance(engine_assets, (list, tuple))
-        or len(engine_assets) > MAX_CATALOG_FILES
-    ):
-        raise FileSelectionError("file_selection_invalid")
     assets = []
     file_indices = set()
     paths = set()
     for engine_asset in engine_assets:
-        if (
-            not isinstance(engine_asset, Mapping)
-            or not {
-                "asset_id",
-                "file_index",
-                "relative_path",
-                "declared_bytes",
-                "kind",
-            }
-            <= engine_asset.keys()
-        ):
-            raise FileSelectionError("file_selection_invalid")
-        asset_id = engine_asset["asset_id"]
+        asset_id = bytes.fromhex(engine_asset["asset_id"])
         file_index = engine_asset["file_index"]
         relative_path = engine_asset["relative_path"]
         declared_bytes = engine_asset["declared_bytes"]
         kind = engine_asset["kind"]
         if (
-            not isinstance(asset_id, str)
-            or not _is_sha256_hex(asset_id)
-            or isinstance(file_index, bool)
-            or not isinstance(file_index, int)
-            or not 0 <= file_index < MAX_CATALOG_FILES
-            or file_index in file_indices
-            or not isinstance(relative_path, str)
+            file_index in file_indices
             or normalize_archive_relative_path(relative_path) != relative_path
-            or not _valid_logical_size(declared_bytes)
-            or kind
-            not in {
-                "video",
-                "archive",
-                "split",
-                "logical_split",
-                "logical_archive",
-                "par2",
-                "par2_source",
-            }
-            or bytes.fromhex(asset_id)
-            != _asset_id(artifact_sha256, file_index, relative_path)
+            or asset_id != _asset_id(artifact_sha256, file_index, relative_path)
             or relative_path.lower() in paths
         ):
             raise FileSelectionError("file_selection_invalid")
@@ -149,7 +95,7 @@ def catalog_engine_source_assets(
         paths.add(relative_path.lower())
         assets.append(
             UsenetAsset(
-                asset_id=bytes.fromhex(asset_id),
+                asset_id=asset_id,
                 file_index=file_index,
                 relative_path=relative_path,
                 declared_bytes=declared_bytes,
@@ -161,71 +107,16 @@ def catalog_engine_source_assets(
 
 def catalog_par2_assets(
     set_id: str,
-    slice_size: int,
     catalog_files: Sequence[object],
     *,
     known_video: tuple[str, int] | None = None,
 ) -> tuple[UsenetAsset, ...]:
     """Turn independently validated PAR2 descriptions into playable candidates."""
-    if (
-        not isinstance(set_id, str)
-        or len(set_id) != 32
-        or any(character not in "0123456789abcdef" for character in set_id)
-        or isinstance(slice_size, bool)
-        or not isinstance(slice_size, int)
-        or not 4 <= slice_size <= 16 * 1024 * 1024
-        or slice_size % 4 != 0
-        or not isinstance(catalog_files, (list, tuple))
-        or not 1 <= len(catalog_files) <= MAX_CATALOG_FILES
-    ):
-        raise FileSelectionError("file_selection_invalid")
     assets = []
-    file_ids = set()
-    paths = set()
     for file_index, catalog_file in enumerate(catalog_files):
-        if (
-            not isinstance(catalog_file, Mapping)
-            or not {
-                "file_id",
-                "relative_path",
-                "exact_size",
-                "full_md5",
-                "first_16k_md5",
-                "slice_count",
-            }
-            <= catalog_file.keys()
-        ):
-            raise FileSelectionError("file_selection_invalid")
         file_id = catalog_file["file_id"]
         relative_path = catalog_file["relative_path"]
         exact_size = catalog_file["exact_size"]
-        slice_count = catalog_file["slice_count"]
-        if (
-            not isinstance(file_id, str)
-            or len(file_id) != 32
-            or any(character not in "0123456789abcdef" for character in file_id)
-            or file_id in file_ids
-            or not isinstance(relative_path, str)
-            or normalize_archive_relative_path(relative_path) != relative_path
-            or relative_path.lower() in paths
-            or not _valid_logical_size(exact_size)
-            or any(
-                not isinstance(catalog_file[field], str)
-                or len(catalog_file[field]) != 32
-                or any(
-                    character not in "0123456789abcdef"
-                    for character in catalog_file[field]
-                )
-                for field in ("full_md5", "first_16k_md5")
-            )
-            or isinstance(slice_count, bool)
-            or not isinstance(slice_count, int)
-            or not 1 <= slice_count <= 32_768
-            or slice_count != (exact_size + slice_size - 1) // slice_size
-        ):
-            raise FileSelectionError("file_selection_invalid")
-        file_ids.add(file_id)
-        paths.add(relative_path.lower())
         if known_video == (relative_path, exact_size) or is_video(relative_path):
             kind = "video"
         elif _archive_volume_hint(relative_path) is not None:
@@ -250,55 +141,22 @@ def catalog_par2_assets(
 
 
 def catalog_par2_source_assets(
-    set_id: str, slice_size: int, catalog_files: Sequence[object]
+    set_id: str, catalog_files: Sequence[object]
 ) -> tuple[UsenetAsset, ...]:
     return tuple(
         asset
-        for asset in catalog_par2_assets(set_id, slice_size, catalog_files)
+        for asset in catalog_par2_assets(set_id, catalog_files)
         if asset.kind == "archive"
     )
 
 
-def catalog_archive_members(
-    set_identity: str, members: Sequence[object]
-) -> tuple[UsenetAsset, ...]:
-    if (
-        not isinstance(set_identity, str)
-        or not _is_sha256_hex(set_identity)
-        or not isinstance(members, (list, tuple))
-        or len(members) > MAX_CATALOG_FILES
-    ):
-        raise FileSelectionError("file_selection_invalid")
+def catalog_archive_members(members: Sequence[object]) -> tuple[UsenetAsset, ...]:
     assets = []
-    paths = set()
     for file_index, member in enumerate(members):
-        if (
-            not isinstance(member, Mapping)
-            or not {
-                "member_id",
-                "relative_path",
-                "exact_size",
-                "kind",
-            }
-            <= member.keys()
-        ):
-            raise FileSelectionError("file_selection_invalid")
         member_id = member["member_id"]
         relative_path = member["relative_path"]
         exact_size = member["exact_size"]
         kind = member["kind"]
-        if (
-            not isinstance(member_id, str)
-            or not _is_sha256_hex(member_id)
-            or normalize_archive_relative_path(relative_path) != relative_path
-            or not _valid_logical_size(exact_size)
-            or kind not in {"video", "archive", "split", "par2"}
-            or _archive_member_id(set_identity, relative_path, exact_size)
-            != bytes.fromhex(member_id)
-            or relative_path.lower() in paths
-        ):
-            raise FileSelectionError("file_selection_invalid")
-        paths.add(relative_path.lower())
         if kind == "video":
             assets.append(
                 UsenetAsset(
@@ -313,54 +171,15 @@ def catalog_archive_members(
 
 
 def catalog_nested_archive_members(
-    set_identity: str, members: Sequence[object]
+    members: Sequence[object],
 ) -> tuple[NestedArchiveAsset, ...]:
-    if (
-        not isinstance(set_identity, str)
-        or not _is_sha256_hex(set_identity)
-        or not isinstance(members, (list, tuple))
-        or len(members) > MAX_CATALOG_FILES
-    ):
-        raise FileSelectionError("file_selection_invalid")
     assets = []
-    paths = set()
     for file_index, member in enumerate(members):
-        if (
-            not isinstance(member, Mapping)
-            or not {
-                "member_id",
-                "relative_path",
-                "exact_size",
-                "kind",
-                "selected_paths",
-            }
-            <= member.keys()
-        ):
-            raise FileSelectionError("file_selection_invalid")
         member_id = member["member_id"]
         relative_path = member["relative_path"]
         exact_size = member["exact_size"]
         kind = member["kind"]
         selected_paths = member["selected_paths"]
-        if (
-            not isinstance(member_id, str)
-            or not _is_sha256_hex(member_id)
-            or normalize_archive_relative_path(relative_path) != relative_path
-            or not _valid_logical_size(exact_size)
-            or kind != "video"
-            or not isinstance(selected_paths, (list, tuple))
-            or not 1 <= len(selected_paths) <= 4
-            or any(
-                normalize_archive_relative_path(selected_path) != selected_path
-                for selected_path in selected_paths
-            )
-            or relative_path != "!/".join(selected_paths)
-            or _archive_member_id(set_identity, relative_path, exact_size)
-            != bytes.fromhex(member_id)
-            or relative_path.lower() in paths
-        ):
-            raise FileSelectionError("file_selection_invalid")
-        paths.add(relative_path.lower())
         assets.append(
             NestedArchiveAsset(
                 asset_id=bytes.fromhex(member_id),

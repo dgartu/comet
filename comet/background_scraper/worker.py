@@ -136,7 +136,8 @@ class BackgroundScraperWorker:
             "now": current_now,
             "success_cutoff": current_now - success_ttl,
             "success_ttl": success_ttl,
-            "max_retries": self._max_retries_for_query(),
+            "max_retries": settings.BACKGROUND_SCRAPER_MAX_RETRIES,
+            "retry_unlimited": int(settings.BACKGROUND_SCRAPER_MAX_RETRIES < 0),
         }
 
     async def _fetch_queue_snapshot(self, now: float | None = None):
@@ -154,7 +155,11 @@ class BackgroundScraperWorker:
                 FROM background_scraper_items i
                 WHERE (i.next_retry_at IS NULL OR i.next_retry_at <= :now)
                   AND (i.last_success_at IS NULL OR i.last_success_at <= :success_cutoff)
-                  AND (i.status != 'dead' OR i.consecutive_failures < :max_retries)
+                  AND (
+                      :retry_unlimited = 1
+                      OR i.status != 'dead'
+                      OR i.consecutive_failures < :max_retries
+                  )
             ),
             item_snapshot AS (
                 SELECT
@@ -175,7 +180,11 @@ class BackgroundScraperWorker:
                   AND e.episode >= 1
                   AND (e.next_retry_at IS NULL OR e.next_retry_at <= :now)
                   AND (e.last_success_at IS NULL OR e.last_success_at <= :success_cutoff)
-                  AND (e.status != 'dead' OR e.consecutive_failures < :max_retries)
+                  AND (
+                      :retry_unlimited = 1
+                      OR e.status != 'dead'
+                      OR e.consecutive_failures < :max_retries
+                  )
             ),
             ready_episodes AS (
                 SELECT
@@ -202,10 +211,8 @@ class BackgroundScraperWorker:
 
         queue_snapshot = dict(queue_snapshot)
 
-        oldest_item_value = queue_snapshot["oldest_item_ts"]
-        oldest_episode_value = queue_snapshot["oldest_episode_ts"]
-        oldest_item_ts = oldest_item_value
-        oldest_episode_ts = oldest_episode_value
+        oldest_item_ts = queue_snapshot["oldest_item_ts"]
+        oldest_episode_ts = queue_snapshot["oldest_episode_ts"]
         candidate_timestamps = [
             ts for ts in (oldest_item_ts, oldest_episode_ts) if ts is not None
         ]
@@ -336,10 +343,6 @@ class BackgroundScraperWorker:
                 series_capped += add_series
 
         return movies_capped, series_capped
-
-    def _planning_batch_size_per_type(self):
-        workers = max(1, settings.BACKGROUND_SCRAPER_CONCURRENT_WORKERS)
-        return max(500, min(10000, workers * 500))
 
     async def _run_items_in_bounded_chunks(
         self, planned_items: list[dict], deadline: float | None
@@ -646,7 +649,6 @@ class BackgroundScraperWorker:
                     raise
                 except Exception as e:
                     self.last_error = str(e)
-                    next_cycle_delay = 300
 
                 if self._drain_requested:
                     self._drain_requested = False
@@ -784,11 +786,8 @@ class BackgroundScraperWorker:
                 if runtime_budget and runtime_budget > 0
                 else None
             )
-            planning_batch_size = self._planning_batch_size_per_type()
             remaining_movies = max_movies
             remaining_series = max_series
-            planned_movies_total = 0
-            planned_series_total = 0
 
             while self.is_running and (remaining_movies > 0 or remaining_series > 0):
                 await self._wait_if_paused()
@@ -798,16 +797,14 @@ class BackgroundScraperWorker:
                 if deadline is not None and time.time() > deadline:
                     break
 
-                batch_movies_limit = min(remaining_movies, planning_batch_size)
-                batch_series_limit = min(remaining_series, planning_batch_size)
                 planned_movies = (
-                    await self._plan_items("movie", batch_movies_limit)
-                    if batch_movies_limit > 0
+                    await self._plan_items("movie", remaining_movies)
+                    if remaining_movies > 0
                     else []
                 )
                 planned_series = (
-                    await self._plan_items("series", batch_series_limit)
-                    if batch_series_limit > 0
+                    await self._plan_items("series", remaining_series)
+                    if remaining_series > 0
                     else []
                 )
                 planned_items = planned_movies + planned_series
@@ -816,8 +813,6 @@ class BackgroundScraperWorker:
 
                 planned_movies_count = len(planned_movies)
                 planned_series_count = len(planned_series)
-                planned_movies_total += planned_movies_count
-                planned_series_total += planned_series_count
                 remaining_movies = max(0, remaining_movies - planned_movies_count)
                 remaining_series = max(0, remaining_series - planned_series_count)
 
@@ -1092,7 +1087,7 @@ class BackgroundScraperWorker:
         now = time.time()
         success_cutoff = now - settings.BACKGROUND_SCRAPER_SUCCESS_TTL
         demand_cutoff = now - settings.BACKGROUND_SCRAPER_DEMAND_LOOKBACK
-        max_retries = self._max_retries_for_query()
+        max_retries = settings.BACKGROUND_SCRAPER_MAX_RETRIES
         demand_enabled = 1 if settings.BACKGROUND_SCRAPER_ENABLE_DEMAND_PRIORITY else 0
         min_priority_score = settings.BACKGROUND_SCRAPER_MIN_PRIORITY_SCORE
 
@@ -1119,7 +1114,11 @@ class BackgroundScraperWorker:
             WHERE i.media_type = :media_type
               AND (i.next_retry_at IS NULL OR i.next_retry_at <= :now)
               AND (i.last_success_at IS NULL OR i.last_success_at <= :success_cutoff)
-              AND (i.status != 'dead' OR i.consecutive_failures < :max_retries)
+              AND (
+                    :retry_unlimited = 1
+                    OR i.status != 'dead'
+                    OR i.consecutive_failures < :max_retries
+                  )
               AND (
                     i.priority_score >= :min_priority_score
                     OR d.media_id IS NOT NULL
@@ -1136,6 +1135,7 @@ class BackgroundScraperWorker:
                 "success_cutoff": success_cutoff,
                 "demand_cutoff": demand_cutoff,
                 "max_retries": max_retries,
+                "retry_unlimited": int(max_retries < 0),
                 "limit": limit,
                 "demand_enabled": demand_enabled,
                 "min_priority_score": min_priority_score,
@@ -1390,18 +1390,18 @@ class BackgroundScraperWorker:
                 )
 
         success_cutoff = now - settings.BACKGROUND_SCRAPER_SUCCESS_TTL
-        max_retries = self._max_retries_for_query()
+        max_retries = settings.BACKGROUND_SCRAPER_MAX_RETRIES
         configured_max_episodes = (
             settings.BACKGROUND_SCRAPER_MAX_EPISODES_PER_SERIES_PER_RUN
         )
-        max_episodes = (
-            configured_max_episodes
+        limit_clause = (
+            "LIMIT :limit"
             if configured_max_episodes and configured_max_episodes > 0
-            else 10000
+            else ""
         )
 
         rows = await database.fetch_all(
-            """
+            f"""
             SELECT episode_media_id, series_id, season, episode, status, consecutive_failures
             FROM background_scraper_episodes
             WHERE series_id = :series_id
@@ -1409,16 +1409,21 @@ class BackgroundScraperWorker:
               AND episode >= 1
               AND (next_retry_at IS NULL OR next_retry_at <= :now)
               AND (last_success_at IS NULL OR last_success_at <= :success_cutoff)
-              AND (status != 'dead' OR consecutive_failures < :max_retries)
+              AND (
+                  :retry_unlimited = 1
+                  OR status != 'dead'
+                  OR consecutive_failures < :max_retries
+              )
             ORDER BY season DESC, episode DESC
-            LIMIT :limit
+            {limit_clause}
             """,
             {
                 "series_id": series_id,
                 "now": now,
                 "success_cutoff": success_cutoff,
                 "max_retries": max_retries,
-                "limit": max_episodes,
+                "retry_unlimited": int(max_retries < 0),
+                "limit": configured_max_episodes,
             },
         )
         return [dict(row) for row in rows]
@@ -1661,14 +1666,11 @@ class BackgroundScraperWorker:
     def _compute_backoff(self, failures: int) -> float:
         base = settings.BACKGROUND_SCRAPER_FAILURE_BASE_BACKOFF
         max_backoff = settings.BACKGROUND_SCRAPER_FAILURE_MAX_BACKOFF
+        if base <= 0 or max_backoff <= base:
+            return min(base, max_backoff)
         exponent = max(0, failures - 1)
-        return min(max_backoff, base * math.pow(2, exponent))
-
-    def _max_retries_for_query(self) -> int:
-        configured = settings.BACKGROUND_SCRAPER_MAX_RETRIES
-        if configured < 0:
-            return 1000000
-        return configured
+        ceiling_exponent = math.ceil(math.log2(max_backoff / base))
+        return min(max_backoff, base * math.pow(2, min(exponent, ceiling_exponent)))
 
     def _is_retry_limit_reached(self, failures: int) -> bool:
         configured = settings.BACKGROUND_SCRAPER_MAX_RETRIES

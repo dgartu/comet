@@ -13,7 +13,7 @@ import { Input } from "../../components/ui/Input";
 import { LanguageSelector } from "../../i18n/LanguageSelector";
 
 const credentialsSchema = z.object({
-  password: z.string().min(1).max(512),
+  password: z.string().min(1),
 });
 
 type Credentials = z.infer<typeof credentialsSchema>;

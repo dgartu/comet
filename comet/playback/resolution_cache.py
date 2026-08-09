@@ -157,27 +157,13 @@ class ProviderResolutionCacheRepository:
             target_kind=target_kind,
             representation=representation,
         )
-        cached = await self._load(scope, observed_at)
-        if cached is None:
-            return await self._record(
-                scope=scope,
-                metadata=current,
-                observed_at=observed_at,
-                last_used_at=observed_at,
-                expires_at=expires_at,
-            )
-        for cached_value, current_value in (
-            (cached["selected_asset_id"], current["selected_asset_id"]),
-            (cached["exact_logical_length"], current["exact_logical_length"]),
-            (cached["strong_asset_revision"], current["strong_asset_revision"]),
-        ):
-            if cached_value is not None and current_value != cached_value:
-                raise ValueError("provider media representation changed")
-        if cached["target_kind"] != target_kind or (
-            cached["etag_strength"] == "strong" and current["etag_strength"] != "strong"
-        ):
-            raise ValueError("provider media representation changed")
-        return True
+        return await self._record(
+            scope=scope,
+            metadata=current,
+            observed_at=observed_at,
+            last_used_at=observed_at,
+            expires_at=expires_at,
+        )
 
     async def _record(
         self,
@@ -310,31 +296,6 @@ class ProviderResolutionCacheRepository:
         if row is None:
             raise ValueError("provider media representation changed")
         return True
-
-    async def _load(
-        self,
-        scope: dict[str, str],
-        now: float,
-    ):
-        now_ms = _milliseconds(now)
-        row = await self._database.fetch_one(
-            """
-            UPDATE provider_resolution_cache
-            SET last_used_at_ms = CASE
-                    WHEN last_used_at_ms > :now_ms
-                    THEN last_used_at_ms
-                    ELSE :now_ms
-                END
-            WHERE resolution_key = :resolution_key
-              AND expires_at_ms > :now_ms
-            RETURNING selected_asset_id, target_kind,
-                      exact_logical_length, strong_asset_revision, etag_strength,
-                      observed_at_ms, last_used_at_ms, expires_at_ms
-            """,
-            {"resolution_key": scope["resolution_key"], "now_ms": now_ms},
-            force_primary=True,
-        )
-        return row
 
     async def _generic_candidate_id(self, rendered_candidate_id: str) -> str:
         row = await self._database.fetch_one(

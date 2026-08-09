@@ -22,7 +22,7 @@ from comet.core.discovery_sources import effective_discovery_sources
 from comet.core.provider_governor import ProviderGovernor
 from comet.discovery.adapters.animetosho import (
     AnimeToshoAdapter,
-    animetosho_configuration,
+    AnimeToshoConfiguration,
 )
 from comet.discovery.adapters.easynews import (
     EasynewsSearchAccount,
@@ -38,7 +38,6 @@ from comet.discovery.adapters.stremio_addon import (
 )
 from comet.playback.tokens import CapabilityCodec
 
-_MAX_CREDENTIAL_MATERIAL_BYTES = 64 * 1024
 _CREDENTIAL_KEYS = {
     "animetosho": frozenset(),
     "easynews": frozenset({"password", "username"}),
@@ -47,10 +46,6 @@ _CREDENTIAL_KEYS = {
     "prowlarr_usenet": frozenset({"apiKey"}),
     "stremio_addon": frozenset({"authorization"}),
 }
-
-
-class _DiscoveryCredentialError(ValueError):
-    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,16 +63,6 @@ class DiscoveryBranchFingerprint:
     fingerprint: str
     public_visibility: bool = False
 
-    def __post_init__(self):
-        if (
-            len(self.fingerprint) != 64
-            or any(
-                character not in "0123456789abcdef" for character in self.fingerprint
-            )
-            or not isinstance(self.public_visibility, bool)
-        ):
-            raise ValueError("discovery branch fingerprint is invalid")
-
 
 def build_discovery_branch_fingerprints(
     config: Mapping[str, object],
@@ -88,35 +73,19 @@ def build_discovery_branch_fingerprints(
     """Derive search identities independently from playback presentation."""
     if config.get("schemaVersion") != 2:
         return ()
-    if account_partition is not None and (
-        not isinstance(account_partition, bytes) or len(account_partition) != 32
-    ):
-        raise ValueError("discovery account partition is invalid")
-    accounts = config.get("accounts")
-    if accounts is None:
-        accounts = {}
-    elif not isinstance(accounts, Mapping):
-        raise ValueError("discovery accounts are invalid")
+    accounts = config.get("accounts") or {}
     result = []
     for entry in effective_discovery_sources(config):
-        if not isinstance(entry, Mapping) or not entry.get("enabled"):
+        if not entry.get("enabled"):
             continue
-        configuration_id = entry.get("configurationId")
-        kind = entry.get("kind")
-        if (
-            not isinstance(configuration_id, str)
-            or not isinstance(kind, str)
-            or kind not in _CREDENTIAL_KEYS
-        ):
-            raise ValueError("discovery branch configuration is invalid")
+        configuration_id = entry["configurationId"]
+        kind = entry["kind"]
         options = resolve_capability_options(entry, accounts)
         normalized_options, credentials = separate_capability_credentials(
             options,
             _CREDENTIAL_KEYS[kind],
         )
         credential_material = orjson.dumps(credentials)
-        if len(credential_material) > _MAX_CREDENTIAL_MATERIAL_BYTES:
-            raise ValueError("discovery credential material is too large")
         configuration_generation = codec.provider_credential_fingerprint(
             f"discovery_{kind}",
             f"binding:{configuration_id}",
@@ -159,23 +128,13 @@ def build_discovery_capability_bindings(
     if config.get("schemaVersion") != 2:
         return ()
     versions = instance_capability_versions or {}
-    accounts = config.get("accounts")
-    if accounts is None:
-        accounts = {}
-    elif not isinstance(accounts, Mapping):
-        raise ValueError("discovery accounts are invalid")
+    accounts = config.get("accounts") or {}
     result = []
     for entry in effective_discovery_sources(config):
-        if not isinstance(entry, Mapping) or not entry.get("enabled"):
+        if not entry.get("enabled"):
             continue
-        configuration_id = entry.get("configurationId")
-        kind = entry.get("kind")
-        if (
-            not isinstance(configuration_id, str)
-            or not isinstance(kind, str)
-            or kind not in _CREDENTIAL_KEYS
-        ):
-            raise ValueError("capability discovery binding is invalid")
+        configuration_id = entry["configurationId"]
+        kind = entry["kind"]
         if (
             source_configuration_ids is not None
             and configuration_id not in source_configuration_ids
@@ -187,8 +146,6 @@ def build_discovery_capability_bindings(
             _CREDENTIAL_KEYS[kind],
         )
         credential_material = orjson.dumps(credentials)
-        if len(credential_material) > _MAX_CREDENTIAL_MATERIAL_BYTES:
-            raise ValueError("discovery credential material is too large")
         binding_kind = f"discovery_{kind}"
         validator_version = versions.get(kind, f"{binding_kind}-v1")
         credential_fingerprint = codec.provider_credential_fingerprint(
@@ -238,8 +195,6 @@ async def record_discovery_capability_failure(
         codec,
         source_configuration_ids=frozenset({source_configuration_id}),
     )
-    if len(bindings) != 1:
-        raise ValueError("discovery capability binding is unavailable")
     binding = bindings[0]
     await CapabilityStateRepository(database).record_failure(
         binding.binding,
@@ -304,18 +259,28 @@ def build_discovery_capability_validator(
         options = item.validation_options
         governor = ProviderGovernor(database) if database is not None else None
         governor_scope = bytes.fromhex(item.binding.binding_fingerprint)
+        required_credentials = (
+            ("username", "password")
+            if item.source_kind == "easynews"
+            else ("apiKey",)
+            if item.source_kind in {"newznab", "nzbhydra2", "prowlarr_usenet"}
+            else ()
+        )
+        if any(
+            not isinstance(options.get(name), str) or not options[name]
+            for name in required_credentials
+        ):
+            return CapabilityValidationOutcome(
+                "auth_failed",
+                "discovery_credentials_invalid",
+            )
         try:
             if item.source_kind == "easynews":
-                username = _text_credential(options, ("username",))
-                password = _text_credential(options, ("password",))
-                try:
-                    account = EasynewsSearchAccount(
-                        username,
-                        password,
-                        None,
-                    )
-                except ValueError as exc:
-                    raise _DiscoveryCredentialError from exc
+                account = EasynewsSearchAccount(
+                    options.get("username"),
+                    options.get("password"),
+                    None,
+                )
                 provider = EasynewsSearchAdapter(
                     session,
                     account,
@@ -327,9 +292,8 @@ def build_discovery_capability_validator(
                 "nzbhydra2",
                 "prowlarr_usenet",
             }:
-                _text_credential(options, ("apiKey",))
                 account = newznab_account_from_options(
-                    dict(options),
+                    options,
                     item.source_configuration_id,
                     label=item.source_kind,
                 )
@@ -342,17 +306,14 @@ def build_discovery_capability_validator(
             elif item.source_kind == "animetosho":
                 provider = AnimeToshoAdapter(
                     session,
-                    animetosho_configuration(
-                        item.source_configuration_id,
-                        dict(options),
-                    ),
+                    AnimeToshoConfiguration(item.source_configuration_id),
                     governor=governor,
                 )
             elif item.source_kind == "stremio_addon":
                 provider = StremioAddonAdapter(
                     stremio_addon_configuration(
                         item.source_configuration_id,
-                        dict(options),
+                        options,
                     ),
                     governor=governor,
                     governor_scope=governor_scope,
@@ -361,11 +322,6 @@ def build_discovery_capability_validator(
                 raise RuntimeError(
                     f"unsupported discovery capability kind: {item.source_kind}"
                 )
-        except _DiscoveryCredentialError:
-            return CapabilityValidationOutcome(
-                "auth_failed",
-                "discovery_credentials_invalid",
-            )
         except ValueError:
             return CapabilityValidationOutcome(
                 "plan_incompatible",
@@ -375,19 +331,3 @@ def build_discovery_capability_validator(
         return provider_validation_outcome(status)
 
     return validate
-
-
-def _text_credential(
-    options: Mapping[str, object],
-    names: tuple[str, ...],
-) -> str:
-    for name in names:
-        value = options.get(name)
-        if (
-            isinstance(value, str)
-            and value
-            and len(value) <= 4096
-            and not any(ord(character) < 32 for character in value)
-        ):
-            return value
-    raise _DiscoveryCredentialError("discovery credentials are invalid")

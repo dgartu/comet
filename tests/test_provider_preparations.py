@@ -9,7 +9,6 @@ from comet.core.schema_migrations import (
     MigrationContext,
     _ensure_usenet_schema,
 )
-from comet.core.sources import MAX_SIGNED_BIGINT
 from comet.playback.preparations import PlaybackPreparationRepository
 from comet.playback.provider_preparations import (
     ProviderPreparationRepository,
@@ -123,29 +122,6 @@ class ProviderPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.database.disconnect()
         self.temporary.cleanup()
-
-    async def test_selected_file_sizes_use_the_signed_bigint_domain(self):
-        repository = ProviderPreparationRepository(self.database)
-        common = {
-            "preparation_id": str(uuid.uuid4()),
-            "owner_configuration_partition": self.partition,
-            "remote_id": "remote",
-            "remote_hash": "a" * 64,
-            "file_index": 0,
-            "file_size": MAX_SIGNED_BIGINT + 1,
-            "locked_link": "locked",
-        }
-
-        with self.assertRaisesRegex(ValueError, "invalid provider file"):
-            await repository.record_selected_file(**common)
-        with self.assertRaisesRegex(ValueError, "invalid provider file"):
-            await repository.record_selected_file(
-                **{
-                    **common,
-                    "file_index": MAX_SIGNED_BIGINT + 1,
-                    "file_size": 1,
-                }
-            )
 
     async def test_mutation_key_joins_retries_and_seals_remote_submission(self):
         repository = ProviderPreparationRepository(self.database)
@@ -1116,6 +1092,55 @@ class ProviderPreparationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(removed_after_cleanup, 1)
         self.assertEqual(remaining, [])
+
+    async def test_delayed_torbox_ownership_promotion_retains_cleanup_authority(self):
+        repository = ProviderPreparationRepository(self.database)
+        ledger, _created = await repository.get_or_create(
+            owner_configuration_partition=self.partition,
+            provider_configuration_id=self.provider_id,
+            credential_fingerprint="b" * 64,
+            candidate_id=self.candidate_id,
+            locator_id=self.locator_id,
+            artifact_grant_id=None,
+            selection_json=provider_selection_json((0,)),
+            mutation_idempotency_key="4" * 64,
+            provider_kind="torbox_usenet",
+            now=10,
+        )
+        await repository.record_submission(
+            ledger.preparation_id,
+            owner_configuration_partition=self.partition,
+            remote_id="17",
+            remote_hash="a" * 32,
+            status="failed",
+            ownership="unknown",
+            now=11,
+        )
+        await repository.record_terminal_status(
+            ledger.preparation_id,
+            owner_configuration_partition=self.partition,
+            status="failed",
+            now=12,
+        )
+
+        await repository.record_submission(
+            ledger.preparation_id,
+            owner_configuration_partition=self.partition,
+            remote_id="17",
+            remote_hash="a" * 32,
+            status="failed",
+            ownership="created",
+            now=13,
+        )
+        target = await repository.claim_torbox_cleanup(
+            owner_configuration_partition=self.partition,
+            provider_configuration_id=self.provider_id,
+            credential_fingerprint="b" * 64,
+            now=22_000,
+        )
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.usenet_id, 17)
 
     async def test_selected_file_seals_a_reusable_terminal_result(self):
         repository = ProviderPreparationRepository(self.database)

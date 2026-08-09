@@ -19,12 +19,11 @@ import time
 import traceback
 import unicodedata
 import warnings
-from collections import deque
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from enum import Enum
 from types import TracebackType
-from typing import Any, Literal
+from typing import Any
 
 import orjson
 from loguru import logger as _backend
@@ -34,7 +33,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from comet.core.build_metadata import normalize_commit
 from comet.observability.context import (
     TerminalFlag,
-    current_connection_id,
     current_request_id,
     current_run_id,
     current_terminal_flags,
@@ -93,18 +91,18 @@ _LEVEL_COLORS = {
 }
 _RESET_COLOR = "\x1b[0m"
 _CATEGORY_STYLES = {
-    "API": ("👾", "\x1b[38;5;31m", "#22d3ee"),
-    "BACKGROUND": ("🏭", "\x1b[38;5;71m", "#5fba64"),
-    "COMET": ("🌠", "\x1b[38;5;99m", "#a78bfa"),
-    "COMETNET": ("🌐", "\x1b[38;5;39m", "#38bdf8"),
-    "DATABASE": ("💾", "\x1b[38;5;75m", "#60a5fa"),
-    "DEBRID": ("⚡", "\x1b[38;5;45m", "#4dd4ff"),
-    "FILTER": ("🛡️", "\x1b[38;5;220m", "#facc15"),
-    "PLAYBACK": ("▶️", "\x1b[38;5;49m", "#34d399"),
-    "SCRAPER": ("👻", "\x1b[38;5;179m", "#d6bb71"),
-    "STREAM": ("🎬", "\x1b[38;5;176m", "#d171d6"),
-    "SYSTEM": ("⚙️", "\x1b[38;5;245m", "#9ca3af"),
-    "USENET": ("📦", "\x1b[38;5;208m", "#fb923c"),
+    "API": ("👾", "\x1b[38;5;31m"),
+    "BACKGROUND": ("🏭", "\x1b[38;5;71m"),
+    "COMET": ("🌠", "\x1b[38;5;99m"),
+    "COMETNET": ("🌐", "\x1b[38;5;39m"),
+    "DATABASE": ("💾", "\x1b[38;5;75m"),
+    "DEBRID": ("⚡", "\x1b[38;5;45m"),
+    "FILTER": ("🛡️", "\x1b[38;5;220m"),
+    "PLAYBACK": ("▶️", "\x1b[38;5;49m"),
+    "SCRAPER": ("👻", "\x1b[38;5;179m"),
+    "STREAM": ("🎬", "\x1b[38;5;176m"),
+    "SYSTEM": ("⚙️", "\x1b[38;5;245m"),
+    "USENET": ("📦", "\x1b[38;5;208m"),
 }
 _FIELD_LABELS = {
     "authentication_error_code": "auth_error",
@@ -182,7 +180,6 @@ _FIELD_PRIORITIES = {
     "candidate_count": 13,
     "duration_ms": 100,
 }
-_DASHBOARD_LOG_LIMIT = 1_000
 
 
 class LogValidationError(ValueError):
@@ -250,8 +247,7 @@ def _validate_text(value: object, *, maximum_bytes: int = _MAX_TEXT_BYTES) -> st
 
 
 def _validate_token(value: object) -> str:
-    value = _validate_text(value, maximum_bytes=64)
-    if _TOKEN_PATTERN.fullmatch(value) is None:
+    if type(value) is not str or _TOKEN_PATTERN.fullmatch(value) is None:
         raise LogValidationError("token")
     return value
 
@@ -294,38 +290,28 @@ def _validate_duration(value: object) -> int | float:
     return value
 
 
-def _validate_ratio(value: object) -> int | float:
-    if type(value) not in {int, float} or not 0 <= value <= 1:
-        raise LogValidationError("ratio")
-    if isinstance(value, float) and not math.isfinite(value):
-        raise LogValidationError("ratio")
-    return value
-
-
 def _validate_identifier(value: object) -> str:
-    value = _validate_text(value, maximum_bytes=32)
-    if _IDENTIFIER_PATTERN.fullmatch(value) is None:
+    if type(value) is not str or _IDENTIFIER_PATTERN.fullmatch(value) is None:
         raise LogValidationError("identifier")
     return value
 
 
 def _validate_build_revision(value: object) -> str:
-    value = _validate_text(value, maximum_bytes=40)
     if (normalized := normalize_commit(value)) is None:
         raise LogValidationError("build_revision")
     return normalized
 
 
 def _validate_task_name(value: object) -> str:
-    value = _validate_text(value, maximum_bytes=64)
-    if _TASK_NAME_PATTERN.fullmatch(value) is None:
+    if type(value) is not str or _TASK_NAME_PATTERN.fullmatch(value) is None:
         raise LogValidationError("task_name")
     return value
 
 
 def _validate_setting_name(value: object) -> str:
-    value = _validate_text(value, maximum_bytes=96)
-    if value == "configuration" or _SETTING_NAME_PATTERN.fullmatch(value):
+    if type(value) is str and (
+        value == "configuration" or _SETTING_NAME_PATTERN.fullmatch(value)
+    ):
         return value
     raise LogValidationError("setting_name")
 
@@ -357,7 +343,6 @@ _COUNT_FIELDS = (
     "suppressed_count",
     "torrent_count",
     "worker_count",
-    "worker_pid",
 )
 _BYTE_FIELDS = (
     "response_bytes",
@@ -447,7 +432,6 @@ _RESERVED_FIELDS = frozenset(
         "debug_stack",
         "request_id",
         "run_id",
-        "connection_id",
         "process_role",
         "pid",
         "engine_generation",
@@ -473,9 +457,6 @@ _process_role = "web_worker"
 _engine_generation: int | None = None
 _emergency_active = False
 _emergency_seen: set[str] = set()
-_dashboard_logs: deque[dict[str, object]] = deque(maxlen=_DASHBOARD_LOG_LIMIT)
-_dashboard_logs_lock = threading.Lock()
-_dashboard_log_sequence = 0
 
 
 def _utc_timestamp() -> str:
@@ -509,56 +490,6 @@ def _event_category(event: str) -> str:
     return "SYSTEM"
 
 
-def _clear_dashboard_logs() -> None:
-    global _dashboard_log_sequence
-    with _dashboard_logs_lock:
-        _dashboard_logs.clear()
-        _dashboard_log_sequence = 0
-
-
-def _capture_dashboard_record(record: Mapping[str, object], details: str) -> None:
-    global _dashboard_log_sequence
-    category = str(record["category"])
-    icon, _ansi, color = _CATEGORY_STYLES[category]
-    with _dashboard_logs_lock:
-        _dashboard_log_sequence += 1
-        _dashboard_logs.append(
-            {
-                "timestamp": record["timestamp"],
-                "level": record["level"],
-                "message": record["message"],
-                "category": category,
-                "details": details,
-                "sequence": _dashboard_log_sequence,
-                "created": time.time(),
-                "icon": icon,
-                "color": color,
-            }
-        )
-
-
-def recent_logs(*, since: int = 0, process_id: int | None = None) -> dict[str, object]:
-    """Return a detached, bounded snapshot for the authenticated admin UI."""
-
-    if type(since) is not int or since < 0:
-        raise ValueError("since must be a non-negative integer")
-    if process_id is not None and (type(process_id) is not int or process_id < 1):
-        raise ValueError("process_id must be a positive integer")
-    with _dashboard_logs_lock:
-        records = list(_dashboard_logs)
-    newest = records[-1]["sequence"] if records else 0
-    # A request may land on another Gunicorn worker. In that case the local
-    # sequence can be behind the browser cursor, so return its complete ring.
-    if process_id not in {None, os.getpid()} or since > newest:
-        since = 0
-    return {
-        "logs": [dict(record) for record in records if record["sequence"] > since],
-        "total_logs": len(records),
-        "latest_sequence": newest,
-        "process_id": os.getpid(),
-    }
-
-
 def _render_pretty_line(
     *,
     timestamp: str,
@@ -567,7 +498,7 @@ def _render_pretty_line(
     message: str,
     details: str = "",
 ) -> bytes:
-    icon, category_color, _dashboard_color = _CATEGORY_STYLES[category]
+    icon, category_color = _CATEGORY_STYLES[category]
     color = not _settings.no_color
     rendered_level = f"{_LEVEL_COLORS[level]}{level}{_RESET_COLOR}" if color else level
     rendered_category = (
@@ -769,7 +700,6 @@ def configure(
                 }
             ]
         )
-        _clear_dashboard_logs()
         _configured = True
     install_safe_hooks()
     return resolved
@@ -810,11 +740,12 @@ def _profile_enabled(minimum: str) -> bool:
     return _PROFILE_RANK[_settings.LOG_PROFILE.value] >= _PROFILE_RANK[minimum]
 
 
-def _caller() -> tuple[str, str, int]:
+def _caller(depth: int = 2) -> tuple[str, str, int]:
     frame = inspect.currentframe()
     try:
-        # _caller -> façade method -> business call site.
-        caller = frame.f_back.f_back if frame and frame.f_back else None
+        caller = frame
+        for _ in range(depth):
+            caller = caller.f_back if caller is not None else None
         if caller is None:
             return ("unknown", "unknown", 0)
         module = caller.f_globals.get("__name__", "unknown").rsplit(".", 1)[-1]
@@ -893,8 +824,7 @@ def _safe_exception(
 
 
 def _validate_event_message(event: object, message: object) -> tuple[str, str]:
-    event = _validate_text(event, maximum_bytes=64)
-    if _EVENT_PATTERN.fullmatch(event) is None:
+    if type(event) is not str or _EVENT_PATTERN.fullmatch(event) is None:
         raise LogValidationError("event")
     message = _validate_text(message, maximum_bytes=_MAX_MESSAGE_BYTES)
     if not message or message != message.strip():
@@ -917,8 +847,6 @@ def _validate_fields(
         if value is None:
             continue
         normalized = validator(value)
-        if type(normalized) not in {str, bool, int, float}:
-            raise LogValidationError("field_type")
         validated[name] = normalized
     if len(orjson.dumps(validated)) > _MAX_BUSINESS_BYTES:
         raise LogValidationError("field_budget")
@@ -953,13 +881,10 @@ def _make_record(
         record["engine_generation"] = _engine_generation
     request_id = current_request_id()
     run_id = current_run_id()
-    connection_id = current_connection_id()
     if request_id is not None:
-        record["request_id"] = _validate_identifier(request_id)
+        record["request_id"] = request_id
     if run_id is not None:
-        record["run_id"] = _validate_identifier(run_id)
-    if connection_id is not None:
-        record["connection_id"] = _validate_identifier(connection_id)
+        record["run_id"] = run_id
     if "outcome" in validated:
         record["outcome"] = validated.pop("outcome")
     if exc is not None:
@@ -992,7 +917,7 @@ def _pretty_field(name: str, value: object) -> str:
         return _pretty_value(value)
     if name in _DURATION_FIELDS and type(value) in {int, float}:
         return f"{label}={value:.1f}ms"
-    if name in {"connection_id", "request_id", "run_id"} and isinstance(value, str):
+    if name in {"request_id", "run_id"} and isinstance(value, str):
         return f"{label}={value[:8]}"
     return f"{label}={_pretty_value(value)}"
 
@@ -1056,7 +981,6 @@ def _loguru_sink(message: Any) -> None:
     except Exception:
         _emergency_write("logging.renderer.failed", once_key="renderer")
         return
-    _capture_dashboard_record(record, details)
     capture_event(record)
     try:
         written = os.write(2, payload)
@@ -1129,8 +1053,6 @@ def ingest_native_event(document: bytes) -> None:
 
 
 def _reject(reason: str) -> None:
-    if _TOKEN_PATTERN.fullmatch(reason) is None:
-        reason = "invalid_record"
     if _strict:
         raise LogValidationError(reason)
     _emergency_write(
@@ -1141,11 +1063,6 @@ def _reject(reason: str) -> None:
 
 
 class LogFacade:
-    def enabled(self, detail: Literal["normal", "verbose", "debug"]) -> bool:
-        if detail not in {"normal", "verbose", "debug"}:
-            raise LogValidationError("profile")
-        return _profile_enabled(detail)
-
     def _emit(
         self,
         *,
@@ -1154,11 +1071,9 @@ class LogFacade:
         event: str,
         message: str,
         exc: BaseException | None,
-        source: tuple[str, str, int],
         fields: Mapping[str, object],
-        prefiltered: bool = False,
     ) -> None:
-        if not prefiltered and not _profile_enabled(minimum):
+        if not _profile_enabled(minimum):
             return
         try:
             record = _make_record(
@@ -1167,7 +1082,11 @@ class LogFacade:
                 message=message,
                 fields=fields,
                 exc=exc,
-                source=source,
+                source=(
+                    _caller(3)
+                    if _settings.LOG_PROFILE == LogProfile.DEBUG
+                    else ("", "", 0)
+                ),
             )
             _backend.bind(comet_record=record).log(level, "")
         except LogValidationError as error:
@@ -1183,19 +1102,13 @@ class LogFacade:
         exc: BaseException | None = None,
         **fields: object,
     ) -> None:
-        if not _profile_enabled("normal"):
-            return
         self._emit(
             minimum="normal",
             level="INFO",
             event=event,
             message=message,
             exc=exc,
-            source=(
-                _caller() if _settings.LOG_PROFILE == LogProfile.DEBUG else ("", "", 0)
-            ),
             fields=fields,
-            prefiltered=True,
         )
 
     def verbose(
@@ -1206,19 +1119,13 @@ class LogFacade:
         exc: BaseException | None = None,
         **fields: object,
     ) -> None:
-        if not _profile_enabled("verbose"):
-            return
         self._emit(
             minimum="verbose",
             level="INFO",
             event=event,
             message=message,
             exc=exc,
-            source=(
-                _caller() if _settings.LOG_PROFILE == LogProfile.DEBUG else ("", "", 0)
-            ),
             fields=fields,
-            prefiltered=True,
         )
 
     def debug(
@@ -1229,17 +1136,13 @@ class LogFacade:
         exc: BaseException | None = None,
         **fields: object,
     ) -> None:
-        if not _profile_enabled("debug"):
-            return
         self._emit(
             minimum="debug",
             level="DEBUG",
             event=event,
             message=message,
             exc=exc,
-            source=_caller(),
             fields=fields,
-            prefiltered=True,
         )
 
     def warning(
@@ -1250,19 +1153,13 @@ class LogFacade:
         exc: BaseException | None = None,
         **fields: object,
     ) -> None:
-        if not _profile_enabled("quiet"):
-            return
         self._emit(
             minimum="quiet",
             level="WARNING",
             event=event,
             message=message,
             exc=exc,
-            source=(
-                _caller() if _settings.LOG_PROFILE == LogProfile.DEBUG else ("", "", 0)
-            ),
             fields=fields,
-            prefiltered=True,
         )
 
     def error(
@@ -1273,19 +1170,13 @@ class LogFacade:
         exc: BaseException | None = None,
         **fields: object,
     ) -> None:
-        if not _profile_enabled("quiet"):
-            return
         self._emit(
             minimum="quiet",
             level="ERROR",
             event=event,
             message=message,
             exc=exc,
-            source=(
-                _caller() if _settings.LOG_PROFILE == LogProfile.DEBUG else ("", "", 0)
-            ),
             fields=fields,
-            prefiltered=True,
         )
 
     def critical(
@@ -1296,19 +1187,13 @@ class LogFacade:
         exc: BaseException | None = None,
         **fields: object,
     ) -> None:
-        if not _profile_enabled("quiet"):
-            return
         self._emit(
             minimum="quiet",
             level="CRITICAL",
             event=event,
             message=message,
             exc=exc,
-            source=(
-                _caller() if _settings.LOG_PROFILE == LogProfile.DEBUG else ("", "", 0)
-            ),
             fields=fields,
-            prefiltered=True,
         )
 
     def terminal(
@@ -1322,7 +1207,6 @@ class LogFacade:
         **fields: object,
     ) -> None:
         try:
-            event, message = _validate_event_message(event, message)
             if outcome not in _TERMINAL_POLICY:
                 raise LogValidationError("outcome")
             if type(transport_failure_explained) is not bool:
@@ -1332,14 +1216,13 @@ class LogFacade:
                 or outcome not in {"partial", "timeout", "failed", "cancelled"}
             ):
                 raise LogValidationError("transport_control")
-            validated = _validate_fields({"outcome": outcome, **fields})
             level, minimum = _TERMINAL_POLICY[outcome]
             # Build the complete record before mutating the HTTP flags.
             record = _make_record(
                 level=level,
                 event=event,
                 message=message,
-                fields=validated,
+                fields={"outcome": outcome, **fields},
                 exc=exc,
                 source=(
                     _caller()
@@ -1378,13 +1261,13 @@ log = LogFacade()
 def _dependency_failure(
     record: stdlib_logging.LogRecord,
 ) -> tuple[BaseException | None, str | None]:
-    exception = record.msg if isinstance(record.msg, BaseException) else None
-    if exception is None and record.exc_info is not None:
+    if isinstance(record.msg, BaseException):
+        return record.msg, None
+    exception = None
+    if record.exc_info is not None:
         candidate = record.exc_info[1]
         if isinstance(candidate, BaseException):
             exception = candidate
-    if isinstance(record.msg, BaseException):
-        return exception, None
     try:
         details = _diagnostic_text(record.getMessage())
     except Exception:
@@ -1483,9 +1366,6 @@ class _ClosedBridgeHandler(stdlib_logging.Handler):
                     error_code="dependency_warning",
                 )
 
-    def handleError(self, record: stdlib_logging.LogRecord) -> None:
-        return
-
 
 def configure_stdlib_bridge() -> None:
     for name in ("uvicorn.access", "gunicorn.access"):
@@ -1560,10 +1440,6 @@ install_bootstrap_safety()
 _backend.remove()
 
 __all__ = (
-    "FIELD_SPECS",
-    "LogFacade",
-    "LogFormat",
-    "LogProfile",
     "LogValidationError",
     "LoggingSettings",
     "bootstrap_failure",
@@ -1576,7 +1452,6 @@ __all__ = (
     "install_bootstrap_safety",
     "install_safe_hooks",
     "log",
-    "recent_logs",
     "set_engine_generation",
     "set_process_role",
 )

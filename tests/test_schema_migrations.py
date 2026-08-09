@@ -14,6 +14,7 @@ from comet.core.schema_migrations import (
     _migration_active_connection_timestamps,
     _migration_candidate_identity_scope,
     _migration_debrid_account_cleanup_index,
+    _migration_debrid_media_info,
     _migration_media_demand_scrape_coverage,
     _migration_original_indexer_titles,
     _migration_private_torrent_flag,
@@ -25,6 +26,29 @@ from comet.core.schema_specs import ManagedTableSpec
 
 
 class SchemaMigrationMetadataCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_debrid_media_info_is_added_to_an_existing_cache(self):
+        with TemporaryDirectory() as temp_dir:
+            database = ReplicaAwareDatabase(
+                Database(f"sqlite+aiosqlite:///{temp_dir}/migration.db")
+            )
+            await database.connect()
+            try:
+                await database.execute(
+                    "CREATE TABLE debrid_availability (info_hash TEXT PRIMARY KEY)"
+                )
+                context = MigrationContext(database, is_sqlite=True, is_postgres=False)
+
+                await _migration_debrid_media_info(context)
+                await _migration_debrid_media_info(context)
+
+                columns = await database.fetch_all(
+                    "PRAGMA table_info(debrid_availability)"
+                )
+            finally:
+                await database.disconnect()
+
+        self.assertIn("media_info_json", {column["name"] for column in columns})
+
     async def test_private_torrent_flag_is_added_to_existing_candidates(self):
         with TemporaryDirectory() as temp_dir:
             database = ReplicaAwareDatabase(

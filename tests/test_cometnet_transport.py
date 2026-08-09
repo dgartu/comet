@@ -333,9 +333,8 @@ class CometNetTransportTests(unittest.IsolatedAsyncioTestCase):
 
             async def recv(self):
                 self.calls += 1
-                if self.calls == 1:
-                    return ping.to_bytes()
-                raise RuntimeError("stop receive loop")
+                manager._running = False
+                return ping.to_bytes()
 
         connection = PeerConnection(
             node_id="peer",
@@ -463,6 +462,7 @@ class CometNetTransportTests(unittest.IsolatedAsyncioTestCase):
             ping_loop = asyncio.create_task(manager._ping_loop())
             await peer.send_started.wait()
             ping_loop.cancel()
-            await ping_loop
+            with self.assertRaises(asyncio.CancelledError):
+                await ping_loop
 
         self.assertTrue(peer.send_cancelled.is_set())

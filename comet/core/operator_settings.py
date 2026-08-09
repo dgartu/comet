@@ -177,6 +177,13 @@ class LiveSettings:
         finally:
             self._bound.reset(token)
 
+    def copy_to_context(self, context: contextvars.Context) -> None:
+        """Copy only the current settings generation into a detached context."""
+        context.run(self._bound.set, self.snapshot())
+        overrides = self._overrides.get()
+        if overrides is not None:
+            context.run(self._overrides.set, overrides)
+
     def publish(self, candidate: Any) -> None:
         with self._publish_lock:
             object.__setattr__(self, "_active", candidate)
@@ -189,6 +196,7 @@ class LiveSettings:
             "_overrides",
             "bind",
             "bind_snapshot",
+            "copy_to_context",
             "active_snapshot",
             "publish",
             "snapshot",
@@ -263,12 +271,8 @@ async def _run_bootstrap_migrations(
             )
 
 
-def _decode_json_document(document: object, *, context: str) -> Any:
-    if not isinstance(document, (str, bytes)):
-        raise ValueError(f"{context} must be JSON")
-    if len(document.encode("utf-8") if isinstance(document, str) else document) > (
-        _MAX_EFFECTIVE_SETTINGS_BYTES
-    ):
+def _decode_json_document(document: str, *, context: str) -> Any:
+    if len(document.encode("utf-8")) > _MAX_EFFECTIVE_SETTINGS_BYTES:
         raise ValueError(f"{context} is too large")
     try:
         return orjson.loads(document)
@@ -314,7 +318,7 @@ async def _shared_secret(
         """,
         {"key": key, "value": candidate, "created_at": time.time()},
     )
-    value = await database.fetch_val(
+    return await database.fetch_val(
         """
         SELECT value
         FROM operator_generated_secrets
@@ -323,7 +327,6 @@ async def _shared_secret(
         {"key": key},
         force_primary=True,
     )
-    return value
 
 
 def _raw_effective_value(
@@ -533,7 +536,7 @@ def effective_settings_payload() -> EffectiveSettingsPayload:
         or not all(isinstance(key, str) for key in deployment_keys)
     ):
         raise ValueError("effective settings payload is malformed")
-    if any(not isinstance(key, str) or not key for key in values):
+    if "" in values:
         raise ValueError("effective settings payload contains an invalid key")
     return EffectiveSettingsPayload(
         revision=revision,

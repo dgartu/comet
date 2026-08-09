@@ -81,7 +81,6 @@ class CacheCheckResult:
     state: CacheState
     decision: ScrapeDecision
     has_cached_torrents: bool
-    scope_scraped_at: float | None
 
     @property
     def should_scrape_now(self) -> bool:
@@ -142,5 +141,4 @@ class CacheStateManager:
             state=state,
             decision=self._determine_decision(state),
             has_cached_torrents=torrent_count > 0,
-            scope_scraped_at=last_scraped_at,
         )

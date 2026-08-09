@@ -19,7 +19,6 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import aiohttp
 import websockets
-from websockets.exceptions import InvalidHandshake, InvalidStatusCode
 
 from comet.core.models import settings
 
@@ -107,31 +106,25 @@ def canonicalize_data(data: Any) -> Any:
 
 # --- Network Utilities ---
 
-# Internal/suspicious domain patterns that should be blocked
-INTERNAL_DOMAIN_PATTERNS = [
-    r"\.local$",  # mDNS local domains
-    r"\.internal$",  # Common internal suffix
-    r"\.lan$",  # LAN suffix
-    r"\.localdomain$",  # Linux default
-    r"\.home$",  # Home networks
-    r"\.corp$",  # Corporate networks
-    r"\.intranet$",  # Intranet suffix
-    r"\.private$",  # Private suffix
-    r"^localhost\.",  # localhost.* variants
-    r"\.localhost$",  # *.localhost variants
-]
-
-_INTERNAL_DOMAIN_RE = [re.compile(p, re.IGNORECASE) for p in INTERNAL_DOMAIN_PATTERNS]
-
-# IP-in-domain services that could be used for DNS rebinding attacks
-IP_IN_DOMAIN_PATTERNS = [
-    r"\.nip\.io$",  # nip.io (10-0-0-1.nip.io)
-    r"\.sslip\.io$",  # sslip.io
-    r"\.xip\.io$",  # xip.io (deprecated but still works sometimes)
-    r"^(?:\d{1,3}[-.]){3}\d{1,3}\.",  # IP at start: 192-168-1-1.example.com
-]
-
-_IP_IN_DOMAIN_RE = [re.compile(p, re.IGNORECASE) for p in IP_IN_DOMAIN_PATTERNS]
+_INTERNAL_DOMAIN_RE = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\.local$",
+        r"\.internal$",
+        r"\.lan$",
+        r"\.localdomain$",
+        r"\.home$",
+        r"\.corp$",
+        r"\.intranet$",
+        r"\.private$",
+        r"^localhost\.",
+        r"\.localhost$",
+        r"\.nip\.io$",
+        r"\.sslip\.io$",
+        r"\.xip\.io$",
+        r"^(?:\d{1,3}[-.]){3}\d{1,3}\.",
+    )
+)
 
 
 def is_internal_domain(hostname: str) -> bool:
@@ -142,17 +135,7 @@ def is_internal_domain(hostname: str) -> bool:
     """
     hostname = hostname.lower().strip(".")
 
-    # Check internal domain patterns
-    for pattern in _INTERNAL_DOMAIN_RE:
-        if pattern.search(hostname):
-            return True
-
-    # Check IP-in-domain patterns (potential DNS rebinding)
-    for pattern in _IP_IN_DOMAIN_RE:
-        if pattern.search(hostname):
-            return True
-
-    return False
+    return any(pattern.search(hostname) for pattern in _INTERNAL_DOMAIN_RE)
 
 
 async def resolve_hostname_to_ip(hostname: str) -> str | None:
@@ -166,7 +149,7 @@ async def resolve_hostname_to_ip(hostname: str) -> str | None:
         if result:
             return result[0][4][0]
         return None
-    except (socket.gaierror, socket.herror, OSError, IndexError):
+    except (OSError, IndexError):
         return None
 
 
@@ -261,8 +244,7 @@ async def is_valid_peer_address(address: str, allow_private: bool = False) -> bo
         if parsed.port is not None and not (1 <= parsed.port <= 65535):
             return False
 
-        # Block suspicious patterns
-        return "@" not in address  # Block credential injection
+        return parsed.username is None and parsed.password is None
     except Exception:
         return False
 
@@ -283,29 +265,9 @@ async def run_in_executor[T](func: Callable[..., T], *args: Any) -> T:
 
 
 async def check_advertise_url_reachability(
-    advertise_url: str, timeout: float = 10.0, logger=None
-) -> tuple[bool, str | None]:
-    """
-    Check if the advertise URL is reachable by attempting a WebSocket connection.
-    """
-    if not advertise_url:
-        return False, "No advertise URL configured"
-
-    # Validate URL format
-    try:
-        parsed = urlparse(advertise_url)
-        if parsed.scheme not in ("ws", "wss"):
-            return (
-                False,
-                f"Invalid URL scheme '{parsed.scheme}'. Must be 'ws://' or 'wss://'",
-            )
-        if not parsed.hostname:
-            return False, "Invalid URL: no hostname specified"
-        if parsed.port is not None and not (1 <= parsed.port <= 65535):
-            return False, f"Invalid port number: {parsed.port}"
-    except Exception as e:
-        return False, f"Invalid URL format: {e}"
-
+    advertise_url: str, timeout: float = 10.0
+) -> bool:
+    """Return whether an advertised WebSocket endpoint is reachable."""
     try:
         async with asyncio.timeout(timeout):
             async with websockets.connect(
@@ -313,34 +275,18 @@ async def check_advertise_url_reachability(
                 close_timeout=2,
                 open_timeout=timeout,
                 compression=get_websocket_compression(),
-            ) as ws:
-                await ws.close()
-                return True, "WebSocket connection successful"
-    except InvalidStatusCode as e:
-        return (
-            False,
-            f"Server returned HTTP {e.status_code} instead of WebSocket upgrade",
-        )
-    except InvalidHandshake as e:
-        return False, f"WebSocket handshake failed: {e}"
-    except TimeoutError:
-        return False, f"Connection timed out after {timeout}s"
-    except OSError as e:
-        return False, f"Connection failed: {e}"
-    except Exception as e:
-        return False, f"WebSocket error: {e}"
+            ):
+                return True
+    except Exception:
+        return False
 
 
 async def check_system_clock_sync(
     tolerance: float = 60.0,
     timeout: float = 5.0,
     endpoints: list[str] | None = None,
-) -> tuple[bool, str, float]:
-    """
-    Check if system clock is synchronized with external sources.
-    Iterates through endpoints until a successful check is performed.
-    Returns (is_synced, message, offset).
-    """
+) -> bool:
+    """Check the system clock against external HTTP date headers."""
     if not endpoints:
         endpoints = [
             "https://www.google.com",
@@ -350,39 +296,19 @@ async def check_system_clock_sync(
         ]
 
     client_timeout = aiohttp.ClientTimeout(total=timeout)
-    errors = []
-
     async with aiohttp.ClientSession(timeout=client_timeout) as session:
         for url in endpoints:
             try:
                 async with session.head(url) as resp:
                     if "Date" not in resp.headers:
-                        errors.append(f"{url}: No Date header")
                         continue
 
-                    server_date_str = resp.headers["Date"]
-                    server_time = email.utils.parsedate_to_datetime(server_date_str)
-                    local_time = datetime.now(UTC)
-
-                    diff = (local_time - server_time).total_seconds()
-                    abs_diff = abs(diff)
-
-                    if abs_diff > tolerance:
-                        return (
-                            False,
-                            f"System clock offset {diff:.2f}s > {tolerance}s tolerance (verified via {url})",
-                            diff,
-                        )
-
-                    return (
-                        True,
-                        f"Clock in sync (offset: {diff:.2f}s, verified via {url})",
-                        diff,
+                    server_time = email.utils.parsedate_to_datetime(
+                        resp.headers["Date"]
                     )
-            except TimeoutError:
-                errors.append(f"{url}: Timed out")
-            except Exception as e:
-                errors.append(f"{url}: {e!s}")
+                    local_time = datetime.now(UTC)
+                    return abs((local_time - server_time).total_seconds()) <= tolerance
+            except Exception:
+                continue
 
-    error_msg = " | ".join(errors)
-    return False, f"All time check endpoints failed: {error_msg}", 0.0
+    return False

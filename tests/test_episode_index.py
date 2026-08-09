@@ -57,8 +57,8 @@ class EpisodeIndexRefreshTests(unittest.IsolatedAsyncioTestCase):
         async def upsert_rows(rows):
             events.append(("rows", rows))
 
-        async def delete_rows(series_id):
-            events.append(("delete", series_id))
+        async def execute(_query, parameters):
+            events.append(("delete", parameters["series_id"]))
 
         async def fail_marker(series_id, refreshed_at):
             events.append(("marker", series_id, refreshed_at))
@@ -67,7 +67,7 @@ class EpisodeIndexRefreshTests(unittest.IsolatedAsyncioTestCase):
         rows = [{"season": 1, "episode": 1}]
         with (
             patch.object(database, "transaction", new=transaction),
-            patch.object(service, "_delete_series_air_dates", new=delete_rows),
+            patch.object(database, "execute", new=execute),
             patch.object(service, "_upsert_series_air_dates", new=upsert_rows),
             patch.object(service, "_upsert_series_refresh", new=fail_marker),
         ):

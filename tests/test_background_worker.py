@@ -334,7 +334,7 @@ class BackgroundWorkerQueryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(KeyError):
             worker._apply_discovery_headroom(10, 10, 0, {"high": 0})
 
-    def test_retry_policy_consumes_validated_backoff_and_sentinel(self):
+    def test_retry_policy_consumes_validated_backoff(self):
         worker = BackgroundScraperWorker()
         with (
             patch.object(settings, "BACKGROUND_SCRAPER_FAILURE_BASE_BACKOFF", 10),
@@ -343,9 +343,9 @@ class BackgroundWorkerQueryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(worker._compute_backoff(1), 10)
             self.assertEqual(worker._compute_backoff(2), 20)
             self.assertEqual(worker._compute_backoff(3), 25)
+            self.assertEqual(worker._compute_backoff(1_000_000), 25)
 
         with patch.object(settings, "BACKGROUND_SCRAPER_MAX_RETRIES", -1):
-            self.assertEqual(worker._max_retries_for_query(), 1_000_000)
             self.assertFalse(worker._is_retry_limit_reached(1_000_000))
 
     async def test_queue_snapshot_query_executes_against_sqlite(self):
@@ -437,6 +437,30 @@ class BackgroundWorkerQueryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(snapshot["movies"], 1)
         self.assertEqual(snapshot["oldest_age_s"], 2.0)
+
+    async def test_unlimited_retries_do_not_hide_large_failure_counts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = await _create_queue_database(Path(temp_dir) / "queue.db")
+            try:
+                await database.execute(
+                    """
+                    INSERT INTO background_scraper_items
+                    (media_id, media_type, status, consecutive_failures, created_at)
+                    VALUES ('movie', 'movie', 'dead', 1000000, 90.0)
+                    """
+                )
+
+                with (
+                    patch.object(settings, "BACKGROUND_SCRAPER_MAX_RETRIES", -1),
+                    patch("comet.background_scraper.worker.database", database),
+                ):
+                    snapshot = await BackgroundScraperWorker()._fetch_queue_snapshot(
+                        now=100.0
+                    )
+            finally:
+                await database.disconnect()
+
+        self.assertEqual(snapshot["movies"], 1)
 
     async def test_episode_queue_age_waits_for_parent_series(self):
         with tempfile.TemporaryDirectory() as temp_dir:

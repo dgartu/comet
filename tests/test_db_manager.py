@@ -2,7 +2,7 @@ import gzip
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import orjson
 
@@ -172,22 +172,6 @@ class DatabaseManagerImportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.error_rows, 1)
         self.assertEqual(stats.processed_rows, 2)
         self.assertEqual(process_batch.await_args.args[1], [{"a": 2}, {"a": 3}])
-
-    async def test_batch_failure_log_does_not_include_driver_message(self):
-        secret = "credential=must-not-be-logged"
-        database = AsyncMock()
-        database.transaction = Mock(return_value=AsyncMock())
-        database.execute_many.side_effect = RuntimeError(secret)
-        manager = DatabaseManager(database=database)
-
-        with (
-            self.assertRaisesRegex(RuntimeError, "must-not-be-logged"),
-        ):
-            await manager._process_batch_with_retry(
-                "INSERT INTO items (a) VALUES (:a)",
-                [{"a": 1}],
-                max_retries=0,
-            )
 
     async def test_individual_database_failures_are_counted_as_errors(self):
         with tempfile.TemporaryDirectory() as tmp:

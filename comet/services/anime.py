@@ -5,13 +5,15 @@ import time
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs, urlsplit
 
+import aiohttp
 import orjson
 
 from comet.core.database import backend_lock, database
 from comet.core.models import settings
+from comet.metadata.validation import metadata_text
 from comet.observability import log
 from comet.observability.context import create_detached_task
-from comet.usenet.outbound import OutboundUrlError, fetch_http_bytes
+from comet.utils.http_client import http_client_manager
 from comet.utils.memory import trim_process_memory
 
 _FRIBB_PROVIDER_KEYS = {
@@ -27,19 +29,8 @@ _FRIBB_PROVIDER_KEYS = {
 }
 
 _DB_CHUNK_SIZE = 10000
-_MAX_ANIME_ENTRIES = 100_000
-_MAX_FRIBB_ENTRIES = 100_000
-_MAX_KITSU_MAPPINGS = 100_000
 _MAX_ENTRY_JSON_BYTES = 128 * 1024
-_MAX_SOURCES_PER_ENTRY = 64
-_MAX_IDENTITIES = 250_000
 _MAX_PROVIDER_ID_BYTES = 128
-_MAX_TITLE_BYTES = 512
-_MAX_ALIASES = 64
-_MAX_SOURCE_URL_BYTES = 2_048
-_AOD_MAX_BYTES = 80 * 1024 * 1024
-_FRIBB_MAX_BYTES = 16 * 1024 * 1024
-_KITSU_MAX_BYTES = 4 * 1024 * 1024
 _ANIME_REFRESH_LOCK_ID = 0xA11E0001
 
 
@@ -51,43 +42,24 @@ def _reject_json_constant(_value):
     raise ValueError("invalid anime JSON constant")
 
 
-def _decode_json(document: bytes):
+def _decode_json(document: bytes | str):
     try:
         return json.loads(
-            document.decode("utf-8"),
+            document,
             parse_constant=_reject_json_constant,
         )
-    except (UnicodeDecodeError, ValueError, RecursionError):
+    except (TypeError, ValueError, RecursionError):
         raise ValueError("invalid anime JSON") from None
 
 
-def _decode_cached_entry(value: object) -> dict:
-    if isinstance(value, str):
-        document = value.encode("utf-8")
-    elif isinstance(value, bytes):
-        document = value
-    else:
-        raise ValueError("invalid cached anime entry")
-    if not document or len(document) > _MAX_ENTRY_JSON_BYTES:
-        raise ValueError("invalid cached anime entry")
-    data = _decode_json(document)
-    if not isinstance(data, dict):
-        raise ValueError("invalid cached anime entry")
-    return data
-
-
 def _bounded_text(value: object, maximum: int) -> str | None:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value or "\x00" in value:
         return None
     try:
-        size = len(value.encode("utf-8"))
+        encoded = value.encode("utf-8")
     except UnicodeEncodeError:
         return None
-    if size > maximum or any(
-        ord(character) < 32 or ord(character) == 127 for character in value
-    ):
-        return None
-    return value
+    return value if len(encoded) <= maximum else None
 
 
 def _provider_id(value: object) -> str | None:
@@ -114,8 +86,7 @@ def _coordinate(value: object) -> int | None:
 
 
 def _provider_identity(source: object) -> tuple[str, str] | None:
-    source = _bounded_text(source, _MAX_SOURCE_URL_BYTES)
-    if source is None:
+    if not isinstance(source, str) or not source:
         return None
     try:
         parsed = urlsplit(source)
@@ -219,7 +190,7 @@ class AnimeMapper:
         if row is None:
             return None
 
-        return _decode_cached_entry(row["data_json"])
+        return _decode_json(row["data_json"])
 
     async def get_aliases(self, media_id: str):
         if not self.loaded:
@@ -229,20 +200,18 @@ class AnimeMapper:
         if data is None:
             return {}
 
-        title = _bounded_text(data.get("title"), _MAX_TITLE_BYTES)
+        title = metadata_text(data.get("title"))
         raw_synonyms = data.get("synonyms")
 
         synonyms = []
         seen = set()
         for value in raw_synonyms if isinstance(raw_synonyms, list) else []:
-            value = _bounded_text(value, _MAX_TITLE_BYTES)
+            value = metadata_text(value)
             if value is None or value == title:
                 continue
             if value not in seen:
                 seen.add(value)
                 synonyms.append(value)
-                if len(synonyms) == _MAX_ALIASES:
-                    break
 
         if title is None and not synonyms:
             return {}
@@ -410,15 +379,7 @@ class AnimeMapper:
     async def _read_provider_ids(self):
         query = "SELECT provider_id FROM anime_ids WHERE provider = 'imdb'"
         rows = await database.fetch_all(query)
-        if len(rows) > _MAX_IDENTITIES:
-            raise ValueError("too many cached anime identities")
-        provider_ids = set()
-        for row in rows:
-            provider_id = _imdb_id(row["provider_id"])
-            if provider_id is None:
-                raise ValueError("invalid cached IMDb identity")
-            provider_ids.add(provider_id)
-        return provider_ids
+        return {row["provider_id"] for row in rows}
 
     async def _read_kitsu_mapping_caches(self):
         rows = await database.fetch_all(
@@ -434,27 +395,16 @@ class AnimeMapper:
             """
         )
 
-        if len(rows) > _MAX_KITSU_MAPPINGS:
-            raise ValueError("too many cached Kitsu mappings")
         kitsu_mapping_cache = {}
         imdb_kitsu_mapping_cache = {}
         for row in rows:
-            kitsu_id = _provider_id(row["source_id"])
-            imdb_id = _imdb_id(row["target_id"])
-            from_season = _coordinate(row["from_season"])
-            from_episode = _coordinate(row["from_episode"])
-            if (
-                kitsu_id is None
-                or not kitsu_id.isdigit()
-                or imdb_id is None
-                or kitsu_id in kitsu_mapping_cache
-            ):
-                raise ValueError("invalid cached Kitsu mapping")
+            kitsu_id = row["source_id"]
+            imdb_id = row["target_id"]
 
             kitsu_mapping_cache[kitsu_id] = {
                 "imdb_id": imdb_id,
-                "from_season": from_season,
-                "from_episode": from_episode,
+                "from_season": row["from_season"],
+                "from_episode": row["from_episode"],
             }
 
             imdb_kitsu_mapping_cache.setdefault(imdb_id, []).append(kitsu_id)
@@ -581,28 +531,28 @@ class AnimeMapper:
                         exc=exc,
                     )
 
-                async def _download_json(url: str, maximum: int):
-                    return await fetch_http_bytes(
+                session = await http_client_manager.get_session()
+
+                async def _download_json(url: str):
+                    async with session.get(
                         url,
-                        max_bytes=maximum,
                         headers={"Accept": "application/json"},
-                        redirects=3,
-                    )
+                    ) as response:
+                        response.raise_for_status()
+                        return await response.read()
 
                 download_started = loop.time()
                 download_failed = False
                 try:
                     async with asyncio.TaskGroup() as task_group:
-                        aod_task = task_group.create_task(
-                            _download_json(self._aod_url, _AOD_MAX_BYTES)
-                        )
+                        aod_task = task_group.create_task(_download_json(self._aod_url))
                         fribb_task = task_group.create_task(
-                            _download_json(self._fribb_url, _FRIBB_MAX_BYTES)
+                            _download_json(self._fribb_url)
                         )
                         kitsu_task = task_group.create_task(
-                            _download_json(self._kitsu_imdb_url, _KITSU_MAX_BYTES)
+                            _download_json(self._kitsu_imdb_url)
                         )
-                except* OutboundUrlError as exc_group:
+                except* (aiohttp.ClientError, TimeoutError) as exc_group:
                     log.warning(
                         "anime.download.failed",
                         "Anime mapping download failed",
@@ -645,11 +595,8 @@ class AnimeMapper:
                 )
                 if (
                     not isinstance(anime_list, list)
-                    or len(anime_list) > _MAX_ANIME_ENTRIES
                     or not isinstance(data_fribb, list)
-                    or len(data_fribb) > _MAX_FRIBB_ENTRIES
                     or not isinstance(data_kitsu_imdb, list)
-                    or len(data_kitsu_imdb) > _MAX_KITSU_MAPPINGS
                 ):
                     _log_refresh_failure("invalid_payload")
                     return False
@@ -752,10 +699,7 @@ class AnimeMapper:
 
                 sources = entry.get("sources")
                 if sources is not None:
-                    if (
-                        not isinstance(sources, list)
-                        or len(sources) > _MAX_SOURCES_PER_ENTRY
-                    ):
+                    if not isinstance(sources, list):
                         sources = []
                     for source in sources:
                         identity = _provider_identity(source)
@@ -773,8 +717,6 @@ class AnimeMapper:
                                 "entry_id": entry_id,
                             }
                         )
-                        if len(lookup_map) > _MAX_IDENTITIES:
-                            raise AnimeMappingPayloadError("too many anime identities")
 
                 if len(entries_batch) >= _DB_CHUNK_SIZE:
                     total_entries += await flush_entries(entries_batch)

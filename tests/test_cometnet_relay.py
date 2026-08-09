@@ -3,6 +3,7 @@ import unittest
 
 import aiohttp
 
+from comet.cometnet.protocol import TorrentMetadata
 from comet.cometnet.relay import CometNetRelay
 
 
@@ -15,6 +16,9 @@ class FakeSession:
         return self.response
 
     def post(self, *args, **kwargs):
+        return self.response
+
+    def request(self, *args, **kwargs):
         return self.response
 
     async def close(self):
@@ -45,6 +49,16 @@ class FailingResponse:
 
 
 class CometNetRelayTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _torrent(suffix: int = 0) -> TorrentMetadata:
+        return TorrentMetadata(
+            info_hash=f"{suffix:040x}",
+            title="Example",
+            size=1,
+            tracker="test",
+            imdb_id="tt0000001",
+        )
+
     async def test_pool_transport_error_is_redacted(self):
         relay = CometNetRelay("http://user:password@relay")
         relay._running = True
@@ -86,13 +100,13 @@ class CometNetRelayTests(unittest.IsolatedAsyncioTestCase):
         relay = CometNetRelay("http://relay")
         relay._running = True
         await relay._batch_lock.acquire()
-        task = asyncio.create_task(relay.relay_torrent("a" * 40, "title", 1))
+        task = asyncio.create_task(relay.broadcast_torrents([self._torrent()]))
         await asyncio.sleep(0)
 
         relay._running = False
         relay._batch_lock.release()
 
-        self.assertFalse(await task)
+        await task
         self.assertEqual(relay._batch, [])
 
     async def test_threshold_flushes_are_serialized_by_owned_worker(self):
@@ -127,11 +141,11 @@ class CometNetRelayTests(unittest.IsolatedAsyncioTestCase):
         relay._send_batch = send_batch
         relay._batch_task = asyncio.create_task(relay._batch_flush_loop())
         for suffix in range(4):
-            await relay.relay_torrent(f"{suffix:040x}", "title", 1)
+            await relay.broadcast_torrents([self._torrent(suffix)])
 
         await first_started.wait()
         for suffix in range(4, 8):
-            await relay.relay_torrent(f"{suffix:040x}", "title", 1)
+            await relay.broadcast_torrents([self._torrent(suffix)])
         release_first.set()
         await second_finished.wait()
         await relay.stop()
@@ -143,7 +157,7 @@ class CometNetRelayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(session.closed)
 
-    async def test_get_pools_requires_current_standalone_endpoint(self):
+    async def test_get_pools_uses_current_standalone_endpoint(self):
         pools = {"pools": {}, "memberships": [], "subscriptions": []}
         relay = CometNetRelay("http://relay")
         relay._running = True
@@ -155,15 +169,7 @@ class CometNetRelayTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "Pool not found"):
             await relay.get_pools()
 
-    async def test_get_pools_rejects_invalid_current_shape(self):
-        relay = CometNetRelay("http://relay")
-        relay._running = True
-        relay._session = FakeSession(FakeResponse(200, {"pools": []}))
-
-        with self.assertRaisesRegex(ValueError, "Invalid pools response"):
-            await relay.get_pools()
-
-    async def test_send_batch_validates_result_before_updating_counters(self):
+    async def test_send_batch_updates_counters_from_standalone_result(self):
         relay = CometNetRelay("http://relay")
         relay._session = FakeSession(
             FakeResponse(
@@ -178,23 +184,6 @@ class CometNetRelayTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(await relay._send_batch([{"id": "a"}, {"id": "b"}]), 1)
-        self.assertEqual(relay._total_relayed, 1)
-        self.assertEqual(relay._total_errors, 1)
-
-        relay._session = FakeSession(
-            FakeResponse(
-                200,
-                {
-                    "status": "completed",
-                    "queued": True,
-                    "errors": [],
-                    "total": 2,
-                },
-            )
-        )
-        with self.assertRaisesRegex(ValueError, "Invalid relay batch response"):
-            await relay._send_batch([{"id": "a"}, {"id": "b"}])
-
         self.assertEqual(relay._total_relayed, 1)
         self.assertEqual(relay._total_errors, 1)
 

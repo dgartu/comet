@@ -149,7 +149,7 @@ where
                 set_identity,
                 &relative_path,
                 video.exact_size,
-            )?,
+            ),
             relative_path,
             exact_size: video.exact_size,
             kind: AssetKind::Video,

@@ -237,6 +237,9 @@ class UsenetOperationMonitor:
     async def _sync_operations(self) -> None:
         operations = tuple(self._operations.values())
         if operations:
+            synced_at = time.time()
+            for operation in operations:
+                operation.updated_at = synced_at
             await database.execute_many(
                 """
                 UPDATE usenet_active_operations
@@ -323,6 +326,15 @@ class UsenetOperationMonitor:
             self._sync_task.cancel()
             await asyncio.gather(self._sync_task, return_exceptions=True)
             self._sync_task = None
+        active_tasks = {
+            operation.task
+            for operation in self._operations.values()
+            if operation.task is not None
+        }
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
         await database.execute(
             """
             DELETE FROM usenet_active_operations

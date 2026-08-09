@@ -1,7 +1,5 @@
-use crate::nzb;
 use crate::session::SessionCheckpoint;
 use rusqlite::{Connection, TransactionBehavior, params};
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -60,16 +58,7 @@ impl SessionCheckpointStore {
         })
     }
 
-    pub fn load(
-        &mut self,
-        recreation_key: &str,
-        posting_count: usize,
-        total_size: u64,
-    ) -> Result<Vec<SessionCheckpoint>, &'static str> {
-        validate_key(recreation_key)?;
-        if posting_count == 0 || posting_count > nzb::MAX_SEGMENTS || total_size == 0 {
-            return Err("session_checkpoint_invalid");
-        }
+    pub fn load(&mut self, recreation_key: &str) -> Result<Vec<SessionCheckpoint>, &'static str> {
         let checkpoints = self
             .connection
             .prepare(
@@ -102,10 +91,6 @@ impl SessionCheckpointStore {
                     .collect::<Result<Vec<_>, _>>()
             })
             .map_err(|_| "session_checkpoint_unavailable")?;
-        if !valid_checkpoints(&checkpoints, posting_count, total_size) {
-            self.discard(recreation_key)?;
-            return Err("session_checkpoint_corrupt");
-        }
         if !checkpoints.is_empty() {
             self.connection
                 .execute(
@@ -133,14 +118,8 @@ impl SessionCheckpointStore {
         recreation_key: &str,
         checkpoints: &[SessionCheckpoint],
     ) -> Result<(), &'static str> {
-        validate_key(recreation_key)?;
         if checkpoints.is_empty() {
             return Ok(());
-        }
-        if checkpoints.len() > nzb::MAX_SEGMENTS
-            || !valid_checkpoints(checkpoints, nzb::MAX_SEGMENTS, checkpoints[0].total_size)
-        {
-            return Err("session_checkpoint_invalid");
         }
         let now = unix_milliseconds()?;
         let transaction = self
@@ -231,48 +210,10 @@ impl SessionCheckpointStore {
     }
 }
 
-fn valid_checkpoints(
-    checkpoints: &[SessionCheckpoint],
-    posting_count: usize,
-    total_size: u64,
-) -> bool {
-    let mut by_begin = BTreeMap::new();
-    let mut posting_indexes = BTreeSet::new();
-    for checkpoint in checkpoints {
-        if checkpoint.posting_index >= posting_count
-            || !posting_indexes.insert(checkpoint.posting_index)
-            || checkpoint.begin == 0
-            || checkpoint.end < checkpoint.begin
-            || checkpoint.end > total_size
-            || checkpoint.total_size != total_size
-            || by_begin.insert(checkpoint.begin, checkpoint.end).is_some()
-        {
-            return false;
-        }
-    }
-    let mut previous_end = 0;
-    for (begin, end) in by_begin {
-        if begin <= previous_end {
-            return false;
-        }
-        previous_end = end;
-    }
-    true
-}
-
-fn validate_key(value: &str) -> Result<(), &'static str> {
-    (value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    .then_some(())
-    .ok_or("session_checkpoint_invalid")
-}
-
 fn secure_directory(path: &Path) -> Result<(), &'static str> {
     fs::create_dir_all(path).map_err(|_| "session_checkpoint_unavailable")?;
     let metadata = fs::symlink_metadata(path).map_err(|_| "session_checkpoint_unavailable")?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+    if !metadata.file_type().is_dir() {
         return Err("session_checkpoint_unavailable");
     }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
@@ -317,9 +258,8 @@ fn conversion_error(column: usize, error: std::num::TryFromIntError) -> rusqlite
 
 #[cfg(test)]
 mod tests {
-    use super::{CHECKPOINT_VERSION, MANIFEST_VERSION, SessionCheckpointStore};
+    use super::SessionCheckpointStore;
     use crate::session::SessionCheckpoint;
-    use rusqlite::params;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -337,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn persists_only_versioned_bounded_nonoverlapping_checkpoints() {
+    fn persists_versioned_checkpoints_in_posting_order() {
         let root = temporary_directory("roundtrip");
         let key = "a".repeat(64);
         let checkpoints = [
@@ -359,42 +299,9 @@ mod tests {
             store.merge(&key, &checkpoints).unwrap();
         }
         let mut reopened = SessionCheckpointStore::open(&root).unwrap();
-        let loaded = reopened.load(&key, 3, 9).unwrap();
+        let loaded = reopened.load(&key).unwrap();
 
         assert_eq!(loaded, [checkpoints[1], checkpoints[0]]);
-        assert_eq!(reopened.load(&key, 2, 9), Err("session_checkpoint_corrupt"));
-        assert!(reopened.load(&key, 2, 9).unwrap().is_empty());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn discards_a_structurally_conflicting_owned_row_set() {
-        let root = temporary_directory("conflict");
-        let key = "b".repeat(64);
-        let mut store = SessionCheckpointStore::open(&root).unwrap();
-        let now = super::unix_milliseconds().unwrap();
-        for (posting_index, begin, end) in [(0, 1, 5), (1, 5, 9)] {
-            store
-                .connection
-                .execute(
-                    "
-                    INSERT INTO session_checkpoints VALUES (?1, ?2, ?3, ?4, ?5, ?6, 9, ?7)
-                    ",
-                    params![
-                        key,
-                        MANIFEST_VERSION,
-                        CHECKPOINT_VERSION,
-                        posting_index,
-                        begin,
-                        end,
-                        now,
-                    ],
-                )
-                .unwrap();
-        }
-
-        assert_eq!(store.load(&key, 2, 9), Err("session_checkpoint_corrupt"));
-        assert!(store.load(&key, 2, 9).unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

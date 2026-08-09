@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import heapq
+import math
 import random
 import re
 import time
@@ -24,7 +25,6 @@ from torf import Magnet, MagnetError
 
 from comet.cometnet import get_active_backend
 from comet.cometnet.protocol import TorrentMetadata
-from comet.core.constants import torrent_timeout
 from comet.core.database import (
     encode_json_param,
     is_retryable_database_error,
@@ -42,6 +42,7 @@ from comet.usenet.outbound import (
 from comet.utils.formatting import normalize_info_hash
 from comet.utils.http_client import read_bounded_body
 from comet.utils.parsing import default_dump, ensure_multi_language, is_video
+from comet.utils.text import has_ascii_control
 
 TRACKER_PATTERN = re.compile(r"[&?]tr=([^&]+)")
 DEFAULT_ADD_TORRENT_QUEUE_MAXSIZE = 256
@@ -54,6 +55,11 @@ DEFAULT_TORRENT_BROADCAST_QUEUE_MAXSIZE = 4096
 DEFAULT_TORRENT_BROADCAST_BATCH_QUEUE_MIN_SIZE = 32
 DEFAULT_TORRENT_UPDATE_RETRY_BASE_DELAY = 0.05
 DEFAULT_TORRENT_UPDATE_RETRY_MAX_DELAY = 1.0
+_TORRENT_UPDATE_RETRY_MAX_EXPONENT = math.ceil(
+    math.log2(
+        DEFAULT_TORRENT_UPDATE_RETRY_MAX_DELAY / DEFAULT_TORRENT_UPDATE_RETRY_BASE_DELAY
+    )
+)
 MAX_TORRENT_DOCUMENT_BYTES = 16 * 1024 * 1024
 MAX_TORRENT_REDIRECTS = 3
 
@@ -79,32 +85,34 @@ def _normalize_sources(sources) -> list[str]:
 
 def _get_cached_normalized_sources(
     sources,
-    cache: dict[int, list[str]] | None = None,
+    cache: dict[int, tuple[object, list[str]]] | None = None,
 ) -> list[str]:
     if cache is None:
         return _normalize_sources(sources)
 
     value_id = id(sources)
     cached = cache.get(value_id)
-    if cached is None:
-        cached = _normalize_sources(sources)
-        cache[value_id] = cached
-    return cached
+    if cached is not None:
+        return cached[1]
+    normalized = _normalize_sources(sources)
+    cache[value_id] = (sources, normalized)
+    return normalized
 
 
 def _get_cached_parsed_payload(
     parsed,
-    cache: dict[int, dict] | None = None,
+    cache: dict[int, tuple[object, dict]] | None = None,
 ) -> dict:
     if cache is None:
         return _coerce_parsed_payload(parsed)
 
     value_id = id(parsed)
     cached = cache.get(value_id)
-    if cached is None:
-        cached = _coerce_parsed_payload(parsed)
-        cache[value_id] = cached
-    return cached
+    if cached is not None:
+        return cached[1]
+    payload = _coerce_parsed_payload(parsed)
+    cache[value_id] = (parsed, payload)
+    return payload
 
 
 def _prune_ordered_dict(cache: OrderedDict, *, max_entries: int):
@@ -149,10 +157,8 @@ def _extract_info_hash_from_magnet(magnet_uri: str) -> str | None:
     if (
         not isinstance(magnet_uri, str)
         or len(magnet_uri) > 16 * 1024
-        or any(
-            character.isspace() or ord(character) < 32 or ord(character) == 127
-            for character in magnet_uri
-        )
+        or has_ascii_control(magnet_uri)
+        or any(character.isspace() for character in magnet_uri)
     ):
         return None
     try:
@@ -162,7 +168,6 @@ def _extract_info_hash_from_magnet(magnet_uri: str) -> str | None:
         query = parse_qs(
             parsed.query,
             keep_blank_values=False,
-            max_num_fields=128,
         )
     except ValueError:
         return None
@@ -261,12 +266,10 @@ def _construct_torrent_metadata(
 
 
 async def download_torrent(
-    session,
     url: str,
     *,
     allowed_private_origins: frozenset[str] = frozenset(),
 ):
-    del session
     try:
         async with asyncio.timeout(settings.GET_TORRENT_TIMEOUT):
             return await _download_torrent_document(
@@ -293,37 +296,40 @@ async def _download_torrent_document(
             use_dns_cache=False,
             limit=1,
         )
-        async with aiohttp.ClientSession(
-            connector=connector,
-            timeout=torrent_timeout(),
-        ) as request_session:
-            async with request_session.get(
+        async with (
+            aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=None),
+                auto_decompress=False,
+            ) as request_session,
+            request_session.get(
                 target.url,
                 headers={
                     "Accept": "application/x-bittorrent",
                     "Accept-Encoding": "identity",
                 },
                 allow_redirects=False,
-            ) as response:
-                if response.status in {301, 302, 303, 307, 308}:
-                    location = response.headers.get("Location")
-                    if not isinstance(location, str) or not location:
-                        raise OutboundUrlError("torrent redirect is invalid")
-                    info_hash = _extract_info_hash_from_magnet(location)
-                    if info_hash:
-                        return (None, info_hash, location)
-                    current_url = urljoin(target.url, location)
-                    continue
-                if not is_success_status(response.status):
-                    return (None, None, None)
-                try:
-                    document = await read_bounded_body(
-                        response,
-                        MAX_TORRENT_DOCUMENT_BYTES,
-                    )
-                except ValueError as exc:
-                    raise OutboundUrlError(str(exc)) from exc
-                return (document, None, None)
+            ) as response,
+        ):
+            if response.status in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location")
+                if not location:
+                    raise OutboundUrlError("torrent redirect is invalid")
+                info_hash = _extract_info_hash_from_magnet(location)
+                if info_hash:
+                    return (None, info_hash, location)
+                current_url = urljoin(target.url, location)
+                continue
+            if not is_success_status(response.status):
+                return (None, None, None)
+            try:
+                document = await read_bounded_body(
+                    response,
+                    MAX_TORRENT_DOCUMENT_BYTES,
+                )
+            except ValueError as exc:
+                raise OutboundUrlError(str(exc)) from exc
+            return (document, None, None)
     raise OutboundUrlError("torrent redirected too many times")
 
 
@@ -558,8 +564,7 @@ def _iter_torrent_updates_from_file_infos(
             sources_cache=sources_cache,
             parsed_cache=parsed_cache,
         )
-        if item is not None:
-            yield item
+        yield item
 
 
 @dataclass(slots=True)
@@ -718,6 +723,15 @@ def _end_queue_wait(waiters: int, event: asyncio.Event) -> int:
     return waiters
 
 
+def _discard_queue_items(queue: asyncio.Queue) -> None:
+    while True:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        queue.task_done()
+
+
 def _normalize_unique_info_hashes(info_hashes: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(normalize_info_hash(value) for value in info_hashes))
 
@@ -770,7 +784,7 @@ class AddTorrentQueue:
 
     @staticmethod
     def _build_pending_metadata(
-        seeders: int, tracker: str, is_private: bool
+        seeders: int | None, tracker: str, is_private: bool
     ) -> dict[str, object]:
         return {
             "seeders": seeders,
@@ -782,7 +796,7 @@ class AddTorrentQueue:
     def _merge_pending_metadata(
         current: dict[str, object],
         *,
-        seeders: int,
+        seeders: int | None,
         tracker: str,
         is_private: bool,
     ) -> None:
@@ -799,7 +813,7 @@ class AddTorrentQueue:
     async def add_torrent(
         self,
         magnet_url: str,
-        seeders: int,
+        seeders: int | None,
         tracker: str,
         media_id: str,
         search_season: int | None,
@@ -848,9 +862,6 @@ class AddTorrentQueue:
 
     async def _ensure_workers(self):
         workers = self._workers
-        for task in workers:
-            if task.done():
-                task.result()
         if (
             workers
             and len(workers) >= self.max_concurrent
@@ -859,9 +870,6 @@ class AddTorrentQueue:
             return
 
         async with self._lock:
-            for task in self._workers:
-                if task.done():
-                    task.result()
             self._workers[:] = [task for task in self._workers if not task.done()]
             missing_workers = self.max_concurrent - len(self._workers)
             if missing_workers <= 0:
@@ -977,6 +985,16 @@ class AddTorrentQueue:
                 await asyncio.gather(*workers)
         finally:
             async with self._lock:
+                tasks = [
+                    *self._workers,
+                    *self._inflight_resolutions.values(),
+                ]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            _discard_queue_items(self.queue)
+            async with self._lock:
                 self._reset_runtime_state()
 
 
@@ -1088,17 +1106,13 @@ class TorrentUpdateQueue:
 
     async def _ensure_task(self, kind: str, worker_factory):
         task = self._tasks[kind]
-        if task is not None:
-            if not task.done():
-                return
-            task.result()
+        if task is not None and not task.done():
+            return
 
         async with self._state_lock:
             task = self._tasks[kind]
-            if task is not None:
-                if not task.done():
-                    return
-                task.result()
+            if task is not None and not task.done():
+                return
             self._tasks[kind] = create_detached_task(
                 worker_factory(),
                 name=f"torrent-{kind}-worker",
@@ -1217,7 +1231,8 @@ class TorrentUpdateQueue:
     def _retry_delay_seconds(self, attempt: int) -> float:
         delay = min(
             DEFAULT_TORRENT_UPDATE_RETRY_MAX_DELAY,
-            DEFAULT_TORRENT_UPDATE_RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+            DEFAULT_TORRENT_UPDATE_RETRY_BASE_DELAY
+            * (2 ** min(attempt - 1, _TORRENT_UPDATE_RETRY_MAX_EXPONENT)),
         )
         return delay + (random.random() * min(0.05, delay))
 
@@ -1371,56 +1386,64 @@ class TorrentUpdateQueue:
             self._stopping = True
             worker = self._tasks["persistence"]
 
-        if worker is not None:
-            if not worker.done():
-                await _wait_for_tracked_queue_drain(
-                    self.queue,
-                    waiters_count=lambda: self._queue_waiters,
-                    waiters_event=self._queue_waiters_event,
-                    extra_idle_check=self._retry_is_idle,
-                    extra_idle_wait=self._wait_for_retry_drain,
-                )
-                await self.queue.put(self._STOP)
-            await worker
+        try:
+            if worker is not None:
+                if not worker.done():
+                    await _wait_for_tracked_queue_drain(
+                        self.queue,
+                        waiters_count=lambda: self._queue_waiters,
+                        waiters_event=self._queue_waiters_event,
+                        extra_idle_check=self._retry_is_idle,
+                        extra_idle_wait=self._wait_for_retry_drain,
+                    )
+                    await self.queue.put(self._STOP)
+                await worker
 
-        async with self._state_lock:
-            broadcast_worker = self._tasks["broadcast"]
-        if broadcast_worker is not None:
-            if not broadcast_worker.done():
-                await _wait_for_tracked_queue_drain(
-                    self._broadcast_queue,
-                    waiters_count=lambda: self._broadcast_waiters,
-                    waiters_event=self._broadcast_waiters_event,
-                )
-                await self._broadcast_queue.put(self._STOP)
-            await broadcast_worker
+            async with self._state_lock:
+                broadcast_worker = self._tasks["broadcast"]
+            if broadcast_worker is not None:
+                if not broadcast_worker.done():
+                    await _wait_for_tracked_queue_drain(
+                        self._broadcast_queue,
+                        waiters_count=lambda: self._broadcast_waiters,
+                        waiters_event=self._broadcast_waiters_event,
+                    )
+                    await self._broadcast_queue.put(self._STOP)
+                await broadcast_worker
 
-        async with self._state_lock:
-            retry_worker = self._tasks["retry"]
-        if retry_worker is not None:
-            if retry_worker.done():
-                await retry_worker
-            else:
+            async with self._state_lock:
+                retry_worker = self._tasks["retry"]
+            if retry_worker is not None:
                 retry_worker.cancel()
-                try:
-                    await retry_worker
-                except asyncio.CancelledError:
-                    pass
+                await asyncio.gather(retry_worker, return_exceptions=True)
+        finally:
+            tasks = [task for task in self._tasks.values() if task is not None]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            _discard_queue_items(self.queue)
+            _discard_queue_items(self._broadcast_queue)
 
-        async with self._retry_lock:
-            self._retry_heap.clear()
-            self._retry_event.clear()
-            self._retry_idle_event.set()
-            self._retry_inflight = 0
+            async with self._retry_lock:
+                self._retry_heap.clear()
+                self._retry_event.clear()
+                self._retry_idle_event.set()
+                self._retry_inflight = 0
 
-        async with self._pending_lock:
-            self._pending_updates.clear()
-        async with self._state_lock:
-            self._queue_waiters = 0
-            self._queue_waiters_event.set()
-            self._broadcast_waiters = 0
-            self._broadcast_waiters_event.set()
-            self._retry_sequence = 0
+            async with self._pending_lock:
+                self._pending_updates.clear()
+            async with self._state_lock:
+                self._tasks = {
+                    "persistence": None,
+                    "broadcast": None,
+                    "retry": None,
+                }
+                self._queue_waiters = 0
+                self._queue_waiters_event.set()
+                self._broadcast_waiters = 0
+                self._broadcast_waiters_event.set()
+                self._retry_sequence = 0
 
 
 def _release_torrent_row(item: _TorrentUpdate, updated_at: float) -> dict:
@@ -1444,11 +1467,9 @@ def _release_torrent_row(item: _TorrentUpdate, updated_at: float) -> dict:
 async def _execute_batched_upsert(rows: list[_TorrentUpdate], *, updated_at: float):
     repository = TorrentReleaseRepository(database)
     async with database.transaction():
-        persisted = await repository.persist_rows(
+        await repository.persist_rows(
             [_release_torrent_row(item, updated_at) for item in rows]
         )
-        if persisted != len(rows):
-            raise RuntimeError("torrent release persistence lost an update")
     private_hashes = await repository.private_hashes(
         tuple(dict.fromkeys(item.info_hash for item in rows))
     )

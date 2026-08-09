@@ -1,9 +1,10 @@
+import asyncio
 import tempfile
 import unittest
 import warnings
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from comet.services.dmm_ingester import (
     DMMIngester,
@@ -197,6 +198,25 @@ class DmmArchiveTests(unittest.TestCase):
 
 
 class DmmDownloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_cancels_and_joins_the_active_runner(self):
+        ingester = DMMIngester()
+        cycle_started = asyncio.Event()
+
+        async def run_continuous():
+            cycle_started.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch("comet.services.dmm_ingester.settings.DMM_INGEST_ENABLED", True),
+            patch.object(ingester, "_run_continuous", new=run_continuous),
+        ):
+            runner = asyncio.create_task(ingester.start())
+            await cycle_started.wait()
+            await ingester.stop()
+
+        self.assertTrue(runner.done())
+        self.assertIsNone(ingester._runner_task)
+
     async def test_download_is_fixed_origin_and_streamed_without_size_cap(self):
         class Content:
             def __init__(self):
@@ -233,9 +253,9 @@ class DmmDownloadTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             with (
                 patch(
-                    "comet.services.dmm_ingester.aiohttp.ClientSession",
-                    return_value=session,
-                ) as session_factory,
+                    "comet.services.dmm_ingester.http_client_manager.get_session",
+                    new=AsyncMock(return_value=session),
+                ) as get_session,
                 patch(
                     "comet.services.dmm_ingester.TEMP_DIR",
                     str(Path(directory) / "temporary"),
@@ -248,4 +268,5 @@ class DmmDownloadTests(unittest.IsolatedAsyncioTestCase):
             session.request_kwargs["headers"]["Accept-Encoding"],
             "identity",
         )
-        self.assertNotIn("auto_decompress", session_factory.call_args.kwargs)
+        self.assertNotIn("timeout", session.request_kwargs)
+        get_session.assert_awaited_once_with()

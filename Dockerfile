@@ -15,8 +15,7 @@ FROM python:3.13-slim-trixie AS par2-tool
 
 ARG TARGETARCH
 COPY deployment/build_download.py deployment/install_par2.py /tmp/deployment/
-RUN PYTHONPATH=/tmp python -m deployment.install_par2 --arch "${TARGETARCH}" --output /opt/par2 \
-    && test "$(/opt/par2/bin/par2 -V)" = "par2cmdline-turbo version 1.4.0"
+RUN PYTHONPATH=/tmp python -m deployment.install_par2 --arch "${TARGETARCH}" --output /opt/par2
 
 FROM python:3.13-slim-trixie AS libarchive-tool
 

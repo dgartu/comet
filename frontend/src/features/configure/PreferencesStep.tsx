@@ -112,6 +112,7 @@ function ResultFormatPreview({ emptyLabel, selected }: { emptyLabel: string; sel
     release_group: t("configure.preview.releaseGroup"),
     seeders: t("configure.preview.seeders"),
     size: t("configure.preview.size"),
+    subtitles: t("configure.preview.subtitles"),
     title: t("configure.preview.title"),
     tracker: t("configure.preview.tracker"),
     video_info: t("configure.preview.video"),
@@ -123,6 +124,7 @@ function ResultFormatPreview({ emptyLabel, selected }: { emptyLabel: string; sel
     [field("quality_info"), field("release_group")].filter(Boolean).join(" | "),
     [field("seeders"), field("size"), field("tracker")].filter(Boolean).join(" · "),
     field("languages"),
+    field("subtitles"),
   ].filter(Boolean);
   return (
     <figure className="result-preview">

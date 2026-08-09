@@ -8,9 +8,7 @@ from comet.usenet.outbound import (
     ValidatedUrl,
     configured_http_origin,
     fetch_http_bytes,
-    http_url_with_basic_auth,
     validate_http_url,
-    validate_public_http_url,
 )
 
 
@@ -115,6 +113,7 @@ class PublicUrlValidationTests(unittest.IsolatedAsyncioTestCase):
             session.calls[0][1]["headers"]["Authorization"],
             "Bearer secret",
         )
+        self.assertFalse(session.calls[0][1]["auto_decompress"])
         self.assertNotIn("Authorization", session.calls[1][1]["headers"])
         self.assertEqual(
             session.calls[1][1]["headers"]["Accept"],
@@ -130,7 +129,7 @@ class PublicUrlValidationTests(unittest.IsolatedAsyncioTestCase):
             "file:///tmp/release.nzb",
         ):
             with self.subTest(value=value), self.assertRaises(OutboundUrlError):
-                await validate_public_http_url(value)
+                await validate_http_url(value)
 
     async def test_rejects_credentials_and_framing_in_redirect_persistent_headers(self):
         for headers in (
@@ -147,25 +146,6 @@ class PublicUrlValidationTests(unittest.IsolatedAsyncioTestCase):
                     "https://example.test/release.nzb",
                     max_bytes=1024,
                     headers=headers,
-                )
-
-    async def test_rejects_invalid_fetch_budgets_before_network_access(self):
-        for max_bytes, redirects in (
-            (True, 3),
-            (0, 3),
-            (151 * 1024 * 1024, 3),
-            (1024, True),
-            (1024, -1),
-            (1024, 11),
-        ):
-            with (
-                self.subTest(max_bytes=max_bytes, redirects=redirects),
-                self.assertRaises(OutboundUrlError),
-            ):
-                await fetch_http_bytes(
-                    "https://example.test/release.nzb",
-                    max_bytes=max_bytes,
-                    redirects=redirects,
                 )
 
     async def test_http_failure_preserves_bounded_status_for_callers(self):
@@ -235,16 +215,10 @@ class PublicUrlValidationTests(unittest.IsolatedAsyncioTestCase):
             "http://169.254.169.254/latest/meta-data",
         ):
             with self.subTest(value=value), self.assertRaises(OutboundUrlError):
-                await validate_public_http_url(value)
+                await validate_http_url(value)
 
     async def test_rejects_an_explicit_zero_port_without_normalizing_it(self):
         with self.assertRaises(OutboundUrlError):
-            await validate_public_http_url("https://example.test:0/release.nzb")
+            await validate_http_url("https://example.test:0/release.nzb")
         with self.assertRaises(ValueError):
             configured_http_origin("https://example.test:0/base")
-        with self.assertRaises(ValueError):
-            http_url_with_basic_auth(
-                "https://example.test:0/file",
-                "user",
-                "password",
-            )

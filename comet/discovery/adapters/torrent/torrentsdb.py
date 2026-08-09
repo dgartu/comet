@@ -13,8 +13,8 @@ METADATA_PATTERN = re.compile(
 class TorrentsDBScraper(TorrentDiscoveryAdapter):
     BASE_URL = "https://torrentsdb.com"
 
-    def __init__(self, manager, session):
-        super().__init__(manager, session)
+    def __init__(self, session):
+        super().__init__(session)
 
     @staticmethod
     def _parse_stream(torrent):

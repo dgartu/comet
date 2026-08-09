@@ -11,6 +11,7 @@ from comet.core.database import (
     encode_json_param,
 )
 from comet.core.models import database, settings
+from comet.metadata.media_info import media_info_to_json
 from comet.observability import log
 from comet.observability.context import create_detached_task
 from comet.utils.parsing import MediaScope, default_dump
@@ -21,8 +22,7 @@ DEBRID_CHANGE_DETECTION_COLUMNS = (
     "size",
     "parsed_json",
 )
-DEBRID_UPDATE_COLUMNS = (*DEBRID_CHANGE_DETECTION_COLUMNS, "updated_at")
-DEBRID_UPDATE_SET_SQL = build_upsert_assignments(DEBRID_UPDATE_COLUMNS)
+DEBRID_UPDATE_SET_SQL = build_upsert_assignments(DEBRID_CHANGE_DETECTION_COLUMNS)
 DEBRID_DISTINCT_UPDATE_WHERE_SQL = build_distinct_from_predicate(
     "debrid_availability",
     "EXCLUDED",
@@ -76,9 +76,22 @@ async def shutdown_cache_writes() -> None:
 def _build_conditional_update() -> str:
     return f"""
         DO UPDATE SET
-{DEBRID_UPDATE_SET_SQL}
+{DEBRID_UPDATE_SET_SQL},
+            media_info_json = CASE
+                WHEN EXCLUDED.media_info_json IS NOT NULL
+                    THEN EXCLUDED.media_info_json
+                WHEN debrid_availability.file_index IS NOT DISTINCT FROM EXCLUDED.file_index
+                    AND debrid_availability.title IS NOT DISTINCT FROM EXCLUDED.title
+                    THEN debrid_availability.media_info_json
+                ELSE NULL
+            END,
+            updated_at = EXCLUDED.updated_at
         WHERE
             {DEBRID_DISTINCT_UPDATE_WHERE_SQL}
+            OR (
+                EXCLUDED.media_info_json IS NOT NULL
+                AND debrid_availability.media_info_json IS DISTINCT FROM EXCLUDED.media_info_json
+            )
             OR COALESCE(debrid_availability.updated_at, 0) < (EXCLUDED.updated_at - :update_interval)
 """
 
@@ -96,6 +109,7 @@ CACHE_AVAILABILITY_QUERY = f"""
         title,
         size,
         parsed_json,
+        media_info_json,
         updated_at
     )
     VALUES (
@@ -109,6 +123,7 @@ CACHE_AVAILABILITY_QUERY = f"""
         :title,
         :size,
         :parsed_json,
+        :media_info_json,
         :updated_at
     )
     ON CONFLICT (debrid_service, info_hash, season_norm, episode_norm)
@@ -151,6 +166,7 @@ async def cache_availability(debrid_service: str, availability: list):
                 if file["parsed"] is not None
                 else None
             ),
+            "media_info_json": media_info_to_json(file.get("media_info")),
             "updated_at": current_time,
             "update_interval": (
                 settings.DEBRID_CACHE_TTL // 2
@@ -182,7 +198,10 @@ async def get_cached_availability(
     season: int | None = None,
     episode: int | None = None,
 ):
-    select_clause = "SELECT info_hash, file_index, title, size, parsed_json AS parsed"
+    select_clause = """
+        SELECT info_hash, file_index, title, size,
+               parsed_json AS parsed, media_info_json AS media_info
+    """
     scope_filter_sql, scope_params = _build_scope_lookup(media_scope, season, episode)
 
     min_timestamp = time.time() - settings.DEBRID_CACHE_TTL
@@ -221,7 +240,7 @@ async def get_cached_availability(
         results = await database.fetch_all(query, params)
     elif debrid_service == "offcloud":
         query = f"""
-            SELECT info_hash, file_index, title, size, parsed
+            SELECT info_hash, file_index, title, size, parsed, media_info
             FROM (
                 SELECT
                     info_hash,
@@ -229,6 +248,7 @@ async def get_cached_availability(
                     title,
                     size,
                     parsed_json AS parsed,
+                    media_info_json AS media_info,
                     ROW_NUMBER() OVER (
                         PARTITION BY info_hash
                         ORDER BY
@@ -273,21 +293,10 @@ async def get_cached_availability_any_service(
     }
 
     query = f"""
-        SELECT info_hash, file_index, title, size, parsed
-        FROM (
-            SELECT
-                info_hash,
-                file_index,
-                title,
-                size,
-                parsed_json AS parsed,
-                ROW_NUMBER() OVER (
-                    PARTITION BY info_hash
-                    ORDER BY updated_at DESC
-                ) AS row_number
-            {base_from_where}
-        ) latest_debrid_availability
-        WHERE row_number = 1
+        SELECT info_hash, file_index, title, size,
+               parsed_json AS parsed, media_info_json AS media_info
+        {base_from_where}
+        ORDER BY updated_at DESC
     """
 
     return await database.fetch_all(query, params)

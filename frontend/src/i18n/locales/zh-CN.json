@@ -143,6 +143,7 @@
     "preview": {
       "audio": "DDP 5.1 · 大气",
       "languages": "🇬🇧 / 🇫🇷",
+      "subtitles": "💬 🇬🇧 / 🇫🇷",
       "quality": "蓝光",
       "releaseGroup": "伊特斯",
       "seeders": "1,234 个做种者",
@@ -846,7 +847,6 @@
     },
     "detail": {
       "timestamp": "时间戳",
-      "context": "上下文",
       "process": "进程",
       "errorCode": "错误代码",
       "safeDetails": "安全的结构化详情",

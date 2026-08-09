@@ -151,7 +151,8 @@ class CometNetGossipTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("signing failed")
 
         with patch.object(engine, "_repropagate", new=fail):
-            await engine._gossip_loop()
+            with self.assertRaisesRegex(RuntimeError, "signing failed"):
+                await engine._gossip_loop()
 
         self.assertEqual(list(engine._outgoing_queue), ["first", "second"])
 
@@ -168,6 +169,7 @@ class CometNetGossipTests(unittest.IsolatedAsyncioTestCase):
             gossip_loop = asyncio.create_task(engine._gossip_loop())
             await started.wait()
             gossip_loop.cancel()
-            await gossip_loop
+            with self.assertRaises(asyncio.CancelledError):
+                await gossip_loop
 
         self.assertEqual(list(engine._outgoing_queue), ["first", "second"])

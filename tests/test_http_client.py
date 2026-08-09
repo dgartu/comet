@@ -1,10 +1,12 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
 
 from comet.core.models import AppSettings, settings
+from comet.observability.context import create_detached_task
 from comet.utils.http_client import HttpClientManager
 
 
@@ -60,6 +62,66 @@ class HttpClientLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(leased.closed)
         self.assertEqual(manager._leases, {})
         self.assertEqual(manager._retired, set())
+
+    async def test_user_replacement_drains_the_bound_generation(self):
+        manager = HttpClientManager()
+        config = AppSettings(
+            _env_file=None,
+            USER_PROVIDED_PROXY_URL="http://proxy.example:8080",
+        )
+        first = manager.build_user(config)
+        replacement = manager.build_user(config)
+        manager._user_session = first
+        try:
+            with patch.object(
+                settings,
+                "USER_PROVIDED_PROXY_URL",
+                config.USER_PROVIDED_PROXY_URL,
+            ):
+                async with manager.bind():
+                    self.assertIs(await manager.get_user_session(), first)
+                    await manager.replace_user(replacement)
+                    self.assertFalse(first.closed)
+                    self.assertIs(await manager.get_user_session(), first)
+
+                self.assertTrue(first.closed)
+                self.assertIs(await manager.get_user_session(), replacement)
+        finally:
+            await manager.close()
+
+    async def test_detached_task_does_not_retain_a_bound_session(self):
+        manager = HttpClientManager()
+        first = await manager.init()
+        replacement = manager.build(settings)
+        proceed = asyncio.Event()
+
+        async def resolve_session_and_setting():
+            await proceed.wait()
+            return await manager.get_session(), settings.COMET_CAPABILITY_SECRET
+
+        try:
+            with patch.object(
+                settings,
+                "COMET_CAPABILITY_SECRET",
+                "detached-secret",
+            ):
+                async with manager.bind():
+                    task = create_detached_task(
+                        resolve_session_and_setting(),
+                        name="test.detached-http-session",
+                        capture_settings=True,
+                    )
+
+            await manager.replace(replacement)
+            proceed.set()
+
+            resolved_session, captured_secret = await task
+            self.assertIs(resolved_session, replacement)
+            self.assertEqual(captured_secret, "detached-secret")
+            self.assertTrue(first.closed)
+        finally:
+            proceed.set()
+            await manager.close()
 
     async def test_user_destination_http_pool_is_strict_and_cookie_free(self):
         manager = HttpClientManager()

@@ -141,20 +141,14 @@ class PeerConnection:
 
     async def send(self, message: AnyMessage | bytes) -> bool:
         """Send a message to this peer. Returns True on success."""
+        data = message if isinstance(message, bytes) else message.to_bytes()
         try:
-            if isinstance(message, bytes):
-                data = message
-            else:
-                data = message.to_bytes()
-
             await self.websocket.send(data)
             self.bytes_sent += len(data)
             self.messages_sent += 1
             self.update_activity()
             return True
-        except ConnectionClosed:
-            return False
-        except Exception:
+        except (WebSocketException, OSError):
             return False
 
     async def close(self) -> None:
@@ -250,7 +244,6 @@ class ConnectionManager:
 
         # Server task
         self._server = None
-        self._server_task: asyncio.Task | None = None
 
         # Background tasks
         self._tasks: set[asyncio.Task] = set()
@@ -292,7 +285,7 @@ class ConnectionManager:
         WebSocket upgrade request (e.g., health checks, load balancer probes),
         we return an appropriate HTTP response instead of raising an error.
         """
-        real_ip = extract_ip_from_headers(dict(request.headers), require_public=False)
+        real_ip = extract_ip_from_headers(request.headers, require_public=False)
         if real_ip:
             connection.real_client_ip = real_ip
 
@@ -327,11 +320,10 @@ class ConnectionManager:
                     websockets.Headers([("Content-Type", "text/plain")]),
                     b"CometNet WebSocket Server\n",
                 )
-            else:
-                # Other requests - return 426 Upgrade Required
-                return self._upgrade_required_response(
-                    b"This is a WebSocket endpoint. Use a WebSocket client.\n",
-                )
+            # Other requests - return 426 Upgrade Required
+            return self._upgrade_required_response(
+                b"This is a WebSocket endpoint. Use a WebSocket client.\n",
+            )
 
         # Valid WebSocket request - continue with normal handshake
         return None
@@ -359,6 +351,18 @@ class ConnectionManager:
             return None
         return conn.address
 
+    def find_peer_by_address(self, address: str) -> str | None:
+        """Return the connected node using an address, ignoring a trailing slash."""
+        normalized = address.rstrip("/")
+        return next(
+            (
+                node_id
+                for node_id, connection in self._connections.items()
+                if connection.address.rstrip("/") == normalized
+            ),
+            None,
+        )
+
     def register_handler(self, msg_type: MessageType, handler: MessageHandler) -> None:
         """Register a handler for a specific message type."""
         self._handlers[msg_type] = handler
@@ -383,8 +387,8 @@ class ConnectionManager:
                 compression=self.websocket_compression,
             )
         except OSError:
-            pass
             # Continue anyway - we can still make outbound connections
+            pass
         except BaseException:
             self._running = False
             raise
@@ -396,7 +400,7 @@ class ConnectionManager:
         )
         self._tasks.add(ping_task)
 
-    async def _handle_ws_connection(self, websocket, path: str = "") -> None:
+    async def _handle_ws_connection(self, websocket) -> None:
         """
         Handle incoming WebSocket connection from the native server.
         """
@@ -440,6 +444,7 @@ class ConnectionManager:
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+            self._server = None
 
         # Cancel background tasks
         tasks = list(self._tasks)
@@ -464,12 +469,10 @@ class ConnectionManager:
         if not self._running:
             return None
 
-        # Check if we're already connected or connecting
-        if address in self._connecting:
-            return None
-
         # Use lock to prevent race condition on peer limit check
         async with self._connection_lock:
+            if address in self._connecting:
+                return None
             # Check peer limit
             if len(self._connections) + self._pending_connections >= self.max_peers:
                 return None
@@ -497,15 +500,12 @@ class ConnectionManager:
                 websocket, address, address, is_outbound=True
             )
 
-            if node_id:
-                return node_id
-            else:
-                return None
+            return node_id
         except TimeoutError:
             return None
         except InvalidStatus:
             return None
-        except (WebSocketException, ConnectionClosed):
+        except WebSocketException:
             return None
         except asyncio.CancelledError:
             raise
@@ -549,27 +549,27 @@ class ConnectionManager:
         except ValueError:
             pass
 
-        # Use lock to prevent race condition on connection limits
+        rejected = False
         async with self._connection_lock:
             # Check per-IP connection limit (prevent Sybil-like attacks)
             # Relax limit for private IPs (local network, Docker)
             limit = self.max_connections_per_ip
             if parsed_ip is not None and parsed_ip.is_private:
-                limit = max(limit, 50)  # Allow more connections from private IPs
+                limit = self.max_peers
 
             current_ip_connections = self._connections_per_ip.get(ip, 0)
-            if current_ip_connections >= limit:
-                await websocket.close()
-                return None
+            if (
+                current_ip_connections >= limit
+                or len(self._connections) + self._pending_connections >= self.max_peers
+            ):
+                rejected = True
+            else:
+                self._connections_per_ip[ip] = current_ip_connections + 1
+                self._pending_connections += 1
 
-            # Check peer limit
-            if len(self._connections) + self._pending_connections >= self.max_peers:
-                await websocket.close()
-                return None
-
-            # Pre-increment IP counter to reserve slot (will decrement if handshake fails)
-            self._connections_per_ip[ip] = current_ip_connections + 1
-            self._pending_connections += 1
+        if rejected:
+            await websocket.close()
+            return None
 
         node_id = None
         try:
@@ -585,10 +585,27 @@ class ConnectionManager:
             if node_id is None:
                 await websocket.close()
 
-        if node_id:
-            return node_id
-        else:
-            return None
+        return node_id
+
+    async def _create_handshake(self) -> HandshakeMessage:
+        handshake = HandshakeMessage(
+            sender_id=self.identity.node_id,
+            public_key=self.identity.public_key_hex,
+            listen_port=self.listen_port,
+            public_url=self.advertise_url,
+            alias=settings.COMETNET_NODE_ALIAS,
+        )
+        if self._private_network and self._network_id and self._network_password:
+            handshake.network_token = compute_network_token(
+                self._network_id,
+                self._network_password,
+                self.identity.node_id,
+                handshake.timestamp,
+            )
+        handshake.signature = await self.identity.sign_hex_async(
+            handshake.to_signable_bytes()
+        )
+        return handshake
 
     async def _perform_handshake(
         self,
@@ -611,28 +628,7 @@ class ConnectionManager:
         try:
             if is_outbound:
                 # We initiated, so we send our handshake first
-                handshake = HandshakeMessage(
-                    sender_id=self.identity.node_id,
-                    public_key=self.identity.public_key_hex,
-                    listen_port=self.listen_port,
-                    public_url=self.advertise_url,
-                    alias=settings.COMETNET_NODE_ALIAS,
-                )
-                # Add network token for private mode
-                if (
-                    self._private_network
-                    and self._network_id
-                    and self._network_password
-                ):
-                    handshake.network_token = compute_network_token(
-                        self._network_id,
-                        self._network_password,
-                        self.identity.node_id,
-                        handshake.timestamp,
-                    )
-                handshake.signature = await self.identity.sign_hex_async(
-                    handshake.to_signable_bytes()
-                )
+                handshake = await self._create_handshake()
                 await websocket.send(handshake.to_bytes())
 
                 # Wait for their handshake
@@ -647,29 +643,7 @@ class ConnectionManager:
                     return None
 
                 # Send our handshake
-                handshake = HandshakeMessage(
-                    sender_id=self.identity.node_id,
-                    public_key=self.identity.public_key_hex,
-                    listen_port=self.listen_port,
-                    public_url=self.advertise_url,
-                    alias=settings.COMETNET_NODE_ALIAS,
-                )
-                # Add network token for private mode
-                if (
-                    self._private_network
-                    and self._network_id
-                    and self._network_password
-                ):
-                    handshake.network_token = compute_network_token(
-                        self._network_id,
-                        self._network_password,
-                        self.identity.node_id,
-                        handshake.timestamp,
-                    )
-                handshake.signature = await self.identity.sign_hex_async(
-                    handshake.to_signable_bytes()
-                )
-
+                handshake = await self._create_handshake()
                 await websocket.send(handshake.to_bytes())
 
             # Validate peer handshake
@@ -705,23 +679,15 @@ class ConnectionManager:
                 if not peer_handshake.network_token:
                     return None
 
-                # Validate token for current AND previous window (clock tolerance)
+                # The signed timestamp selects the same five-minute window on
+                # both peers.
                 token_current = compute_network_token(
                     self._network_id,
                     self._network_password,
                     peer_handshake.sender_id,
                     peer_handshake.timestamp,
                 )
-                token_prev = compute_network_token(
-                    self._network_id,
-                    self._network_password,
-                    peer_handshake.sender_id,
-                    peer_handshake.timestamp - 300,
-                )
-                if not (
-                    hmac.compare_digest(peer_handshake.network_token, token_current)
-                    or hmac.compare_digest(peer_handshake.network_token, token_prev)
-                ):
+                if not hmac.compare_digest(peer_handshake.network_token, token_current):
                     return None
 
             fallback_address = connectable_address
@@ -752,7 +718,6 @@ class ConnectionManager:
             # caller's pending reservation already owns the capacity slot.
             async with self._connection_lock:
                 if peer_handshake.sender_id in self._connections:
-                    await websocket.close()
                     return None
                 if self._keystore:
                     self._keystore.store_verified_key(
@@ -765,7 +730,6 @@ class ConnectionManager:
             task = create_detached_task(
                 self._receive_loop(conn),
                 name="cometnet-peer-receive",
-                keep_connection=True,
             )
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
@@ -773,7 +737,7 @@ class ConnectionManager:
             return peer_handshake.sender_id
         except TimeoutError:
             return None
-        except (ConnectionClosed, WebSocketException, OSError):
+        except (WebSocketException, OSError):
             return None
 
     async def _receive_loop(self, conn: PeerConnection) -> None:
@@ -813,14 +777,9 @@ class ConnectionManager:
                         # Route to registered handler
                         handler = self._handlers.get(message.type)
                         if handler:
-                            try:
-                                await handler(conn.node_id, message)
-                            except Exception:
-                                pass
+                            await handler(conn.node_id, message)
                 except ConnectionClosed:
                     break
-        except Exception:
-            pass
         finally:
             self._release_connection(conn.node_id, conn)
 
@@ -871,8 +830,8 @@ class ConnectionManager:
 
     def _handle_pong(self, conn: PeerConnection, pong: PongMessage) -> None:
         """Handle a pong response."""
-        if pong.nonce in conn.pending_pings:
-            sent_time = conn.pending_pings.pop(pong.nonce)
+        sent_time = conn.pending_pings.pop(pong.nonce, None)
+        if sent_time is not None:
             rtt = (time.time() - sent_time) * 1000
 
             # Ignore extremely old pongs (> 60s) - they're stale
@@ -886,105 +845,87 @@ class ConnectionManager:
     async def _ping_loop(self) -> None:
         """Periodically ping all peers to check health."""
         while self._running:
-            try:
-                await asyncio.sleep(settings.COMETNET_TRANSPORT_PING_INTERVAL)
+            await asyncio.sleep(settings.COMETNET_TRANSPORT_PING_INTERVAL)
 
-                # Get all connections
-                connections = list(self._connections.values())
-                if not connections:
+            # Get all connections
+            connections = list(self._connections.values())
+            if not connections:
+                continue
+
+            now = time.time()
+            stale_nodes: list[str] = []
+            high_latency_nodes: list[str] = []
+            max_latency = settings.COMETNET_TRANSPORT_MAX_LATENCY_MS
+
+            peers_to_ping: list[PeerConnection] = []
+            for conn in connections:
+                if (
+                    now - conn.last_activity
+                    > settings.COMETNET_TRANSPORT_CONNECTION_TIMEOUT
+                ):
+                    stale_nodes.append(conn.node_id)
                     continue
 
-                now = time.time()
-                stale_nodes: list[str] = []
-                high_latency_nodes: list[str] = []
-                max_latency = settings.COMETNET_TRANSPORT_MAX_LATENCY_MS
+                stale_pings = [
+                    nonce
+                    for nonce, sent_time in conn.pending_pings.items()
+                    if now - sent_time > 60
+                ]
+                for nonce in stale_pings:
+                    del conn.pending_pings[nonce]
 
-                peers_to_ping: list[PeerConnection] = []
-                for conn in connections:
-                    if (
-                        now - conn.last_activity
-                        > settings.COMETNET_TRANSPORT_CONNECTION_TIMEOUT
-                    ):
-                        stale_nodes.append(conn.node_id)
+                if len(conn.latency_samples) >= 5 and conn.latency_ms > max_latency:
+                    high_latency_nodes.append(conn.node_id)
+                    continue
+
+                peers_to_ping.append(conn)
+
+            ping_data: list[tuple] = []
+            for conn in peers_to_ping:
+                nonce = secrets.token_hex(8)
+                ping = PingMessage(
+                    sender_id=self.identity.node_id,
+                    nonce=nonce,
+                )
+                ping_data.append((conn, nonce, ping))
+
+            if ping_data:
+                signatures = await asyncio.gather(
+                    *(
+                        self.identity.sign_hex_async(ping.to_signable_bytes())
+                        for _, _, ping in ping_data
+                    ),
+                    return_exceptions=True,
+                )
+
+                signed_pings = []
+                for (conn, nonce, ping), signature in zip(ping_data, signatures):
+                    if not self._running:
+                        break
+                    if isinstance(signature, BaseException):
                         continue
 
-                    stale_pings = [
-                        nonce
-                        for nonce, sent_time in conn.pending_pings.items()
-                        if now - sent_time > 60
-                    ]
-                    for nonce in stale_pings:
-                        del conn.pending_pings[nonce]
+                    ping.signature = signature
+                    send_time = time.time()
+                    conn.pending_pings[nonce] = send_time
+                    signed_pings.append((conn, nonce, ping))
 
-                    if len(conn.latency_samples) >= 5 and conn.latency_ms > max_latency:
-                        high_latency_nodes.append(conn.node_id)
-                        continue
+                send_results = await asyncio.gather(
+                    *(conn.send(ping) for conn, _, ping in signed_pings),
+                    return_exceptions=True,
+                )
+                for (conn, nonce, _), result in zip(signed_pings, send_results):
+                    if result is not True:
+                        conn.pending_pings.pop(nonce, None)
 
-                    peers_to_ping.append(conn)
+            nodes_to_disconnect = {*stale_nodes, *high_latency_nodes}
+            if nodes_to_disconnect:
+                await asyncio.gather(
+                    *(self.disconnect_peer(nid) for nid in nodes_to_disconnect),
+                    return_exceptions=True,
+                )
 
-                ping_data: list[tuple] = []
-                for conn in peers_to_ping:
-                    nonce = secrets.token_hex(8)
-                    ping = PingMessage(
-                        sender_id=self.identity.node_id,
-                        nonce=nonce,
-                    )
-                    ping_data.append((conn, nonce, ping))
-
-                if ping_data:
-
-                    async def sign_ping(ping: PingMessage) -> str:
-                        return await self.identity.sign_hex_async(
-                            ping.to_signable_bytes()
-                        )
-
-                    signatures = await asyncio.gather(
-                        *(sign_ping(ping) for _, _, ping in ping_data),
-                        return_exceptions=True,
-                    )
-
-                    signed_pings = []
-                    for i, (conn, nonce, ping) in enumerate(ping_data):
-                        if not self._running:
-                            break
-
-                        sig = signatures[i]
-                        if isinstance(sig, Exception):
-                            continue
-
-                        ping.signature = sig
-                        send_time = time.time()
-                        conn.pending_pings[nonce] = send_time
-                        signed_pings.append((conn, nonce, ping))
-
-                    send_results = await asyncio.gather(
-                        *(conn.send(ping) for conn, _, ping in signed_pings),
-                        return_exceptions=True,
-                    )
-                    for (conn, nonce, _), result in zip(signed_pings, send_results):
-                        if result is not True:
-                            conn.pending_pings.pop(nonce, None)
-
-                # Disconnect stale connections
-                if stale_nodes:
-                    await asyncio.gather(
-                        *(self.disconnect_peer(nid) for nid in stale_nodes),
-                        return_exceptions=True,
-                    )
-
-                # Disconnect high-latency connections
-                if high_latency_nodes:
-                    await asyncio.gather(
-                        *(self.disconnect_peer(nid) for nid in high_latency_nodes),
-                        return_exceptions=True,
-                    )
-
-                # Eclipse Attack auto-remediation
-                await self._remediate_eclipse_attack()
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                pass
+            await self._remediate_eclipse_attack()
 
     async def disconnect_peer(self, node_id: str) -> None:
         """Disconnect from a specific peer."""
@@ -994,45 +935,24 @@ class ConnectionManager:
             self._release_connection(node_id, connection)
 
     async def _remediate_eclipse_attack(self) -> None:
-        """
-        Detect and remediate potential Eclipse attacks.
-
-        If IP diversity is too low (many peers from same IPs), disconnect
-        some peers from overrepresented IPs to make room for diverse connections.
-        """
-        # Only check if we have enough peers to evaluate
-        if len(self._connections) < 5:
-            return
-
+        """Apply the configured inbound per-IP capacity to outbound peers too."""
         # Calculate IP distribution
         ip_counts: dict[str, list[str]] = {}  # ip -> list of node_ids
         for node_id, conn in self._connections.items():
             ip = extract_ip_from_address(conn.address)
             if ip != "unknown":
-                if ip not in ip_counts:
-                    ip_counts[ip] = []
-                ip_counts[ip].append(node_id)
+                ip_counts.setdefault(ip, []).append(node_id)
 
         if not ip_counts:
             return
 
-        # Calculate diversity (unique IPs / total connections)
-        unique_ips = len(ip_counts)
-        total_peers = len(self._connections)
-        diversity = unique_ips / total_peers
-
-        # Threshold for action: if diversity < 0.4 (e.g., 5 connections from 2 IPs)
-        if diversity >= 0.4:
-            return
-
-        # Find overrepresented IPs (more than 2 connections from same IP)
+        # Apply the same configured per-IP capacity to outbound connections.
         peers_to_disconnect = []
         for ip, node_ids in ip_counts.items():
-            # Determine max connections allowed for this IP
-            max_allowed = 2
+            max_allowed = self.max_connections_per_ip
             try:
                 if ipaddress.ip_address(ip).is_private:
-                    max_allowed = 50
+                    max_allowed = self.max_peers
             except ValueError:
                 pass
 
@@ -1045,8 +965,9 @@ class ConnectionManager:
                 peers_to_disconnect.extend(sorted_peers[max_allowed:])
 
         if peers_to_disconnect:
-            for node_id in peers_to_disconnect:
-                await self.disconnect_peer(node_id)
+            await asyncio.gather(
+                *(self.disconnect_peer(node_id) for node_id in peers_to_disconnect)
+            )
 
     async def broadcast(
         self, message: AnyMessage, exclude: set[str] | None = None
@@ -1074,18 +995,15 @@ class ConnectionManager:
 
         for i in range(0, len(targets), batch_size):
             batch = targets[i : i + batch_size]
-            results = await asyncio.gather(
-                *(conn.send(message) for conn in batch), return_exceptions=True
-            )
-            sent_count += sum(1 for r in results if r is True)
+            results = await asyncio.gather(*(conn.send(message) for conn in batch))
+            sent_count += sum(results)
 
         return sent_count
 
     async def send_to_peer(self, node_id: str, message: AnyMessage) -> bool:
         """Send a message to a specific peer."""
-        if node_id in self._connections:
-            return await self._connections[node_id].send(message)
-        return False
+        connection = self._connections.get(node_id)
+        return await connection.send(message) if connection else False
 
     def get_random_peers(
         self, count: int, exclude: set[str] | None = None
@@ -1095,35 +1013,29 @@ class ConnectionManager:
         available = [nid for nid in self._connections if nid not in exclude]
         return random.sample(available, min(count, len(available)))
 
-    def get_peer_addresses(self) -> dict[str, str]:
-        """Get a mapping of node_id to address for all connected peers."""
-        return {nid: conn.address for nid, conn in self._connections.items()}
-
     def get_connection_stats(self) -> dict:
         """Get statistics about connections including security metrics."""
+        active = tuple(self._connections.values())
         # Calculate IP diversity for Eclipse attack detection
         unique_ips = set()
-        for conn in self._connections.values():
+        for conn in active:
             ip = extract_ip_from_address(conn.address)
             if ip != "unknown":
                 unique_ips.add(ip)
 
-        ip_diversity = (
-            len(unique_ips) / len(self._connections) if self._connections else 1.0
-        )
-        active = tuple(self._connections.values())
+        ip_diversity = len(unique_ips) / len(active) if active else 1.0
 
         return {
-            "connected_peers": len(self._connections),
-            "outbound": sum(1 for c in self._connections.values() if c.is_outbound),
-            "inbound": sum(1 for c in self._connections.values() if not c.is_outbound),
+            "connected_peers": len(active),
+            "outbound": sum(1 for connection in active if connection.is_outbound),
+            "inbound": sum(1 for connection in active if not connection.is_outbound),
             "unique_ips": len(unique_ips),
             "ip_diversity": round(
                 ip_diversity, 2
             ),  # 1.0 = all unique, lower = potential eclipse
             "avg_latency_ms": (
-                sum(c.latency_ms for c in active) / len(self._connections)
-                if self._connections
+                sum(connection.latency_ms for connection in active) / len(active)
+                if active
                 else 0
             ),
             "bytes_sent": self._closed_bytes_sent

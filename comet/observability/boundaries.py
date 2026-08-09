@@ -167,49 +167,36 @@ async def _observed_body(
 ) -> AsyncIterator[bytes]:
     started_at = time.monotonic_ns()
     transferred_bytes = 0
+
+    def emit(outcome: str, failure: Exception | None = None) -> None:
+        fields = {"content_id": content_id} if content_id else {}
+        if failure is not None:
+            fields["error_code"] = "stream_failure"
+        log.terminal(
+            "stream.completed",
+            "Stream transfer completed",
+            outcome=outcome,
+            playback_mode=playback_mode,
+            transfer_mode="range" if range_requested else "full",
+            transferred_bytes=transferred_bytes,
+            duration_ms=(time.monotonic_ns() - started_at) / 1_000_000,
+            transport_failure_explained=outcome != "ok",
+            exc=failure,
+            **fields,
+        )
+
     try:
         async for chunk in source:
             transferred_bytes += len(chunk)
             yield chunk
     except asyncio.CancelledError:
-        log.terminal(
-            "stream.completed",
-            "Stream transfer completed",
-            outcome="cancelled",
-            playback_mode=playback_mode,
-            transfer_mode="range" if range_requested else "full",
-            transferred_bytes=transferred_bytes,
-            duration_ms=(time.monotonic_ns() - started_at) / 1_000_000,
-            transport_failure_explained=True,
-            **({"content_id": content_id} if content_id else {}),
-        )
+        emit("cancelled")
         raise
     except Exception as exc:
-        log.terminal(
-            "stream.completed",
-            "Stream transfer completed",
-            outcome="failed",
-            playback_mode=playback_mode,
-            transfer_mode="range" if range_requested else "full",
-            transferred_bytes=transferred_bytes,
-            duration_ms=(time.monotonic_ns() - started_at) / 1_000_000,
-            error_code="stream_failure",
-            transport_failure_explained=True,
-            **({"content_id": content_id} if content_id else {}),
-            exc=exc,
-        )
+        emit("failed", exc)
         raise
     else:
-        log.terminal(
-            "stream.completed",
-            "Stream transfer completed",
-            outcome="ok",
-            playback_mode=playback_mode,
-            transfer_mode="range" if range_requested else "full",
-            transferred_bytes=transferred_bytes,
-            duration_ms=(time.monotonic_ns() - started_at) / 1_000_000,
-            **({"content_id": content_id} if content_id else {}),
-        )
+        emit("ok")
 
 
 __all__ = ("playback_boundary",)

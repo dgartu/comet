@@ -35,11 +35,6 @@ def _safe_int(value):
 
 def parse_stream_info(_name: str, _description: str, behavior_hints: dict):
     stream_info = _DEFAULTS.copy()
-    if not isinstance(behavior_hints, dict):
-        stream_info["size"] = 0
-        stream_info["languages"] = []
-        return stream_info
-
     video_size = behavior_hints.get("videoSize")
     stream_info["size"] = (
         video_size if type(video_size) is int and video_size >= 0 else 0

@@ -67,7 +67,7 @@ export function EventDetail({
               </div>
               <div className="event-detail__related">
                 <strong>{t("events.detail.related")}</strong>
-                {related.slice(0, 20).map((item) => (
+                {related.map((item) => (
                   <div key={item.id}>
                     <time>{new Date(item.created_at * 1000).toLocaleTimeString()}</time>
                     <span>{item.event}</span>

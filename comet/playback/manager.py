@@ -256,6 +256,7 @@ async def resolve_playback_intent(
         config,
         database,
         session,
+        codec=codec,
         partition=partition,
         client_ip=client_ip,
         expected_client=expected_client,
@@ -281,6 +282,7 @@ async def resolve_nzb_handoff_intent(
         config,
         database,
         session,
+        codec=codec,
         partition=partition,
         client_ip=client_ip,
         expected_client="stremio",
@@ -296,6 +298,7 @@ async def _resolve_decoded_intent(
     database,
     session,
     *,
+    codec: CapabilityCodec,
     partition: bytes,
     client_ip: str,
     expected_client: str | None,
@@ -320,7 +323,7 @@ async def _resolve_decoded_intent(
     }
     provider_states = await ensure_playback_capability_states(
         config,
-        CapabilityCodec(settings.COMET_CAPABILITY_SECRET),
+        codec,
         database,
         providers,
         provider_configuration_ids=frozenset({intent.provider_configuration_id}),
@@ -364,7 +367,7 @@ async def _resolve_decoded_intent(
     accounts = config["accounts"] or {}
     account_scope = playback_provider_account_scopes(
         config,
-        CapabilityCodec(settings.COMET_CAPABILITY_SECRET),
+        codec,
         provider_configuration_ids=frozenset({intent.provider_configuration_id}),
         instance_credential_material=instance_credential_material,
     ).get(intent.provider_configuration_id)
@@ -452,6 +455,7 @@ async def resolve_prepared_asset(
         config,
         database,
         session,
+        codec=codec,
         partition=partition,
         client_ip=client_ip,
         expected_client=expected_client,
@@ -465,9 +469,7 @@ async def resolve_prepared_asset(
             provider_kind=preparation.provider_kind,
             provider_configuration_id=preparation.provider_configuration_id,
             account_partition=resolution.account_partition,
-            selection_intent_json=orjson.dumps(
-                list(preparation.selection_intent)
-            ).decode(),
+            selection_intent_json=orjson.dumps(preparation.selection_intent).decode(),
             client=preparation.client,
             target_kind=preparation.target_kind,
             representation=(
@@ -890,8 +892,6 @@ async def prepare_nzbdav(
         )
     else:
         job_id = ledger.payload["remote_id"]
-        if ledger.payload["remote_hash"] != artifact_sha256:
-            raise ValueError("NzbDAV preparation is corrupt")
     if reconciliation is not None and reconciliation.status == "failed":
         await provider_repository.record_terminal_status(
             ledger.preparation_id,
@@ -947,7 +947,6 @@ def _par2_proven_archive_group(
     """Bind a fully obfuscated NZB archive set to its PAR2 description."""
     source_assets = catalog_par2_source_assets(
         recovery.catalog["set_id"],
-        recovery.catalog["slice_size"],
         recovery.catalog["files"],
     )
     groups = catalog_archive_volume_groups(source_assets)
@@ -1471,11 +1470,7 @@ async def prepare_native_usenet(
                     volumes,
                     passphrase=archive_passphrase,
                 )
-            direct_assets = (
-                catalog_archive_members(plan["set_identity"], members)
-                if stored_direct
-                else ()
-            )
+            direct_assets = catalog_archive_members(members) if stored_direct else ()
             strong_asset_revision = None
             if stored_direct and direct_assets:
                 if catalog_plan != plan:
@@ -1507,7 +1502,7 @@ async def prepare_native_usenet(
                     raise ValueError("native archive plan changed during preparation")
                 selected_asset = await asyncio.to_thread(
                     select_asset,
-                    catalog_nested_archive_members(plan["set_identity"], members),
+                    catalog_nested_archive_members(members),
                     prepared.preparation.selection_intent,
                 )
                 (
@@ -1602,7 +1597,7 @@ async def _run_published_materialization(
             )
         return result, artifacts
     finally:
-        await asyncio.shield(lease.close())
+        await lease.close()
 
 
 async def _repair_direct_asset(
@@ -1636,7 +1631,6 @@ async def _repair_direct_asset(
         candidates = await asyncio.to_thread(
             catalog_par2_assets,
             recovery.catalog["set_id"],
-            recovery.catalog["slice_size"],
             recovery.catalog["files"],
             known_video=(failed_asset.relative_path, failed_asset.declared_bytes),
         )
@@ -1685,7 +1679,6 @@ async def _repair_direct_asset(
         assets = await asyncio.to_thread(
             catalog_par2_assets,
             catalog["set_id"],
-            catalog["slice_size"],
             catalog["files"],
             known_video=(failed_asset.relative_path, failed_asset.declared_bytes),
         )
@@ -1945,7 +1938,6 @@ async def _repair_archive_from_recovery(
         source_assets = await asyncio.to_thread(
             catalog_par2_source_assets,
             catalog["set_id"],
-            catalog["slice_size"],
             catalog["files"],
         )
         recovery_assets.append((recovery, source_assets))
@@ -2312,7 +2304,7 @@ async def _open_session_archive_source(
         volumes,
         passphrase=archive_passphrase,
     )
-    assets = catalog_archive_members(plan["set_identity"], members)
+    assets = catalog_archive_members(members)
     if not assets:
         raise EngineArchiveError("archive_direct_unsupported", retryable=False)
     selected = await asyncio.to_thread(select_asset, assets, selection_intent)
@@ -2663,7 +2655,7 @@ async def prepare_torbox_usenet(
     if ledger.state == "terminal":
         ledger_status = ledger.payload["status"]
         if ledger_status == "selected":
-            target = _torbox_selected_target(ledger.payload, artifact_sha256)
+            target = _torbox_selected_target(ledger.payload)
             await repository.mark_ready(
                 prepared.preparation.preparation_id,
                 owner_configuration_partition=owner_configuration_partition,
@@ -2742,8 +2734,6 @@ async def prepare_torbox_usenet(
             )
             return "failed"
     else:
-        if ledger.payload["remote_hash"] != artifact_sha256:
-            raise ValueError("TorBox preparation is corrupt")
         remote_usenet_id = int(ledger.payload["remote_id"])
     await repository.record_pending_target(
         prepared.preparation.preparation_id,
@@ -2835,9 +2825,7 @@ async def poll_torbox_usenet(
     return "ready"
 
 
-def _torbox_selected_target(payload: dict, artifact_sha256: str) -> dict:
-    if payload["remote_hash"] != artifact_sha256:
-        raise ValueError("TorBox selected file is corrupt")
+def _torbox_selected_target(payload: dict) -> dict:
     return {
         "usenet_id": int(payload["remote_id"]),
         "file_id": payload["file_index"],
@@ -2968,14 +2956,13 @@ async def prepare_stremthru_newz(
             status=submission.status,
             ownership="created",
         )
-        remote_id, remote_hash, status = (
+        remote_id, remote_hash = (
             submission.remote_id,
             submission.remote_hash,
-            submission.status,
         )
     else:
-        status = ledger.payload["status"]
-        if status == "readd_mutation_pending":
+        ledger_status = ledger.payload["status"]
+        if ledger_status == "readd_mutation_pending":
             await PlaybackPreparationRepository(database).mark_failed(
                 prepared.preparation.preparation_id,
                 owner_configuration_partition=owner_configuration_partition,
@@ -2983,7 +2970,7 @@ async def prepare_stremthru_newz(
                 code="ambiguous_submission",
             )
             return "failed"
-        if status == "remote_missing":
+        if ledger_status == "remote_missing":
             export = await NzbProviderExportRepository(database).get_or_create(
                 owner_configuration_partition=owner_configuration_partition,
                 grant_id=owned.grant_id,
@@ -3022,7 +3009,6 @@ async def prepare_stremthru_newz(
             )
             remote_id = submission.remote_id
             remote_hash = submission.remote_hash
-            status = submission.status
         else:
             remote_id = ledger.payload["remote_id"]
             remote_hash = ledger.payload["remote_hash"]
@@ -3211,12 +3197,14 @@ def _release_with_brokered_artifact(
 
 
 def _easynews_source(prepared: PreparedPlaybackIntent) -> dict | None:
-    locators = [
-        locator
-        for locator in prepared.resolution.release.locators
-        if locator["kind"] == "easynews_http"
-    ]
-    return locators[0] if len(locators) == 1 else None
+    source = None
+    for locator in prepared.resolution.release.locators:
+        if locator["kind"] != "easynews_http":
+            continue
+        if source is not None:
+            return None
+        source = locator
+    return source
 
 
 async def poll_nzbdav(

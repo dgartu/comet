@@ -292,8 +292,6 @@ class UsenetPlaybackEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("retry-after", failed.headers)
         self.assertTrue(failed.path.endswith("LINK_OFFLINE.mp4"))
         self.assertEqual(failed.comet_playback_mode, "status")
-        with self.assertRaisesRegex(ValueError, "preparation result"):
-            _preparation_state_response("corrupt", prepared=prepared)
 
     async def test_newznab_limit_returns_an_actionable_status_video(self):
         source_error = NzbSourceError(

@@ -143,6 +143,7 @@
     "preview": {
       "audio": "ДДП 5.1 · Атмос",
       "languages": "🇬🇧 / 🇫🇷",
+      "subtitles": "💬 🇬🇧 / 🇫🇷",
       "quality": "BluRay",
       "releaseGroup": "ЮТС",
       "seeders": "1 234 сидера",
@@ -846,7 +847,6 @@
     },
     "detail": {
       "timestamp": "Время",
-      "context": "Контекст",
       "process": "Процесс",
       "errorCode": "Код ошибки",
       "safeDetails": "Безопасные структурированные данные",

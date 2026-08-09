@@ -20,10 +20,8 @@ def current_state():
                     "last_seen": 2.0,
                     "valid_contributions": 3,
                     "invalid_contributions": 1,
-                    "is_blacklisted": False,
                 }
             },
-            "blacklist": [],
         },
         "keystore": {"keys": {}},
         "discovery": {
@@ -47,7 +45,6 @@ def current_state():
                 "duplicates_ignored": 7,
                 "validation_skipped_exists": 8,
                 "torrents_filtered_untrusted": 9,
-                "torrents_filtered_blacklisted": 10,
                 "torrents_skipped_mode": 11,
             }
         },
@@ -70,7 +67,7 @@ class AsyncRecorder(Recorder):
 
 class FailingAsyncRecorder(Recorder):
     async def from_dict(self, data):
-        raise RuntimeError("address validation failed")
+        raise ValueError("address validation failed")
 
 
 class StateComponent:
@@ -211,7 +208,7 @@ class CometNetStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.discovery.calls, [])
         self.assertEqual(service.gossip.calls, [])
 
-    async def test_signed_state_migrates_duplicate_discovery_node_ids(self):
+    async def test_signed_state_collapses_duplicate_discovery_node_ids_in_memory(self):
         class Identity:
             node_id = "self"
             public_key_hex = "public-key"
@@ -253,8 +250,6 @@ class CometNetStateTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await service._load_state()
 
-            persisted = json.loads(state_path.read_text())
-
         self.assertEqual(len(service.reputation.calls), 1)
         self.assertEqual(len(service.keystore.calls), 1)
         self.assertEqual(len(service.gossip.calls), 1)
@@ -262,18 +257,6 @@ class CometNetStateTests(unittest.IsolatedAsyncioTestCase):
             set(service.discovery._known_peers),
             {"wss://new-peer.example"},
         )
-        self.assertEqual(
-            persisted["discovery"]["known_peers"],
-            [
-                {
-                    "address": "wss://new-peer.example",
-                    "node_id": "peer",
-                    "source": "pex",
-                    "last_seen": 3.0,
-                }
-            ],
-        )
-        self.assertEqual(persisted["integrity_signature"], "migrated-signature")
 
     async def test_invalid_late_section_does_not_partially_restore_state(self):
         state = current_state()

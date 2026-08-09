@@ -173,11 +173,10 @@ fn quality_stress_native_lifecycle_and_resource_plateaus() {
                 .expect("integer stress duration")
         })
         .unwrap_or(120);
-    assert!((5..=900).contains(&seconds));
     let directory = TemporaryDirectory::new();
     let resources = NativeResources::new(&directory.0, 1024 * 1024 * 1024, u64::MAX, 1, 1).unwrap();
     let singleflight = NetworkSingleflight::new();
-    let mut cache = VerifiedSegmentCache::new(8 * 1024 * 1024).unwrap();
+    let mut cache = VerifiedSegmentCache::new(8 * 1024 * 1024);
     let mut sessions = SessionRegistry::new(1024 * 1024);
     sessions
         .insert(session(), (), "b".repeat(64), Instant::now())

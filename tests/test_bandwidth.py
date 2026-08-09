@@ -15,13 +15,9 @@ from comet.services.bandwidth import BandwidthMonitor
 class BandwidthMonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_initialization_starts_one_shared_sync_task(self):
         monitor = BandwidthMonitor()
-        fetch = AsyncMock(return_value=123)
         execute = AsyncMock()
 
-        with (
-            patch("comet.services.bandwidth.database.fetch_val", new=fetch),
-            patch("comet.services.bandwidth.database.execute", new=execute),
-        ):
+        with patch("comet.services.bandwidth.database.execute", new=execute):
             await asyncio.gather(
                 monitor.initialize(),
                 monitor.initialize(),
@@ -29,13 +25,8 @@ class BandwidthMonitorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         try:
-            fetch.assert_awaited_once()
             self.assertTrue(monitor._initialized)
             self.assertIsNotNone(monitor._sync_task)
-            self.assertEqual(
-                monitor.get_global_stats()["total_bytes_alltime"],
-                123,
-            )
         finally:
             with patch(
                 "comet.services.bandwidth.database.execute",
@@ -63,7 +54,7 @@ class BandwidthMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(connection.current_speed, 900)
         self.assertLess(connection.current_speed, 1_100)
         self.assertGreater(connection.average_speed, 400)
-        self.assertEqual(monitor.get_global_stats()["total_bytes_session"], 2_000)
+        self.assertEqual(monitor._pending_bytes, 2_000)
 
     async def test_owner_poll_cancels_only_the_targeted_stream_task(self):
         monitor = BandwidthMonitor()
@@ -126,8 +117,6 @@ class BandwidthMonitorTests(unittest.IsolatedAsyncioTestCase):
         monitor._sync_task = asyncio.create_task(asyncio.sleep(3600))
         sync_task = monitor._sync_task
         monitor._pending_bytes = 1_234
-        monitor._total_bytes_session = 234
-        monitor._peak_concurrent = 1
         persist = AsyncMock()
 
         with (
@@ -145,4 +134,3 @@ class BandwidthMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor._initialized)
         self.assertIsNone(monitor._sync_task)
         self.assertEqual(monitor._connections, {})
-        self.assertEqual(monitor.get_global_stats()["total_bytes_session"], 0)

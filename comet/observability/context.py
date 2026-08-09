@@ -35,10 +35,6 @@ class RequestTerminalFlags:
         self._lock = threading.Lock()
         self._terminal_owners: set[str] = set()
 
-    def mark(self, flags: TerminalFlag) -> None:
-        with self._lock:
-            self._flags |= flags
-
     def snapshot(self) -> TerminalFlag:
         with self._lock:
             return self._flags
@@ -60,15 +56,12 @@ request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "comet_run_id", default=None
 )
-connection_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "comet_connection_id", default=None
-)
 request_terminal_flags_var: contextvars.ContextVar[RequestTerminalFlags | None] = (
     contextvars.ContextVar("comet_request_terminal_flags", default=None)
 )
 
 
-def new_correlation_id() -> str:
+def _new_correlation_id() -> str:
     return secrets.token_hex(16)
 
 
@@ -80,17 +73,13 @@ def current_run_id() -> str | None:
     return run_id_var.get()
 
 
-def current_connection_id() -> str | None:
-    return connection_id_var.get()
-
-
 def current_terminal_flags() -> RequestTerminalFlags | None:
     return request_terminal_flags_var.get()
 
 
 @contextmanager
-def request_context(request_id: str | None = None) -> Iterator[str]:
-    identifier = request_id or new_correlation_id()
+def request_context() -> Iterator[str]:
+    identifier = _new_correlation_id()
     request_token = request_id_var.set(identifier)
     flags_token = request_terminal_flags_var.set(RequestTerminalFlags())
     try:
@@ -101,8 +90,8 @@ def request_context(request_id: str | None = None) -> Iterator[str]:
 
 
 @contextmanager
-def run_context(run_id: str | None = None) -> Iterator[str]:
-    identifier = run_id or new_correlation_id()
+def run_context() -> Iterator[str]:
+    identifier = _new_correlation_id()
     token = run_id_var.set(identifier)
     try:
         yield identifier
@@ -110,22 +99,11 @@ def run_context(run_id: str | None = None) -> Iterator[str]:
         run_id_var.reset(token)
 
 
-@contextmanager
-def connection_context(connection_id: str | None = None) -> Iterator[str]:
-    identifier = connection_id or new_correlation_id()
-    token = connection_id_var.set(identifier)
-    try:
-        yield identifier
-    finally:
-        connection_id_var.reset(token)
-
-
 def clear_context() -> None:
     """Clear inherited process context, notably in executor initializers."""
 
     request_id_var.set(None)
     run_id_var.set(None)
-    connection_id_var.set(None)
     request_terminal_flags_var.set(RequestTerminalFlags())
 
 
@@ -157,16 +135,16 @@ def create_detached_task[T](
     coroutine: Coroutine[object, object, _T],
     *,
     name: str,
-    run_id: str | None = None,
-    keep_connection: bool = False,
+    capture_settings: bool = False,
 ) -> asyncio.Task[_T]:
     """Create an observed task without accidentally retaining request state."""
 
-    detached = contextvars.copy_context()
-    detached.run(request_id_var.set, None)
-    if not keep_connection:
-        detached.run(connection_id_var.set, None)
-    detached.run(run_id_var.set, run_id or new_correlation_id())
+    detached = contextvars.Context()
+    if capture_settings:
+        from comet.core.models import settings
+
+        settings.copy_to_context(detached)
+    detached.run(run_id_var.set, _new_correlation_id())
     detached.run(request_terminal_flags_var.set, RequestTerminalFlags())
     task = asyncio.create_task(coroutine, name=name, context=detached)
     task.add_done_callback(
@@ -180,13 +158,10 @@ __all__ = (
     "RequestTerminalFlags",
     "TerminalFlag",
     "clear_context",
-    "connection_context",
     "create_detached_task",
-    "current_connection_id",
     "current_request_id",
     "current_run_id",
     "current_terminal_flags",
-    "new_correlation_id",
     "request_context",
     "run_context",
 )

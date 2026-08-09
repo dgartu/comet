@@ -92,7 +92,6 @@ export function BindingEditor({
               </Select>
               <Input
                 label={t("configure.binding.displayName")}
-                maxLength={64}
                 onChange={(event) => update(index, { ...binding, displayName: event.target.value })}
                 value={binding.displayName}
               />
@@ -355,7 +354,6 @@ function IndexerIdentityControl({
           <Input
             disabled={disabled}
             label={t("configure.fields.queryUserAgent")}
-            maxLength={512}
             onChange={(event) =>
               onChange({
                 grabUserAgent,
@@ -369,7 +367,6 @@ function IndexerIdentityControl({
           <Input
             disabled={disabled}
             label={t("configure.fields.grabUserAgent")}
-            maxLength={512}
             onChange={(event) =>
               onChange({
                 grabUserAgent: event.target.value,

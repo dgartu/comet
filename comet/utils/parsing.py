@@ -5,10 +5,11 @@ from functools import lru_cache
 import orjson
 from RTN import ParsedData
 
+from comet.core.sources import MAX_SIGNED_BIGINT
+
 SCRAPE_URL_MODE_BOTH = "both"
 SCRAPE_URL_MODES = frozenset((SCRAPE_URL_MODE_BOTH, "live", "background"))
 _MAX_MEDIA_COORDINATE = 65_535
-_MAX_SIGNED_64 = 2**63 - 1
 _CANONICAL_NONNEGATIVE_INTEGER = re.compile(r"0|[1-9][0-9]{0,4}")
 _IMDB_ID = re.compile(r"tt[0-9]{7,10}")
 _KITSU_ID = re.compile(r"[1-9][0-9]{0,18}")
@@ -96,20 +97,8 @@ def load_cached_parsed(value) -> ParsedData | None:
         if not isinstance(payload, dict) or not payload:
             return None
         return ParsedData(**payload)
-    except (orjson.JSONDecodeError, TypeError, ValueError):
+    except (TypeError, ValueError):
         return None
-
-
-def load_cached_string_list(value) -> list[str]:
-    if value is None:
-        return []
-    try:
-        payload = orjson.loads(value)
-    except (orjson.JSONDecodeError, TypeError):
-        return []
-    if not isinstance(payload, list):
-        return []
-    return [item for item in payload if isinstance(item, str)]
 
 
 def ensure_multi_language(parsed: ParsedData):
@@ -206,7 +195,7 @@ def parse_media_id(media_type: str, media_id: str):
         if (
             len(parts) not in {2, 3}
             or _KITSU_ID.fullmatch(parts[1]) is None
-            or int(parts[1]) > _MAX_SIGNED_64
+            or int(parts[1]) > MAX_SIGNED_BIGINT
             or (len(parts) == 3 and parse_optional_int(parts[2]) is None)
         ):
             raise ValueError("Kitsu media ID has an invalid current shape")
@@ -290,10 +279,6 @@ def parse_url_scrape_mode(url: str):
     return normalized, SCRAPE_URL_MODE_BOTH
 
 
-def url_mode_matches_context(mode: str, context: str):
-    return mode == SCRAPE_URL_MODE_BOTH or mode == context
-
-
 def associate_urls_credentials(urls, credentials):
     if not urls:
         return []
@@ -304,4 +289,7 @@ def associate_urls_credentials(urls, credentials):
         credentials_list = [credentials or None] * len(url_list)
     else:
         credentials_list = [credential or None for credential in credentials]
-    return list(zip(url_list, credentials_list))
+    return [
+        (url, credentials_list[index] if index < len(credentials_list) else None)
+        for index, url in enumerate(url_list)
+    ]

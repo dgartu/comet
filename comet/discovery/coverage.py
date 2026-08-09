@@ -74,14 +74,9 @@ class SearchCoverageRepository:
         branch_fingerprint: str,
         *,
         next_refresh_at: float,
-        now: float | None = None,
     ) -> None:
         values = _coverage_values(query, branch_fingerprint)
-        observed_at = time.time() if now is None else _timestamp(now)
-        values["next_refresh_at"] = _future_timestamp(
-            next_refresh_at,
-            observed_at,
-        )
+        values["next_refresh_at"] = _timestamp(next_refresh_at)
         await self._database.execute(
             """
             INSERT INTO search_coverage (
@@ -106,14 +101,9 @@ class SearchCoverageRepository:
         branch_fingerprint: str,
         *,
         next_refresh_at: float,
-        now: float | None = None,
     ) -> None:
         values = _coverage_values(query, branch_fingerprint)
-        observed_at = time.time() if now is None else _timestamp(now)
-        values["next_refresh_at"] = _future_timestamp(
-            next_refresh_at,
-            observed_at,
-        )
+        values["next_refresh_at"] = _timestamp(next_refresh_at)
         await self._database.execute(
             """
             INSERT INTO search_coverage (
@@ -187,8 +177,3 @@ def _query_values(query: MediaQuery) -> dict[str, object]:
 
 def _timestamp(value: object) -> float:
     return float(value)
-
-
-def _future_timestamp(value: object, now: float) -> float:
-    del now
-    return _timestamp(value)

@@ -11,7 +11,6 @@ from comet.cometnet.protocol import (
     PoolManifestMessage,
     PoolMemberUpdate,
     TorrentAnnounce,
-    TorrentQuery,
     parse_message,
 )
 
@@ -54,7 +53,6 @@ class CometNetProtocolTests(unittest.TestCase):
             PeerRequest(max_peers=1).model_dump() | {"max_peers": "20"},
             TorrentAnnounce().model_dump() | {"ttl": 0},
             TorrentAnnounce().model_dump() | {"ttl": 33},
-            TorrentQuery().model_dump() | {"limit": True},
             HandshakeMessage().model_dump() | {"listen_port": 65536},
             PoolManifestMessage(
                 pool_id="pool-a", display_name="Pool A", creator_key="creator"
@@ -90,6 +88,7 @@ class CometNetProtocolTests(unittest.TestCase):
         ).model_dump()
         invalid_messages = [
             manifest | {"pool_id": " Pool-A "},
+            manifest | {"pool_id": "poöl"},
             manifest | {"members": [{"public_key": "member"}]},
             manifest
             | {

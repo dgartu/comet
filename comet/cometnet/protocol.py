@@ -13,21 +13,12 @@ from typing import Literal
 import msgpack
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from comet.cometnet.identifiers import canonical_pool_id
 from comet.cometnet.utils import canonicalize_data
 from comet.utils.formatting import normalize_info_hash
 
 # Exact current signed protocol version
 PROTOCOL_VERSION = "1.0"
-
-
-def _validate_current_pool_id(value: object) -> str:
-    if type(value) is not str or value != value.strip().lower():
-        raise ValueError("pool_id must use its canonical lowercase form")
-    if not 2 <= len(value) <= 64:
-        raise ValueError("pool_id must be 2-64 characters")
-    if not value.replace("-", "").replace("_", "").isalnum():
-        raise ValueError("pool_id must be alphanumeric with - or _")
-    return value
 
 
 def _validate_non_empty_string(value: object, field_name: str) -> str:
@@ -46,11 +37,6 @@ class MessageType(str, Enum):
     PEER_REQUEST = "peer_request"
     PEER_RESPONSE = "peer_response"
     TORRENT_ANNOUNCE = "torrent_announce"
-    TORRENT_QUERY = "torrent_query"
-    TORRENT_RESPONSE = "torrent_response"
-    SYNC_REQUEST = "sync_request"
-    SYNC_RESPONSE = "sync_response"
-
     # Pool management
     POOL_MANIFEST = "pool_manifest"
     POOL_JOIN_REQUEST = "pool_join"
@@ -102,11 +88,6 @@ class BaseMessage(BaseModel):
     def to_bytes(self) -> bytes:
         """Serialize the message to MsgPack bytes."""
         return msgpack.packb(self.model_dump())
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "BaseMessage":
-        """Deserialize a message from MsgPack bytes."""
-        return cls.model_validate(msgpack.unpackb(data, raw=False))
 
 
 class HandshakeMessage(BaseMessage):
@@ -235,11 +216,9 @@ class TorrentMetadata(BaseModel):
     @field_validator("size")
     @classmethod
     def validate_size(cls, v: int) -> int:
-        """Validate that size is a reasonable value."""
+        """Require a positive byte size."""
         if v <= 0:
             raise ValueError("size must be positive")
-        if v > 1024 * 1024 * 1024 * 1024 * 10:  # 10 TB max
-            raise ValueError("size exceeds maximum allowed value")
         return v
 
     @field_validator(
@@ -317,30 +296,6 @@ class TorrentAnnounce(BaseMessage):
     )  # List of nodes that have seen this message
 
 
-class TorrentQuery(BaseMessage):
-    """Query for specific torrents (by info_hash or media ID)."""
-
-    type: Literal[MessageType.TORRENT_QUERY] = MessageType.TORRENT_QUERY
-    info_hashes: list[str] = Field(default_factory=list)
-    imdb_id: str | None = None
-    limit: int = 50
-
-    @field_validator("limit", mode="before")
-    @classmethod
-    def validate_limit(cls, value):
-        if type(value) is not int or not 1 <= value <= 1000:
-            raise ValueError("limit must be an integer between 1 and 1000")
-        return value
-
-
-class TorrentResponse(BaseMessage):
-    """Response to a torrent query."""
-
-    type: Literal[MessageType.TORRENT_RESPONSE] = MessageType.TORRENT_RESPONSE
-    torrents: list[TorrentMetadata] = Field(default_factory=list)
-    query_id: str = ""  # Reference to the original query
-
-
 # ==================== Pool Messages ====================
 
 
@@ -399,7 +354,7 @@ class PoolManifestMessage(BaseMessage):
     @field_validator("pool_id", mode="before")
     @classmethod
     def validate_pool_id(cls, value):
-        return _validate_current_pool_id(value)
+        return canonical_pool_id(value)
 
     @field_validator("display_name", "creator_key", mode="before")
     @classmethod
@@ -447,7 +402,7 @@ class PoolJoinRequest(BaseMessage):
     @field_validator("pool_id", mode="before")
     @classmethod
     def validate_pool_id(cls, value):
-        return _validate_current_pool_id(value)
+        return canonical_pool_id(value)
 
     @field_validator("invite_code", "requester_key", mode="before")
     @classmethod
@@ -473,7 +428,7 @@ class PoolMemberUpdate(BaseMessage):
     @field_validator("pool_id", mode="before")
     @classmethod
     def validate_pool_id(cls, value):
-        return _validate_current_pool_id(value)
+        return canonical_pool_id(value)
 
     @field_validator("member_key", "updated_by", mode="before")
     @classmethod
@@ -504,7 +459,7 @@ class PoolDeleteMessage(BaseMessage):
     @field_validator("pool_id", mode="before")
     @classmethod
     def validate_pool_id(cls, value):
-        return _validate_current_pool_id(value)
+        return canonical_pool_id(value)
 
     @field_validator("deleted_by", mode="before")
     @classmethod
@@ -520,13 +475,24 @@ AnyMessage = (
     | PeerRequest
     | PeerResponse
     | TorrentAnnounce
-    | TorrentQuery
-    | TorrentResponse
     | PoolManifestMessage
     | PoolJoinRequest
     | PoolMemberUpdate
     | PoolDeleteMessage
 )
+
+_MESSAGE_MODELS = {
+    MessageType.HANDSHAKE: HandshakeMessage,
+    MessageType.PING: PingMessage,
+    MessageType.PONG: PongMessage,
+    MessageType.PEER_REQUEST: PeerRequest,
+    MessageType.PEER_RESPONSE: PeerResponse,
+    MessageType.TORRENT_ANNOUNCE: TorrentAnnounce,
+    MessageType.POOL_MANIFEST: PoolManifestMessage,
+    MessageType.POOL_JOIN_REQUEST: PoolJoinRequest,
+    MessageType.POOL_MEMBER_UPDATE: PoolMemberUpdate,
+    MessageType.POOL_DELETE: PoolDeleteMessage,
+}
 
 
 def parse_message(data: str | bytes) -> AnyMessage | None:
@@ -542,35 +508,7 @@ def parse_message(data: str | bytes) -> AnyMessage | None:
         payload = msgpack.unpackb(data, raw=False)
         if not isinstance(payload, dict):
             return None
-        msg_type = payload.get("type")
-
-        # Core messages
-        if msg_type == MessageType.HANDSHAKE:
-            return HandshakeMessage.model_validate(payload)
-        elif msg_type == MessageType.PING:
-            return PingMessage.model_validate(payload)
-        elif msg_type == MessageType.PONG:
-            return PongMessage.model_validate(payload)
-        elif msg_type == MessageType.PEER_REQUEST:
-            return PeerRequest.model_validate(payload)
-        elif msg_type == MessageType.PEER_RESPONSE:
-            return PeerResponse.model_validate(payload)
-        elif msg_type == MessageType.TORRENT_ANNOUNCE:
-            return TorrentAnnounce.model_validate(payload)
-        elif msg_type == MessageType.TORRENT_QUERY:
-            return TorrentQuery.model_validate(payload)
-        elif msg_type == MessageType.TORRENT_RESPONSE:
-            return TorrentResponse.model_validate(payload)
-        # Pool messages
-        elif msg_type == MessageType.POOL_MANIFEST:
-            return PoolManifestMessage.model_validate(payload)
-        elif msg_type == MessageType.POOL_JOIN_REQUEST:
-            return PoolJoinRequest.model_validate(payload)
-        elif msg_type == MessageType.POOL_MEMBER_UPDATE:
-            return PoolMemberUpdate.model_validate(payload)
-        elif msg_type == MessageType.POOL_DELETE:
-            return PoolDeleteMessage.model_validate(payload)
-        else:
-            return None
+        message_class = _MESSAGE_MODELS.get(payload.get("type"))
+        return message_class.model_validate(payload) if message_class else None
     except (msgpack.exceptions.UnpackException, TypeError, ValueError):
         return None

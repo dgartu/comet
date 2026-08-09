@@ -25,7 +25,6 @@ INFO_HASH_PATTERN = re.compile(r"btih:([a-fA-F0-9]{40}|[a-zA-Z0-9]{32})")
 ROW_PATTERN = re.compile(r"<tr(?:\s[^>]*)?>.*?</tr>", re.IGNORECASE | re.DOTALL)
 
 NYAA_BASE_URL = "https://nyaa.si"
-_MAX_PAGES = 100
 
 
 def extract_torrent_data(html_content: str):
@@ -107,13 +106,14 @@ async def get_all_nyaa_pages(
         return all_torrents
 
     last_page_number = int(last_page_matches[0])
-    if last_page_number > _MAX_PAGES:
-        raise ValueError("Nyaa pagination exceeds the page limit")
-
-    if last_page_number > 1:
+    page_concurrency = settings.NYAA_MAX_CONCURRENT_PAGES
+    for batch_start in range(2, last_page_number + 1, page_concurrency):
         page_results = await gather_concurrently(
             scrape_nyaa_page(session, semaphore, query, page_number)
-            for page_number in range(2, last_page_number + 1)
+            for page_number in range(
+                batch_start,
+                min(batch_start + page_concurrency, last_page_number + 1),
+            )
         )
         for result in page_results:
             all_torrents.extend(result)
@@ -125,8 +125,8 @@ class NyaaScraper(TorrentDiscoveryAdapter):
     anime_only_setting = "NYAA_ANIME_ONLY"
     impersonate = "chrome"
 
-    def __init__(self, manager, session):
-        super().__init__(manager, session)
+    def __init__(self, session):
+        super().__init__(session)
 
     async def scrape(self, request: ScrapeRequest):
         torrents = []

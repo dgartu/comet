@@ -1,12 +1,10 @@
 import base64
-from functools import cache
 
 from comet.core.provider_json import is_success_status
 from comet.discovery.torrent_base import TorrentDiscoveryAdapter
 from comet.discovery.torrent_models import ScrapeRequest
 
 
-@cache
 def _authorization(credentials: str) -> str:
     encoded = base64.b64encode(credentials.encode()).decode()
     return f"Basic {encoded}"
@@ -18,12 +16,11 @@ class AiostreamsScraper(TorrentDiscoveryAdapter):
 
     def __init__(
         self,
-        manager,
         session,
         url: str,
         credentials: str | None = None,
     ):
-        super().__init__(manager, session, url)
+        super().__init__(session, url)
         self.headers = (
             {}
             if credentials is None

@@ -17,6 +17,7 @@ from comet.usenet.stremio_nntp_config import (
     validate_handoff_config,
     validate_serialized_servers,
 )
+from comet.utils.text import has_ascii_control
 
 _MAX_HANDOFF_SELECTOR_BYTES = 512
 _VIDEO_EXTENSION_PATTERN = r"(?:mkv|mp4|m4v|mov|webm|avi|ts|m2ts|mpg|mpeg|wmv|flv)"
@@ -83,7 +84,7 @@ def _valid_nzb_url(value: object) -> bool:
         encoded = value.encode("ascii")
         parsed = urlsplit(value)
         _ = parsed.port
-    except (UnicodeEncodeError, ValueError):
+    except ValueError:
         return False
     return (
         1 <= len(encoded) <= 4_096
@@ -95,9 +96,8 @@ def _valid_nzb_url(value: object) -> bool:
         and not parsed.fragment
         and "%" not in (parsed.hostname or "")
         and "\\" not in value
-        and not any(
-            ord(character) <= 32 or ord(character) == 127 for character in value
-        )
+        and not has_ascii_control(value)
+        and not any(character.isspace() for character in value)
     )
 
 
@@ -229,7 +229,6 @@ def _selector_regex(selector: str) -> re.Pattern[str]:
         or not 4 <= len(encoded) <= _MAX_HANDOFF_SELECTOR_BYTES
         or not selector.startswith("/")
         or not selector.endswith("/i")
-        or any(ord(character) < 32 or ord(character) == 127 for character in selector)
     ):
         raise ValueError("Stremio NNTP handoff selection is invalid")
     try:

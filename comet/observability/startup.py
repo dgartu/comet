@@ -57,11 +57,7 @@ def _configured(value: str | None, *, explicit: bool = True) -> str:
 def _setting_details(value: object, *, sensitive: bool) -> str:
     if sensitive:
         return "configured"
-    rendered = orjson.dumps(value).decode("utf-8")
-    encoded = rendered.encode("utf-8")
-    if len(encoded) <= 1_024:
-        return rendered
-    return encoded[:1_021].decode("utf-8", errors="ignore") + "..."
+    return orjson.dumps(value).decode("utf-8")
 
 
 def _log_explicit_settings(settings) -> None:

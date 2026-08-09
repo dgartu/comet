@@ -203,7 +203,6 @@ def _build_engine_supervisor() -> EngineSupervisor:
         maximum_repair_jobs=settings.USENET_REPAIR_JOBS,
         parser_only=not settings.USENET_ENGINE_ENABLED,
         log_profile=logging_settings.LOG_PROFILE.value,
-        log_format=logging_settings.LOG_FORMAT.value,
         no_color=logging_settings.no_color,
     )
 
@@ -276,7 +275,7 @@ def _web_environment() -> dict[str, str]:
     environment = os.environ.copy()
     workers = settings.FASTAPI_WORKERS
     if workers == 0:
-        workers = min((os.cpu_count() or 1) * 2 + 1, 12)
+        workers = (os.cpu_count() or 1) * 2 + 1
     environment["COMET_RESOLVED_FASTAPI_WORKERS"] = str(workers)
     return environment
 

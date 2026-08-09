@@ -9,7 +9,6 @@ import zipfile
 from pathlib import Path
 
 import aiofiles
-import aiohttp
 import orjson
 import RTN
 
@@ -19,6 +18,7 @@ from comet.core.models import settings
 from comet.core.provider_json import is_success_status
 from comet.observability import log, run_context
 from comet.services.lock import DistributedLock
+from comet.utils.http_client import http_client_manager
 from comet.utils.lzstring import decompressFromEncodedURIComponent
 
 DMM_URL = "https://codeload.github.com/debridmediamanager/hashlists/zip/refs/heads/main"
@@ -30,29 +30,38 @@ _INFO_HASH = re.compile(r"[0-9a-fA-F]{40}")
 
 class DMMIngester:
     def __init__(self):
-        self.is_running = False
         self.semaphore = None
         self._configuration_changed = asyncio.Event()
+        self._runner_task = None
 
     async def start(self):
         if not settings.DMM_INGEST_ENABLED:
             return
 
-        if self.is_running:
+        if self._runner_task is not None:
             return
-        self.is_running = True
+        runner_task = asyncio.current_task()
+        self._runner_task = runner_task
         self.semaphore = asyncio.Semaphore(settings.DMM_INGEST_CONCURRENT_WORKERS)
-        await self._run_continuous()
+        try:
+            await self._run_continuous()
+        finally:
+            if self._runner_task is runner_task:
+                self._runner_task = None
 
     async def stop(self):
-        self.is_running = False
+        runner_task = self._runner_task
+        if runner_task is None:
+            return
+        runner_task.cancel()
+        await asyncio.gather(runner_task, return_exceptions=True)
 
     def reconfigure(self, config) -> None:
         self.semaphore = asyncio.Semaphore(config.DMM_INGEST_CONCURRENT_WORKERS)
         self._configuration_changed.set()
 
     async def _run_continuous(self):
-        while self.is_running:
+        while True:
             self._configuration_changed.clear()
             try:
                 lock = DistributedLock(LOCK_KEY, timeout=LOCK_TTL)
@@ -120,30 +129,27 @@ class DMMIngester:
         total_inserted = 0
 
         try:
-            timeout = aiohttp.ClientTimeout(total=600, connect=30, sock_read=300)
-            async with aiohttp.ClientSession(
-                timeout=timeout,
-            ) as session:
-                async with session.get(
-                    DMM_URL,
-                    allow_redirects=False,
-                    headers={
-                        "Accept": "application/zip",
-                        "Accept-Encoding": "identity",
-                    },
-                ) as response:
-                    if not is_success_status(response.status):
-                        raise RuntimeError("DMM archive download failed")
-                    downloaded = 0
-                    async with aiofiles.open(zip_path, "wb") as f:
-                        while True:
-                            chunk = await response.content.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            await f.write(chunk)
-                            downloaded += len(chunk)
-                    if not downloaded:
-                        raise ValueError("DMM archive download is empty")
+            session = await http_client_manager.get_session()
+            async with session.get(
+                DMM_URL,
+                allow_redirects=False,
+                headers={
+                    "Accept": "application/zip",
+                    "Accept-Encoding": "identity",
+                },
+            ) as response:
+                if not is_success_status(response.status):
+                    raise RuntimeError("DMM archive download failed")
+                downloaded = 0
+                async with aiofiles.open(zip_path, "wb") as f:
+                    while True:
+                        chunk = await response.content.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        await f.write(chunk)
+                        downloaded += len(chunk)
+                if not downloaded:
+                    raise ValueError("DMM archive download is empty")
             extract_dir = os.path.join(TEMP_DIR, "extracted")
             if os.path.exists(extract_dir):
                 shutil.rmtree(extract_dir)
@@ -165,9 +171,6 @@ class DMMIngester:
             batch_size = settings.DMM_INGEST_BATCH_SIZE
 
             for i in range(0, total_files, batch_size):
-                if not self.is_running:
-                    break
-
                 batch_files = new_files[i : i + batch_size]
 
                 async def process_file_with_sem(fp):
@@ -315,7 +318,7 @@ def process_file_sync(file_path):
             filename.encode("utf-8")
         except UnicodeEncodeError:
             continue
-        if any(ord(character) < 32 or ord(character) == 127 for character in filename):
+        if "\x00" in filename:
             continue
 
         parsed = RTN.parse(filename)
@@ -352,10 +355,6 @@ def extract_zip_sync(zip_path, extract_dir):
                 not member.filename
                 or "\\" in member.filename
                 or "\x00" in member.filename
-                or any(
-                    ord(character) < 32 or ord(character) == 127
-                    for character in member.filename
-                )
                 or member_path == Path(".")
                 or member_path.is_absolute()
                 or ".." in member_path.parts

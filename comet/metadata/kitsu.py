@@ -3,7 +3,7 @@ import re
 import aiohttp
 
 from comet.metadata.http import MetadataHttpError, get_metadata_json
-from comet.metadata.validation import metadata_text, metadata_year
+from comet.metadata.validation import metadata_text
 from comet.utils.year import parse_year
 
 _KITSU_ID = re.compile(r"[1-9][0-9]{0,18}")
@@ -27,8 +27,8 @@ def _extract_kitsu_metadata(payload: dict) -> tuple[str | None, int | None, int 
                     title = candidate
                     break
 
-    year = metadata_year(parse_year(attributes.get("startDate")))
-    year_end = metadata_year(parse_year(attributes.get("endDate")))
+    year = parse_year(attributes.get("startDate"))
+    year_end = parse_year(attributes.get("endDate"))
     if year is not None and year_end is not None and year_end < year:
         year_end = None
 

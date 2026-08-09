@@ -261,8 +261,6 @@ def recommend_knee(
     required_samples: int = 1,
 ) -> int | None:
     """Return a comparable 95%-of-best knee, or None for an incomplete sweep."""
-    if required_samples < 1:
-        raise ValueError("required_samples must be positive")
     by_value: dict[int, list[float]] = {}
     for sample in samples:
         if sample.completed:
@@ -320,7 +318,7 @@ def benchmark_connection_count(
                     assignment,
                     min(int(config["pipeline"]), MAX_PIPELINE),
                 )
-                for client, assignment in zip(clients, assignments, strict=True)
+                for client, assignment in zip(clients, assignments)
             ]
             results = [future.result() for future in futures]
             elapsed_ns = time.monotonic_ns() - started

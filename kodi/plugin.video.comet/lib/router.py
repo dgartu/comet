@@ -79,7 +79,7 @@ def _fetch_provider_meta(catalog_type: str, video_id: str):
             f"meta/{_provider_path(catalog_type)}/{_provider_path(video_id)}.json",
         )
     )
-    if not isinstance(response, dict):
+    if response is None:
         return None
     meta = response.get("meta")
     return meta if isinstance(meta, dict) else None
@@ -94,7 +94,7 @@ def _catalog_url(catalog_type: str, catalog_id: str, extra: str):
 
 
 def _catalog_specs(manifest: dict, catalog_type: str):
-    if not isinstance(manifest, dict):
+    if manifest is None:
         return []
     catalogs = manifest.get("catalogs")
     if not isinstance(catalogs, list):
@@ -349,7 +349,6 @@ def list_root():
 
     manifest = _fetch_provider_manifest()
     if not manifest:
-        xbmcplugin.endOfDirectory(ADDON_HANDLE)
         return
 
     movie_specs = _catalog_specs(manifest, "movie")
@@ -376,8 +375,6 @@ def list_root():
                 )
             )
         _add_directory_items(items)
-
-    xbmcplugin.endOfDirectory(ADDON_HANDLE)
 
 
 def open_settings(_params):
@@ -441,7 +438,6 @@ def list_catalog_type(params):
         )
 
     _add_directory_items(items)
-    xbmcplugin.endOfDirectory(ADDON_HANDLE)
 
 
 def list_catalog(params):
@@ -479,8 +475,6 @@ def list_catalog(params):
             ]
         )
 
-    xbmcplugin.endOfDirectory(ADDON_HANDLE)
-
 
 def search_catalog(params):
     if not ensure_configured():
@@ -504,7 +498,6 @@ def search_catalog(params):
         return
 
     _process_catalog_items(videos, catalog_type)
-    xbmcplugin.endOfDirectory(ADDON_HANDLE)
 
 
 def list_seasons(params):
@@ -561,7 +554,6 @@ def list_seasons(params):
         )
 
     _add_directory_items(items)
-    xbmcplugin.endOfDirectory(ADDON_HANDLE)
 
 
 def list_episodes(params):
@@ -636,7 +628,6 @@ def list_episodes(params):
         return
 
     _add_directory_items(items)
-    xbmcplugin.endOfDirectory(ADDON_HANDLE)
 
 
 def get_streams(params):
@@ -754,7 +745,6 @@ def get_streams(params):
         )
 
     _add_directory_items(stream_items)
-    xbmcplugin.endOfDirectory(ADDON_HANDLE)
 
 
 def play_video(params):
@@ -788,6 +778,14 @@ _ACTIONS = {
     "get_streams": get_streams,
     "play_video": play_video,
 }
+_DIRECTORY_ACTIONS = {
+    list_catalog_type,
+    list_catalog,
+    search_catalog,
+    list_seasons,
+    list_episodes,
+    get_streams,
+}
 
 
 def addon_router():
@@ -798,7 +796,16 @@ def addon_router():
         action = params.get("action")
         action_handler = _ACTIONS.get(action)
         if action_handler:
-            action_handler(params)
+            if action_handler in _DIRECTORY_ACTIONS:
+                try:
+                    action_handler(params)
+                finally:
+                    xbmcplugin.endOfDirectory(ADDON_HANDLE)
+            else:
+                action_handler(params)
             return
 
-    list_root()
+    try:
+        list_root()
+    finally:
+        xbmcplugin.endOfDirectory(ADDON_HANDLE)

@@ -24,15 +24,12 @@ from comet.usenet.engine_client import (
 )
 from comet.usenet.engine_transport import EngineUnavailable
 from comet.usenet.file_selection import (
-    FileSelectionError,
     UsenetAsset,
     catalog_engine_source_assets,
 )
-from comet.usenet.identity import partition_hex
 from comet.usenet.limits import (
     MAX_NZB_DOCUMENT_BYTES,
     MAX_NZB_FILES,
-    MAX_NZB_METADATA_BYTES,
 )
 
 _GRANT_TTL_SECONDS = 6 * 60 * 60
@@ -106,14 +103,6 @@ def normalize_nzb_document(
     if not decoded or len(decoded) > limit:
         raise NzbBrokerError("nzb_document_too_large")
     return decoded
-
-
-def _valid_artifact_identity(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 def _artifact_from_row(row) -> NzbArtifact:
@@ -206,7 +195,7 @@ class NzbBroker:
         now: float | None = None,
     ) -> NzbArtifact:
         document = normalize_nzb_document(document)
-        partition = partition_hex(owner_configuration_partition)
+        partition = owner_configuration_partition.hex()
         artifact_sha256 = hashlib.sha256(document).hexdigest()
         path = self._artifact_path(artifact_sha256)
         try:
@@ -216,16 +205,12 @@ class NzbBroker:
 
         current_time = time.time() if now is None else now
         expires_at = current_time + _GRANT_TTL_SECONDS
-        if parsed.get("version") != _NZB_PARSER_VERSION:
-            raise NzbBrokerError("nzb_parser_version_unsupported")
         manifest_document = orjson.dumps(
             {
                 "metadata": parsed["metadata"],
                 "files": parsed["manifest"],
             }
         )
-        if len(manifest_document) > MAX_NZB_METADATA_BYTES:
-            raise NzbBrokerError("nzb_metadata_too_large")
         manifest_json = manifest_document.decode("utf-8")
         grant_id = str(uuid.uuid4())
         # Publishing under the artifact-row transaction serializes resurrection
@@ -359,8 +344,6 @@ class NzbBroker:
         artifact: NzbArtifact,
     ) -> tuple[UsenetAsset, ...]:
         """Return Rust-derived, digest-bound source assets without NNTP work."""
-        if not isinstance(artifact, NzbArtifact):
-            raise NzbBrokerError("asset_catalog_invalid")
         try:
             engine_assets = await self._engine.catalog_nntp_artifact(
                 artifact.artifact_sha256,
@@ -375,7 +358,6 @@ class NzbBroker:
         except (
             EngineNntpError,
             EngineUnavailable,
-            FileSelectionError,
             ValueError,
         ) as exc:
             raise NzbBrokerError("asset_catalog_failed") from exc
@@ -388,13 +370,7 @@ class NzbBroker:
         now: float | None = None,
     ) -> NzbArtifactReader:
         """Lease an active owner-scoped artifact without accepting an HTTP path."""
-        try:
-            parsed_grant = uuid.UUID(grant_id)
-        except (TypeError, ValueError, AttributeError) as exc:
-            raise NzbBrokerError("invalid_artifact_grant") from exc
-        if str(parsed_grant) != grant_id:
-            raise NzbBrokerError("invalid_artifact_grant")
-        partition = partition_hex(owner_configuration_partition)
+        partition = owner_configuration_partition.hex()
         current_time = time.time() if now is None else now
         lease_id = str(uuid.uuid4())
         async with self._database.transaction():
@@ -467,19 +443,16 @@ class NzbBroker:
                 or artifact_stat.st_size != row["byte_size"]
             ):
                 raise NzbBrokerError("artifact_storage_corrupt")
-        except OSError as exc:
-            await self._database.execute(
-                "DELETE FROM artifact_reader_leases WHERE lease_id = :lease_id",
-                {"lease_id": lease_id},
-                force_primary=True,
+        except BaseException as exc:
+            await asyncio.shield(
+                self._database.execute(
+                    "DELETE FROM artifact_reader_leases WHERE lease_id = :lease_id",
+                    {"lease_id": lease_id},
+                    force_primary=True,
+                )
             )
-            raise NzbBrokerError("artifact_storage_unavailable") from exc
-        except NzbBrokerError:
-            await self._database.execute(
-                "DELETE FROM artifact_reader_leases WHERE lease_id = :lease_id",
-                {"lease_id": lease_id},
-                force_primary=True,
-            )
+            if isinstance(exc, OSError):
+                raise NzbBrokerError("artifact_storage_unavailable") from exc
             raise
         return NzbArtifactReader(
             self._database,
@@ -497,9 +470,7 @@ class NzbBroker:
         now: float | None = None,
     ) -> NzbArtifactReader:
         """Lease an active owner grant selected by immutable artifact identity."""
-        if not _valid_artifact_identity(artifact_sha256):
-            raise NzbBrokerError("invalid_artifact_identity")
-        partition = partition_hex(owner_configuration_partition)
+        partition = owner_configuration_partition.hex()
         current_time = time.time() if now is None else now
         grant = await self._database.fetch_one(
             """
@@ -569,16 +540,13 @@ class NzbBroker:
         now: float | None = None,
     ) -> dict[str, NzbArtifact]:
         """Resolve a bounded owner-scoped artifact set in database-safe batches."""
-        if not isinstance(artifact_sha256s, (list, tuple)):
-            raise NzbBrokerError("invalid_artifact_identity")
-        if len(artifact_sha256s) > MAX_NZB_FILES or any(
-            not _valid_artifact_identity(identity) for identity in artifact_sha256s
-        ):
+        if len(artifact_sha256s) > MAX_NZB_FILES:
             raise NzbBrokerError("invalid_artifact_identity")
         identities = tuple(dict.fromkeys(artifact_sha256s))
         if not identities:
             return {}
         current_time = time.time() if now is None else now
+        partition = owner_configuration_partition.hex()
         rows = []
         for offset in range(0, len(identities), _DATABASE_BATCH_SIZE):
             batch = identities[offset : offset + _DATABASE_BATCH_SIZE]
@@ -614,9 +582,7 @@ class NzbBroker:
                     {
                         **identity_params,
                         "parser_version": _NZB_PARSER_VERSION,
-                        "owner_configuration_partition": partition_hex(
-                            owner_configuration_partition
-                        ),
+                        "owner_configuration_partition": partition,
                         "now": current_time,
                     },
                     force_primary=True,
@@ -681,92 +647,3 @@ class NzbBroker:
         for row in rows:
             resolved[row["artifact_sha256"]] = _artifact_from_row(row)
         return resolved
-
-    async def resolve_granted_artifact(
-        self,
-        grant_id: str,
-        *,
-        owner_configuration_partition: bytes,
-        now: float | None = None,
-    ) -> NzbArtifact:
-        """Load parsed metadata through an exact owner-bound grant."""
-        try:
-            parsed_grant = uuid.UUID(grant_id)
-        except (TypeError, ValueError, AttributeError) as exc:
-            raise NzbBrokerError("invalid_artifact_grant") from exc
-        if str(parsed_grant) != grant_id:
-            raise NzbBrokerError("invalid_artifact_grant")
-        current_time = time.time() if now is None else now
-        row = await self._database.fetch_one(
-            """
-            SELECT grants.grant_id, grants.expires_at,
-                   artifacts.artifact_sha256,
-                   contents.posting_set_identity AS nh1,
-                   contents.manifest_identity AS nm1,
-                   contents.manifest_json, artifacts.byte_size
-            FROM nzb_artifact_grants AS grants
-            JOIN nzb_artifacts AS artifacts
-              ON artifacts.artifact_sha256 = grants.artifact_sha256
-            JOIN nzb_contents AS contents
-              ON contents.manifest_identity =
-                 artifacts.source_manifest_identity
-             AND contents.parser_version = :parser_version
-            WHERE grants.grant_id = :grant_id
-              AND grants.owner_configuration_partition =
-                  :owner_configuration_partition
-              AND grants.expires_at >= :now
-              AND artifacts.storage_kind = 'nzb'
-              AND artifacts.publication_state = 'published'
-            """,
-            {
-                "grant_id": grant_id,
-                "parser_version": _NZB_PARSER_VERSION,
-                "owner_configuration_partition": partition_hex(
-                    owner_configuration_partition
-                ),
-                "now": current_time,
-            },
-            force_primary=True,
-        )
-        if row is None:
-            raise NzbBrokerError("artifact_grant_unavailable")
-        return await self._resolved_artifact(row, current_time)
-
-    async def _resolved_artifact(self, row, current_time: float) -> NzbArtifact:
-        artifact = _artifact_from_row(row)
-        await self._database.execute(
-            """
-            UPDATE nzb_artifact_grants
-            SET last_used_at = :now
-            WHERE grant_id = :grant_id
-            """,
-            {"now": current_time, "grant_id": row["grant_id"]},
-            force_primary=True,
-        )
-        await self._database.execute(
-            """
-            UPDATE nzb_contents
-            SET last_used_at = :now
-            WHERE manifest_identity = :manifest_identity
-              AND parser_version = :parser_version
-            """,
-            {
-                "now": current_time,
-                "manifest_identity": row["nm1"],
-                "parser_version": _NZB_PARSER_VERSION,
-            },
-            force_primary=True,
-        )
-        await self._database.execute(
-            """
-            UPDATE nzb_artifacts
-            SET last_used_at = :now
-            WHERE artifact_sha256 = :artifact_sha256
-            """,
-            {
-                "now": current_time,
-                "artifact_sha256": row["artifact_sha256"],
-            },
-            force_primary=True,
-        )
-        return artifact

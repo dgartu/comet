@@ -2,7 +2,6 @@ import asyncio
 import gzip
 import json
 import os
-import random
 import re
 import secrets
 import time
@@ -18,12 +17,10 @@ from databases import Database
 from comet.core.database import IS_SQLITE
 from comet.core.models import settings
 
-_DATABASE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+_DATABASE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MAX_IMPORT_METADATA_BYTES = 64 * 1024
 _MAX_IMPORT_ROW_BYTES = 8 * 1024 * 1024
-_MAX_IMPORT_OBJECT_KEYS = 1_024
 _MAX_EXPORT_CHUNK_BYTES = 8 * 1024 * 1024
-_MAX_DATABASE_BATCH_SIZE = 100_000
 _OVERSIZED_RECORD = object()
 
 
@@ -36,15 +33,6 @@ def _validate_identifier(value: str, *, field: str) -> str:
     return value
 
 
-def _json_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key not in result and len(result) >= _MAX_IMPORT_OBJECT_KEYS:
-            raise ValueError("too many JSON keys")
-        result[key] = value
-    return result
-
-
 def _reject_json_constant(_value):
     raise ValueError("invalid JSON constant")
 
@@ -53,10 +41,9 @@ def _decode_json_object(document: bytes) -> dict:
     try:
         payload = json.loads(
             document.decode("utf-8"),
-            object_pairs_hook=_json_object,
             parse_constant=_reject_json_constant,
         )
-    except (UnicodeDecodeError, ValueError, RecursionError):
+    except (ValueError, RecursionError):
         raise ValueError("invalid import JSON object") from None
     if not isinstance(payload, dict):
         raise ValueError("invalid import JSON object")
@@ -87,14 +74,8 @@ def _iter_bounded_records(stream: BinaryIO, maximum: int) -> Iterator[bytes | No
 
 
 def _normalize_batch_size(value: int) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 1 <= value <= _MAX_DATABASE_BATCH_SIZE
-    ):
-        raise ValueError(
-            f"database batch size must be between 1 and {_MAX_DATABASE_BATCH_SIZE}"
-        )
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("database batch size must be positive")
     return value
 
 
@@ -162,7 +143,6 @@ class DatabaseManager:
     def __init__(self, database: Database):
         self.database = database
         self.batch_size = _normalize_batch_size(settings.DATABASE_BATCH_SIZE)
-        self._lock_retry_count = 0
 
     async def _get_sqlite_table_info(self, table_name: str) -> TableInfo:
         table_name = _validate_identifier(table_name, field="table name")
@@ -290,7 +270,6 @@ class DatabaseManager:
         )
 
     async def get_table_info(self, table_name: str):
-        table_name = _validate_identifier(table_name, field="table name")
         table_info = (
             await self._get_sqlite_table_info(table_name)
             if IS_SQLITE
@@ -458,14 +437,12 @@ class DatabaseManager:
         file_size_mb = output_file.stat().st_size / (1024 * 1024)
         duration = time.time() - start_time
 
-        stats = ExportStats(
+        return ExportStats(
             table=table_name,
             exported_rows=exported_rows,
             duration_seconds=duration,
             file_size_mb=file_size_mb,
         )
-
-        return stats
 
     def _build_upsert_query(self, table_info: TableInfo, columns: list[str]):
         table_name = _validate_identifier(table_info.name, field="table name")
@@ -504,8 +481,6 @@ class DatabaseManager:
             metadata = _decode_json_object(metadata_line)
 
             metadata_table_name = metadata.get("table_name")
-            if not isinstance(metadata_table_name, str):
-                raise ValueError("invalid import table name")
             actual_table_name = _validate_identifier(
                 table_name or metadata_table_name,
                 field="table name",
@@ -548,10 +523,9 @@ class DatabaseManager:
             # Build upsert query
             upsert_query = self._build_upsert_query(table_info, import_columns)
 
-            # Process data in batches with adaptive batch size
+            # Process data in batches.
             current_batch = []
             row_count = 0
-            adaptive_batch_size = batch_size
 
             for line in _iter_bounded_records(f, _MAX_IMPORT_ROW_BYTES):
                 if not line:
@@ -569,8 +543,7 @@ class DatabaseManager:
 
                     current_batch.append(filtered_row)
 
-                    # Process batch when it reaches the adaptive batch size
-                    if len(current_batch) >= adaptive_batch_size:
+                    if len(current_batch) >= batch_size:
                         batch_processed = await self._process_batch(
                             upsert_query,
                             current_batch,
@@ -579,23 +552,7 @@ class DatabaseManager:
                         error_rows += len(current_batch) - batch_processed
                         current_batch = []
 
-                        # Adjust batch sizes according to locking issues
-                        if self._lock_retry_count > 3:
-                            # Reduce batch sizes if there are too many locking issues
-                            adaptive_batch_size = max(1000, adaptive_batch_size // 2)
-                            self._lock_retry_count = 0
-                        elif (
-                            self._lock_retry_count == 0
-                            and adaptive_batch_size < batch_size
-                        ):
-                            # Increase gradually if there are no issues
-                            adaptive_batch_size = min(
-                                batch_size, int(adaptive_batch_size * 1.5)
-                            )
-
                 except ValueError:
-                    error_rows += 1
-                except Exception:
                     error_rows += 1
 
             # Process final batch
@@ -609,7 +566,7 @@ class DatabaseManager:
 
         duration = time.time() - start_time
 
-        stats = ImportStats(
+        return ImportStats(
             table=actual_table_name,
             total_rows=total_rows,
             processed_rows=processed_rows,
@@ -617,46 +574,14 @@ class DatabaseManager:
             duration_seconds=duration,
         )
 
-        return stats
-
-    async def _process_batch_with_retry(
-        self, query: str, batch_data: list[dict], max_retries: int = 5
-    ):
-        had_lock_error = False
-
-        for attempt in range(max_retries + 1):
-            try:
-                async with self.database.transaction():
-                    await self.database.execute_many(query, batch_data)
-                    if had_lock_error and self._lock_retry_count > 0:
-                        self._lock_retry_count -= 1
-                    return len(batch_data)
-
-            except Exception as e:
-                error_msg = str(e).lower()
-
-                if "locked" in error_msg:
-                    had_lock_error = True
-                    self._lock_retry_count += 1
-
-                    if attempt < max_retries:
-                        wait_time = min(16, (2**attempt)) + random.uniform(0.1, 0.5)
-                        await asyncio.sleep(wait_time)
-                        continue
-                    else:
-                        raise
-                else:
-                    raise
-
-        return 0
-
     async def _process_batch(self, query: str, batch_data: list[dict]):
         if not batch_data:
             return 0
 
         try:
-            return await self._process_batch_with_retry(query, batch_data)
-
+            async with self.database.transaction():
+                await self.database.execute_many(query, batch_data)
+            return len(batch_data)
         except Exception:
             return await self._process_batch_individual(query, batch_data)
 

@@ -194,7 +194,7 @@ async def _consume_pending_command(
             finished_at = :finished_at,
             outcome = :outcome,
             error_code = :error_code
-        WHERE id = :id
+        WHERE id = :id AND status = 'acknowledged'
         """,
         {
             "id": claimed["id"],
@@ -331,24 +331,28 @@ async def _dispatch_commands(
         commands,
     )
     identifiers = [command["id"] for command in commands]
+    identifier_params = {
+        f"command_id_{index}": identifier
+        for index, identifier in enumerate(identifiers)
+    }
+    identifier_placeholders = ", ".join(
+        f":command_id_{index}" for index in range(len(identifiers))
+    )
     deadline = time.monotonic() + _COMMAND_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        rows = await asyncio.gather(
-            *(
-                command_database.fetch_one(
-                    """
-                    SELECT id, outcome, error_code
-                    FROM operator_commands
-                    WHERE id = :id AND status = 'finished'
-                    """,
-                    {"id": identifier},
-                    force_primary=True,
-                )
-                for identifier in identifiers
-            )
+        rows = await command_database.fetch_all(
+            f"""
+            SELECT id, outcome, error_code
+            FROM operator_commands
+            WHERE id IN ({identifier_placeholders})
+              AND status = 'finished'
+            """,
+            identifier_params,
+            force_primary=True,
         )
-        if all(row is not None for row in rows):
-            return [dict(row) for row in rows if row is not None]
+        if len(rows) == len(identifiers):
+            by_id = {row["id"]: dict(row) for row in rows}
+            return [by_id[identifier] for identifier in identifiers]
         await asyncio.sleep(0.05)
     await command_database.execute_many(
         """
@@ -357,7 +361,7 @@ async def _dispatch_commands(
             finished_at = :finished_at,
             outcome = 'expired',
             error_code = 'command_timeout'
-        WHERE id = :id AND status = 'pending'
+        WHERE id = :id AND status IN ('pending', 'acknowledged')
         """,
         [{"id": identifier, "finished_at": time.time()} for identifier in identifiers],
     )

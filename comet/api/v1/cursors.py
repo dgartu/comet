@@ -23,7 +23,7 @@ def decode_timestamp_cursor(cursor: str, *, subject: str) -> tuple[float, str]:
                 validate=True,
             )
         )
-    except (TypeError, ValueError, orjson.JSONDecodeError):
+    except (TypeError, ValueError):
         value = None
     if (
         not isinstance(value, list)
@@ -33,8 +33,7 @@ def decode_timestamp_cursor(cursor: str, *, subject: str) -> tuple[float, str]:
         or not math.isfinite(value[0])
         or value[0] < 0
         or not isinstance(value[1], str)
-        or not 1 <= len(value[1].encode("utf-8")) <= 128
-        or any(ord(character) < 32 or ord(character) == 127 for character in value[1])
+        or not value[1]
     ):
         raise ApiProblem(
             status_code=422,

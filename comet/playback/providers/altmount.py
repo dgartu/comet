@@ -24,9 +24,9 @@ from comet.playback.base import (
     Readiness,
 )
 from comet.usenet.file_selection import matches_episode_path
-from comet.usenet.limits import MAX_NZB_METADATA_BYTES
 from comet.usenet.upstream import UpstreamUrlError, normalize_upstream_base_url
 from comet.utils.parsing import is_video
+from comet.utils.text import has_ascii_control
 
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5, sock_read=10)
 _MAX_RESPONSE_BYTES = 512 * 1024
@@ -60,9 +60,7 @@ def _bounded_text(value: object, maximum_bytes: int) -> bool:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return len(encoded) <= maximum_bytes and not any(
-        ord(character) < 32 or ord(character) == 127 for character in value
-    )
+    return len(encoded) <= maximum_bytes and not has_ascii_control(value)
 
 
 class AltMountProvider:
@@ -141,25 +139,8 @@ class AltMountProvider:
     ) -> str:
         if selection == (0,):
             prefix = "Comet.Movie"
-        elif (
-            len(selection) == 3
-            and selection[0] == 1
-            and all(
-                isinstance(value, int)
-                and not isinstance(value, bool)
-                and 0 <= value <= 999
-                for value in selection[1:]
-            )
-        ):
-            prefix = f"Comet.S{selection[1]:02d}E{selection[2]:02d}"
         else:
-            raise ValueError("AltMount selection is invalid")
-        if (
-            not isinstance(artifact_sha256, str)
-            or len(artifact_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in artifact_sha256)
-        ):
-            raise ValueError("AltMount artifact is invalid")
+            prefix = f"Comet.S{selection[1]:02d}E{selection[2]:02d}"
         return f"{prefix}.{artifact_sha256}.nzb"
 
     @staticmethod
@@ -341,15 +322,6 @@ class AltMountProvider:
         options = self._options(config)
         if options is None or self._session is None:
             raise ValueError("AltMount configuration is unavailable")
-        if (
-            not isinstance(document, bytes)
-            or not document
-            or len(document) > MAX_NZB_METADATA_BYTES
-            or not isinstance(artifact_sha256, str)
-            or len(artifact_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in artifact_sha256)
-        ):
-            raise ValueError("invalid AltMount artifact submission")
         base_url, api_key = options
         category = self.category_for(config)
         filename = self.filename_for(artifact_sha256, selection)

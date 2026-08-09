@@ -33,6 +33,12 @@ class _Response:
     async def __aexit__(self, *_args):
         return False
 
+    async def read(self):
+        body = bytearray()
+        while chunk := await self.content.read(64 * 1024):
+            body.extend(chunk)
+        return bytes(body)
+
 
 class _Session:
     def __init__(self, response):
@@ -69,24 +75,16 @@ def test_generated_nzb_form_quotes_provider_signatures():
     assert b"unsafe%26other%3Dvalue" in form
 
 
-def test_easynews_text_fields_keep_character_bounds_and_require_valid_utf8():
-    assert credential("é" * 512) == "é" * 512
+def test_easynews_credentials_must_be_nonempty_valid_utf8():
+    assert credential("é" * 513) == "é" * 513
     with pytest.raises(ValueError, match="credential"):
-        credential("é" * 513)
+        credential("")
     with pytest.raises(ValueError, match="credential"):
         credential("\ud800")
-    generated_nzb_form(_payload(extension="é" * 32))
-    for field, value in (
-        ("hash", "\ud800"),
-        ("extension", "é" * 33),
-        ("signature", "\ud800"),
-    ):
-        with pytest.raises(ValueError):
-            generated_nzb_form(_payload(**{field: value}))
 
 
 class EasynewsGeneratedNzbTests(unittest.IsolatedAsyncioTestCase):
-    async def test_generation_uses_exact_account_form_and_returns_bounded_xml(self):
+    async def test_generation_uses_exact_account_form_and_returns_xml(self):
         document = b'<?xml version="1.0"?><nzb></nzb>'
         session = _Session(
             _Response(

@@ -9,14 +9,13 @@ from comet.services.torrent_manager import extract_trackers_from_magnet
 
 BASE_URL = "https://nekobt.to/api/v1/torrents/search"
 PAGE_LIMIT = 100
-_MAX_RESULTS_PER_SEARCH = 10_000
 
 
 class NekoBTScraper(TorrentDiscoveryAdapter):
     anime_only_setting = "NEKOBT_ANIME_ONLY"
 
-    def __init__(self, manager, session):
-        super().__init__(manager, session)
+    def __init__(self, session):
+        super().__init__(session)
 
     def _parse_torrent(self, item: dict) -> dict:
         info_hash = item["infohash"]
@@ -56,26 +55,12 @@ class NekoBTScraper(TorrentDiscoveryAdapter):
     async def _fetch_all(self, base_params: dict) -> tuple[list[dict], str | None]:
         params = {**base_params, "limit": PAGE_LIMIT, "offset": 0}
         torrents, more, media_id = await self._fetch_page(params)
-        if len(torrents) > _MAX_RESULTS_PER_SEARCH:
-            raise ValueError("NekoBT search exceeds the result limit")
-
-        if not more:
-            return torrents, media_id
-
-        for offset in range(
-            PAGE_LIMIT,
-            _MAX_RESULTS_PER_SEARCH,
-            PAGE_LIMIT,
-        ):
-            if not more:
-                return torrents, media_id
+        offset = PAGE_LIMIT
+        while more:
             params["offset"] = offset
             page_torrents, more, _ = await self._fetch_page(params)
             torrents.extend(page_torrents)
-            if len(torrents) > _MAX_RESULTS_PER_SEARCH:
-                raise ValueError("NekoBT search exceeds the result limit")
-        if more:
-            raise ValueError("NekoBT search exceeds the result limit")
+            offset += PAGE_LIMIT
         return torrents, media_id
 
     async def scrape(self, request: ScrapeRequest) -> list[dict]:

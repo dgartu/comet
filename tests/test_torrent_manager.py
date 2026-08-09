@@ -238,7 +238,7 @@ class TorrentDownloadLogTests(unittest.IsolatedAsyncioTestCase):
             "validate_http_url",
             new=AsyncMock(side_effect=torrent_manager.OutboundUrlError("invalid URL")),
         ):
-            result = await torrent_manager.download_torrent(None, url)
+            result = await torrent_manager.download_torrent(url)
 
         self.assertEqual(result, (None, None, None))
 
@@ -251,7 +251,7 @@ class TorrentDownloadLogTests(unittest.IsolatedAsyncioTestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "implementation failure"),
         ):
-            await torrent_manager.download_torrent(None, "https://example.com/torrent")
+            await torrent_manager.download_torrent("https://example.com/torrent")
 
     async def test_expected_magnet_resolution_failure_is_non_fatal(self):
         with patch.object(
@@ -321,7 +321,6 @@ class TorrentDownloadLogTests(unittest.IsolatedAsyncioTestCase):
             ) as client_session,
         ):
             result = await torrent_manager.download_torrent(
-                object(),
                 target.url,
                 allowed_private_origins=allowed,
             )
@@ -333,7 +332,7 @@ class TorrentDownloadLogTests(unittest.IsolatedAsyncioTestCase):
         )
         connector.assert_called_once()
         client_session.assert_called_once()
-        self.assertNotIn("auto_decompress", client_session.call_args.kwargs)
+        self.assertFalse(client_session.call_args.kwargs["auto_decompress"])
         self.assertEqual(
             session.request_kwargs,
             {
@@ -372,7 +371,7 @@ class TorrentDownloadLogTests(unittest.IsolatedAsyncioTestCase):
                 return_value=session,
             ),
         ):
-            result = await torrent_manager.download_torrent(None, target.url)
+            result = await torrent_manager.download_torrent(target.url)
 
         self.assertEqual(result, (None, info_hash, magnet))
 
@@ -408,7 +407,7 @@ class TorrentDownloadLogTests(unittest.IsolatedAsyncioTestCase):
                 return_value=session,
             ),
         ):
-            result = await torrent_manager.download_torrent(None, target.url)
+            result = await torrent_manager.download_torrent(target.url)
 
         self.assertEqual(result, (None, None, None))
 
@@ -439,7 +438,7 @@ class TorrentDownloadLogTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(torrent_manager.settings, "GET_TORRENT_TIMEOUT", 0.01),
         ):
-            result = await torrent_manager.download_torrent(None, target.url)
+            result = await torrent_manager.download_torrent(target.url)
 
         self.assertEqual(result, (None, None, None))
 
@@ -604,6 +603,36 @@ class TorrentPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         await queue.queue.join()
 
+    async def test_stop_cancels_and_joins_orphaned_metadata_resolution(self):
+        queue = torrent_manager.AddTorrentQueue(max_concurrent=1)
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def resolve():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        task = asyncio.create_task(resolve())
+        queue._inflight_resolutions[("a" * 40, "magnet:test")] = task
+        await started.wait()
+
+        await queue.stop()
+
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(task.done())
+        self.assertEqual(queue._inflight_resolutions, {})
+
+    def test_retry_delay_remains_finite_for_unbounded_attempt_counts(self):
+        queue = torrent_manager.TorrentUpdateQueue()
+        with patch.object(torrent_manager.random, "random", return_value=0):
+            self.assertEqual(
+                queue._retry_delay_seconds(1_000_000),
+                torrent_manager.DEFAULT_TORRENT_UPDATE_RETRY_MAX_DELAY,
+            )
+
     async def test_concurrent_resolutions_share_unexpected_failure(self):
         queue = torrent_manager.AddTorrentQueue(max_concurrent=1)
 
@@ -654,10 +683,15 @@ class TorrentPersistenceTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("worker failure")
 
         queue._tasks["persistence"] = asyncio.create_task(fail())
+        await queue.queue.put(object())
         await asyncio.sleep(0)
 
         with self.assertRaisesRegex(RuntimeError, "worker failure"):
             await queue.stop()
+
+        await queue.queue.join()
+        self.assertEqual(queue.queue.qsize(), 0)
+        self.assertTrue(all(task is None for task in queue._tasks.values()))
 
 
 if __name__ == "__main__":

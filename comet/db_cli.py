@@ -45,7 +45,7 @@ async def table_info_command(db_manager: DatabaseManager, table_name: str):
         table_info = await db_manager.get_table_info(table_name)
     except Exception:
         print("Table information could not be read.")
-        return
+        raise
 
     print(f"\nTable: {table_info.name}")
     print("=" * 50)
@@ -176,7 +176,7 @@ async def import_command(
             exc=exc,
         )
         print("Import failed.")
-        return
+        raise
 
     print("\nImport Results:")
     print("=" * 90)

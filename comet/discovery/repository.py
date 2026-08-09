@@ -1,7 +1,6 @@
 """Transport-neutral persistence for discovered release candidates."""
 
 import hashlib
-import math
 import secrets
 import time
 import uuid
@@ -98,14 +97,11 @@ class ReleaseDiscoveryRepository:
         next_refresh_at: float,
         now: float | None = None,
     ) -> Mapping[str, StoredCandidateIds]:
-        source_id = _canonical_uuid(
-            discovery_configuration_id,
-            "discovery configuration",
-        )
-        owner = _partition(owner_configuration_partition, "owner")
+        source_id = discovery_configuration_id
+        owner = owner_configuration_partition.hex()
         stored_owner = _PUBLIC_PARTITION.hex() if public_visibility else owner
         account = (
-            _partition(account_partition, "account")
+            account_partition.hex()
             if account_partition is not None and not public_visibility
             else None
         )
@@ -114,11 +110,11 @@ class ReleaseDiscoveryRepository:
             visibility_partition,
             public_visibility,
         )
-        branch = _fingerprint(branch_fingerprint, "branch")
+        branch = branch_fingerprint
         query_key = query_fingerprint(query)
         scope = search_scope(query)
         candidate_batch = tuple(candidates)
-        observed_at = time.time() if now is None else _timestamp(now)
+        observed_at = time.time() if now is None else now
         observed_at_ms = int(observed_at * 1_000)
         async with self._database.transaction():
             await self._database.execute(
@@ -140,7 +136,6 @@ class ReleaseDiscoveryRepository:
                 query,
                 scope,
                 candidate_batch,
-                origin_kind="discovery",
                 discovery_configuration_id=source_id,
                 owner_configuration_partition=owner_configuration_partition,
                 stored_owner_partition=stored_owner,
@@ -207,45 +202,8 @@ class ReleaseDiscoveryRepository:
                 query,
                 branch,
                 next_refresh_at=next_refresh_at,
-                now=observed_at,
             )
         return stored
-
-    async def persist_manual(
-        self,
-        candidate: ReleaseCandidate,
-        *,
-        origin_kind: str,
-        owner_configuration_partition: bytes,
-        now: float | None = None,
-    ) -> StoredCandidateIds:
-        """Persist one owner-scoped manual import without search coverage."""
-        if origin_kind not in {"manual_upload", "manual_url"}:
-            raise ValueError("manual locator origin is invalid")
-        _manual_candidate_id(candidate.candidate_id)
-        if candidate.media_id != candidate.candidate_id:
-            raise ValueError("manual candidate media identity is invalid")
-        owner = _partition(owner_configuration_partition, "owner")
-        observed_at = time.time() if now is None else _timestamp(now)
-        observed_at_ms = int(observed_at * 1_000)
-        query = MediaQuery(candidate.media_id, "movie")
-        async with self._database.transaction():
-            stored, _locator_ids = await self._persist_candidate_rows(
-                query,
-                query.scope,
-                (candidate,),
-                origin_kind=origin_kind,
-                discovery_configuration_id=None,
-                owner_configuration_partition=owner_configuration_partition,
-                stored_owner_partition=owner,
-                account_partition=None,
-                visibility_partition=owner,
-                public_visibility=False,
-                content_namespace="manual-v1",
-                observed_at_ms=observed_at_ms,
-                require_owner_policy=True,
-            )
-        return stored[candidate.candidate_id]
 
     async def persist_public_torrent_batch(
         self,
@@ -259,14 +217,13 @@ class ReleaseDiscoveryRepository:
         if not candidate_batch:
             return {}
         scope = search_scope(query)
-        observed_at = time.time() if now is None else _timestamp(now)
+        observed_at = time.time() if now is None else now
         observed_at_ms = int(observed_at * 1_000)
         async with self._database.transaction():
             stored, _locator_ids = await self._persist_candidate_rows(
                 query,
                 scope,
                 candidate_batch,
-                origin_kind="discovery",
                 discovery_configuration_id=(LEGACY_TORRENT_DISCOVERY_CONFIGURATION_ID),
                 owner_configuration_partition=_PUBLIC_PARTITION,
                 stored_owner_partition=_PUBLIC_PARTITION.hex(),
@@ -278,66 +235,8 @@ class ReleaseDiscoveryRepository:
             )
         return stored
 
-    async def manual_artifact_origin(
-        self,
-        candidate_id: str,
-        artifact_sha256: str,
-        *,
-        owner_configuration_partition: bytes,
-        now: float | None = None,
-    ) -> str:
-        """Authorize an imported candidate/artifact pair for follow-up selection."""
-        candidate_id = _manual_candidate_id(candidate_id)
-        artifact_sha256 = _fingerprint(artifact_sha256, "artifact")
-        owner = _partition(owner_configuration_partition, "owner")
-        observed_at = time.time() if now is None else _timestamp(now)
-        rows = await self._database.fetch_all(
-            """
-            SELECT
-                locator.locator_id, locator.locator_json,
-                locator.policy_json, locator.origin_kind
-            FROM release_candidates candidate
-            JOIN release_locators locator
-              ON locator.candidate_id = candidate.candidate_id
-            WHERE candidate.visibility_partition = :owner_partition
-              AND candidate.media_id = :manual_candidate_id
-              AND candidate.release_key = :manual_candidate_id
-              AND candidate.transport = 'usenet'
-              AND locator.owner_configuration_partition = :owner_partition
-              AND locator.locator_kind = 'nzb_artifact'
-              AND locator.origin_kind IN ('manual_upload', 'manual_url')
-              AND locator.tombstoned_at_ms IS NULL
-              AND (
-                  locator.source_expires_at_ms IS NULL
-                  OR locator.source_expires_at_ms > :now_ms
-              )
-            ORDER BY locator.locator_id
-            """,
-            {
-                "owner_partition": owner,
-                "manual_candidate_id": candidate_id,
-                "now_ms": int(observed_at * 1_000),
-            },
-            force_primary=True,
-        )
-        for row in rows:
-            locator = locator_from_json(
-                row["locator_id"],
-                "nzb_artifact",
-                row["locator_json"],
-                row["policy_json"],
-            )
-            if (
-                locator.artifact_sha256 == artifact_sha256
-                and locator.policy.owner_configuration_partition
-                == owner_configuration_partition
-            ):
-                return row["origin_kind"]
-        raise ValueError("manual artifact candidate is unavailable")
-
     async def resolve_candidate_id(self, candidate_id: str) -> str:
         """Resolve the permanent direct redirect for a merged candidate."""
-        candidate_id = _canonical_uuid(candidate_id, "candidate")
         canonical_id, _redirected = await self._resolve_candidate_id(candidate_id)
         return canonical_id
 
@@ -349,9 +248,8 @@ class ReleaseDiscoveryRepository:
         now: float | None = None,
     ) -> str:
         """Attach exact content identity evidence and merge duplicates."""
-        candidate_id = _canonical_uuid(candidate_id, "candidate")
         scheme, value = _candidate_identity(identity)
-        observed_at = time.time() if now is None else _timestamp(now)
+        observed_at = time.time() if now is None else now
         observed_at_ms = int(observed_at * 1_000)
         async with self._database.transaction():
             return await self._attach_identity(
@@ -367,8 +265,7 @@ class ReleaseDiscoveryRepository:
         scope: ReleaseScope,
         candidate_batch: tuple[ReleaseCandidate, ...],
         *,
-        origin_kind: str,
-        discovery_configuration_id: str | None,
+        discovery_configuration_id: str,
         owner_configuration_partition: bytes,
         stored_owner_partition: str,
         account_partition: str | None,
@@ -376,7 +273,6 @@ class ReleaseDiscoveryRepository:
         public_visibility: bool,
         content_namespace: str,
         observed_at_ms: int,
-        require_owner_policy: bool = False,
     ) -> tuple[dict[str, StoredCandidateIds], list[str]]:
         planned: list[tuple[ReleaseCandidate, dict[str, object]]] = []
         for candidate in candidate_batch:
@@ -420,8 +316,7 @@ class ReleaseDiscoveryRepository:
             canonical_id = candidate_ids[candidate_key]
             for identity in _candidate_identity_evidence(
                 candidate,
-                include_artifact_identity=origin_kind
-                not in {"manual_upload", "manual_url"},
+                include_artifact_identity=True,
             ):
                 scheme, value = _candidate_identity(
                     identity,
@@ -456,11 +351,6 @@ class ReleaseDiscoveryRepository:
                     raise ValueError(
                         "locator owner policy does not match discovery owner"
                     )
-                if (
-                    require_owner_policy
-                    and locator_policy_owner != owner_configuration_partition
-                ):
-                    raise ValueError("manual locator must bind its owner")
                 encoded_locator = locator_json(locator)
                 encoded_policy = policy_json(locator)
                 content_key = _content_key(
@@ -475,7 +365,7 @@ class ReleaseDiscoveryRepository:
                         {
                             "locator_id": _uuid7(observed_at_ms),
                             "candidate_id": candidate_id,
-                            "origin_kind": origin_kind,
+                            "origin_kind": "discovery",
                             "discovery_configuration_id": (discovery_configuration_id),
                             "owner_configuration_partition": (stored_owner_partition),
                             "account_partition": account_partition,
@@ -1044,8 +934,6 @@ class ReleaseDiscoveryRepository:
             )
             for row in returned:
                 resolved[(row["transport"], row["release_key"])] = row["candidate_id"]
-        if len(resolved) != len(rows):  # pragma: no cover - database corruption
-            raise RuntimeError("persisted discovery candidate disappeared")
         return resolved
 
     async def _upsert_canonical_torrent_identities(
@@ -1134,8 +1022,6 @@ class ReleaseDiscoveryRepository:
                 resolved[
                     (row["candidate_id"], row["locator_kind"], row["content_key"])
                 ] = row["locator_id"]
-        if len(resolved) != len(rows):  # pragma: no cover - database corruption
-            raise RuntimeError("persisted discovery locator disappeared")
         return resolved
 
     async def load_active(
@@ -1149,27 +1035,20 @@ class ReleaseDiscoveryRepository:
         public_visibility: bool = False,
         now: float | None = None,
     ) -> tuple[ReleaseCandidate, ...]:
-        owner = _partition(owner_configuration_partition, "owner")
-        account = (
-            _partition(account_partition, "account")
-            if account_partition is not None
-            else None
-        )
+        owner = owner_configuration_partition.hex()
+        account = account_partition.hex() if account_partition is not None else None
         if public_visibility:
             if visibility_partition not in (None, _PUBLIC_PARTITION):
                 raise ValueError("public visibility must use the public partition")
             visibility = _PUBLIC_PARTITION.hex()
         else:
-            visibility = _partition(
-                visibility_partition or owner_configuration_partition,
-                "visibility",
-            )
+            visibility = (visibility_partition or owner_configuration_partition).hex()
             if visibility == _PUBLIC_PARTITION.hex():
                 raise ValueError("private visibility partition must not be public")
-        branch = _fingerprint(branch_fingerprint, "branch")
+        branch = branch_fingerprint
         query_key = query_fingerprint(query)
         scope = search_scope(query)
-        observed_at = time.time() if now is None else _timestamp(now)
+        observed_at = time.time() if now is None else now
         observed_at_ms = int(observed_at * 1_000)
         rows = await self._database.fetch_all(
             """
@@ -1290,13 +1169,11 @@ def _candidate_values(
         if (
             not isinstance(candidate.candidate_id, str)
             or not 1 <= len(candidate.candidate_id) <= 128
-            or any(ord(character) < 32 for character in candidate.candidate_id)
         ):
             raise ValueError("candidate release key is invalid")
         if (
             not isinstance(candidate.title, str)
             or not 1 <= len(candidate.title) <= 1_024
-            or any(ord(character) < 32 for character in candidate.title)
         ):
             raise ValueError("candidate title is invalid")
     return {
@@ -1334,19 +1211,22 @@ def _attributes_json(candidate: ReleaseCandidate) -> str:
     source = candidate.source
     if not isinstance(source, str):
         raise ValueError("candidate source is invalid")
-    stats = _safe_attribute_value(candidate.transport_stats, 0)
+    stats = candidate.transport_stats
     if not isinstance(stats, dict):
         raise ValueError("candidate transport stats must be an object")
-    payload = orjson.dumps(
-        {
-            "source": source,
-            "transport_stats": stats,
-        },
-        option=orjson.OPT_SORT_KEYS,
-    ).decode()
-    if len(payload.encode()) > 65_536:
+    try:
+        payload = orjson.dumps(
+            {
+                "source": source,
+                "transport_stats": stats,
+            },
+            option=orjson.OPT_SORT_KEYS,
+        )
+    except TypeError as exc:
+        raise ValueError("candidate transport stats are not JSON-serializable") from exc
+    if len(payload) > 65_536:
         raise ValueError("candidate attributes JSON is too large")
-    return payload
+    return payload.decode()
 
 
 def _decode_attributes(
@@ -1366,7 +1246,7 @@ def _decode_attributes(
         or not isinstance(value["source"], str)
     ):
         raise ValueError("persisted candidate attributes are invalid")
-    stats = _safe_attribute_value(value["transport_stats"], 0)
+    stats = value["transport_stats"]
     if not isinstance(stats, dict):
         raise ValueError("persisted candidate attributes are invalid")
     return {
@@ -1380,51 +1260,6 @@ def decode_candidate_attributes(payload: str) -> dict[str, object]:
     return _decode_attributes(payload, trusted=True)
 
 
-def _safe_attribute_value(
-    value: object,
-    depth: int,
-    *,
-    unbounded: bool = False,
-) -> object:
-    if depth > 6:
-        raise ValueError("candidate attributes are too deeply nested")
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        if not -(2**63) <= value < 2**63:
-            raise ValueError("candidate attribute integer is out of range")
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("candidate attribute number is invalid")
-        return value
-    if isinstance(value, str):
-        if not unbounded and len(value) > 4_096:
-            raise ValueError("candidate attribute text is invalid")
-        return value
-    if isinstance(value, (list, tuple)):
-        if not unbounded and len(value) > 128:
-            raise ValueError("candidate attribute list is too large")
-        return [
-            _safe_attribute_value(item, depth + 1, unbounded=unbounded)
-            for item in value
-        ]
-    if isinstance(value, Mapping):
-        if len(value) > 128:
-            raise ValueError("candidate attribute object is too large")
-        result = {}
-        for key, item in value.items():
-            if not isinstance(key, str) or len(key) > 128:
-                raise ValueError("candidate attribute key is invalid")
-            result[key] = _safe_attribute_value(
-                item,
-                depth + 1,
-                unbounded=key == "tracker_sources",
-            )
-        return result
-    raise ValueError("candidate attribute value is unsupported")
-
-
 def _visibility_partition(
     owner_partition: bytes,
     visibility_partition: bytes | None,
@@ -1435,26 +1270,10 @@ def _visibility_partition(
             raise ValueError("public visibility must use the public partition")
         return _PUBLIC_PARTITION.hex()
     value = visibility_partition or owner_partition
-    encoded = _partition(value, "visibility")
+    encoded = value.hex()
     if encoded == _PUBLIC_PARTITION.hex():
         raise ValueError("public visibility requires explicit authorization")
     return encoded
-
-
-def _partition(value: bytes, field: str) -> str:
-    if not isinstance(value, bytes) or len(value) != 32:
-        raise ValueError(f"{field} partition must contain 32 bytes")
-    return value.hex()
-
-
-def _fingerprint(value: str, field: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in _FINGERPRINT_CHARS for character in value)
-    ):
-        raise ValueError(f"{field} fingerprint is invalid")
-    return value
 
 
 def _candidate_identity(
@@ -1520,33 +1339,6 @@ def _identity_lock_id(scheme: str, value: str) -> int:
         b"comet-candidate-identity-lock-v1\0" + scheme.encode() + b"\0" + value.encode()
     ).digest()
     return int.from_bytes(digest[:8], "big", signed=True)
-
-
-def _canonical_uuid(value: str, field: str) -> str:
-    try:
-        canonical = str(uuid.UUID(value))
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise ValueError(f"{field} identifier is invalid") from exc
-    if canonical != value:
-        raise ValueError(f"{field} identifier is invalid")
-    return canonical
-
-
-def _manual_candidate_id(value: str) -> str:
-    if not isinstance(value, str) or not value.startswith("manual:"):
-        raise ValueError("manual candidate identity is invalid")
-    identifier = value.removeprefix("manual:")
-    try:
-        _canonical_uuid(identifier, "manual candidate")
-    except ValueError as exc:
-        raise ValueError("manual candidate identity is invalid") from exc
-    if f"manual:{identifier}" != value:
-        raise ValueError("manual candidate identity is invalid")
-    return value
-
-
-def _timestamp(value: float) -> float:
-    return float(value)
 
 
 def _content_key(

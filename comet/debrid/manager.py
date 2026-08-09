@@ -4,23 +4,23 @@ import aiohttp
 
 from .stremthru import StremThru
 
-debrid_services = {
-    "realdebrid": {"extension": "RD"},
-    "alldebrid": {"extension": "AD"},
-    "premiumize": {"extension": "PM"},
-    "torbox": {"extension": "TB"},
-    "debridlink": {"extension": "DL"},
-    "stremthru": {"extension": "ST"},
-    "debrider": {"extension": "DB"},
-    "easydebrid": {"extension": "ED"},
-    "offcloud": {"extension": "OC"},
-    "pikpak": {"extension": "PP"},
-    "torrent": {"extension": "TORRENT"},
+_DEBRID_EXTENSIONS = {
+    "realdebrid": "RD",
+    "alldebrid": "AD",
+    "premiumize": "PM",
+    "torbox": "TB",
+    "debridlink": "DL",
+    "stremthru": "ST",
+    "debrider": "DB",
+    "easydebrid": "ED",
+    "offcloud": "OC",
+    "pikpak": "PP",
+    "torrent": "TORRENT",
 }
 
 
 def get_debrid_extension(debrid_service: str):
-    return debrid_services[debrid_service]["extension"]
+    return _DEBRID_EXTENSIONS[debrid_service]
 
 
 def build_addon_name(
@@ -34,7 +34,7 @@ def build_addon_name(
 
     for entry in debrid_entries:
         ext = get_debrid_extension(entry["service"])
-        if ext and ext not in extensions:
+        if ext not in extensions:
             extensions.append(ext)
 
     if enable_torrent and debrid_entries:
@@ -44,12 +44,8 @@ def build_addon_name(
         if extension and extension not in extensions:
             extensions.append(extension)
 
-    extension_str = "+".join(extensions) if extensions else ""
+    extension_str = "+".join(extensions)
     return f"{base_name}{(' | ' + extension_str) if extension_str else ''}"
-
-
-def build_stremthru_token(debrid_service: str, debrid_api_key: str):
-    return f"{debrid_service}:{debrid_api_key}"
 
 
 def build_account_key_hash(debrid_api_key: str) -> str:
@@ -81,16 +77,13 @@ def build_playback_media_id(
 def get_debrid_credentials(config: dict, service_index: int | None = None):
     debrid_entries = config.get("_debridEntries", [])
 
-    if (
-        debrid_entries
-        and service_index is not None
-        and 0 <= service_index < len(debrid_entries)
-    ):
-        entry = debrid_entries[service_index]
-        return entry["service"], entry["apiKey"]
-
     if debrid_entries:
-        entry = debrid_entries[0]
+        index = (
+            service_index
+            if service_index is not None and 0 <= service_index < len(debrid_entries)
+            else 0
+        )
+        entry = debrid_entries[index]
         return entry["service"], entry["apiKey"]
 
     return config.get("debridService", "torrent"), config.get("debridApiKey", "")
@@ -109,7 +102,7 @@ def get_debrid(
             session,
             video_id,
             media_only_id,
-            build_stremthru_token(debrid_service, debrid_api_key),
+            f"{debrid_service}:{debrid_api_key}",
             ip,
         )
 

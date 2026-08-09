@@ -50,6 +50,7 @@ async def current_metric_samples() -> tuple[MetricSample, ...]:
 async def refresh_usenet_metrics() -> None:
     global _engine_refreshed_at
     if not settings.USENET_ENABLED:
+        metrics.set_usenet_engine_stats(None)
         return
     loop = asyncio.get_running_loop()
     if loop.time() - _engine_refreshed_at < _REFRESH_SECONDS:
@@ -58,11 +59,10 @@ async def refresh_usenet_metrics() -> None:
         if loop.time() - _engine_refreshed_at < _REFRESH_SECONDS:
             return
         try:
-            async with asyncio.timeout(1):
-                snapshot = await EngineClient(
-                    Path(settings.USENET_RUNTIME_DIR) / "engine.json"
-                ).stats()
-        except (EngineUnavailable, TimeoutError):
+            snapshot = await EngineClient(
+                Path(settings.USENET_RUNTIME_DIR) / "engine.json"
+            ).stats()
+        except EngineUnavailable:
             metrics.set_usenet_engine_stats(None)
         else:
             metrics.set_usenet_engine_stats(snapshot)

@@ -149,13 +149,6 @@ def _candidate_from_rows(
     )
 
 
-def torrent_candidates_from_rows(
-    raw_rows: list[Any],
-) -> tuple[tuple[MediaQuery, ReleaseCandidate], ...]:
-    grouped = _group_rows(raw_rows)
-    return tuple(_candidate_from_rows(rows) for rows in grouped.values())
-
-
 def torrent_candidate_from_runtime(
     info_hash: str,
     torrent: Mapping[str, object],
@@ -204,6 +197,7 @@ def torrent_candidate_from_runtime(
         size=size,
         source=tracker,
         parsed=parsed,
+        media_info=torrent.get("mediaInfo"),
         transport_stats=transport_stats,
         identities=(f"btih:{info_hash}",),
         is_private=bool(torrent.get("isPrivate")),
@@ -361,7 +355,7 @@ class TorrentReleaseRepository:
                     row["locator_json"],
                     row["policy_json"],
                 )
-            except (KeyError, TypeError, ValueError, orjson.JSONDecodeError):
+            except (KeyError, TypeError, ValueError):
                 continue
             has_selection = locator.selection_title is not None
             selected_season_norm = (

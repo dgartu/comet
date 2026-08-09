@@ -3,7 +3,7 @@ from collections.abc import Mapping
 
 from fastapi import Request, WebSocket
 
-IP_PROXY_HEADERS = [
+IP_PROXY_HEADERS = (
     "cf-connecting-ip",  # Cloudflare
     "true-client-ip",  # Cloudflare Enterprise / Akamai
     "x-real-ip",  # Nginx default
@@ -17,26 +17,26 @@ IP_PROXY_HEADERS = [
     "forwarded",  # RFC 7239
     "x-appengine-user-ip",  # Google App Engine
     "cf-pseudo-ipv4",  # Cloudflare IPv6->IPv4
-    "X-AIOStreams-User-IP",  # AIOStreams
-]
+    "x-aiostreams-user-ip",  # AIOStreams
+)
+
+
+def _is_acceptable_ip(value: str, require_public: bool) -> bool:
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return not require_public or parsed.is_global
 
 
 def is_public_ip(ip: str) -> bool:
-    """Check if an IP address is public (not private, loopback, or reserved)."""
-    try:
-        parsed_ip = ipaddress.ip_address(ip)
-        return not parsed_ip.is_private and not parsed_ip.is_loopback
-    except ValueError:
-        return False
+    """Check if an IP address is globally reachable."""
+    return _is_acceptable_ip(ip, True)
 
 
 def is_valid_ip(ip: str) -> bool:
     """Check if a string is a valid IP address."""
-    try:
-        ipaddress.ip_address(ip)
-        return True
-    except ValueError:
-        return False
+    return _is_acceptable_ip(ip, False)
 
 
 def extract_ip_from_headers(
@@ -62,9 +62,7 @@ def extract_ip_from_headers(
         if header_name in ("x-forwarded-for", "x-forwarded", "forwarded-for"):
             for ip_part in header_value.split(","):
                 ip_part = ip_part.strip()
-                if is_valid_ip(ip_part) and (
-                    not require_public or is_public_ip(ip_part)
-                ):
+                if _is_acceptable_ip(ip_part, require_public):
                     return ip_part
         elif header_name == "forwarded":
             for part in header_value.split(","):
@@ -74,13 +72,11 @@ def extract_ip_from_headers(
                         ip_part = directive[4:].strip().strip('"')
                         if ip_part.startswith("[") and "]" in ip_part:
                             ip_part = ip_part[1 : ip_part.index("]")]
-                        if is_valid_ip(ip_part) and (
-                            not require_public or is_public_ip(ip_part)
-                        ):
+                        if _is_acceptable_ip(ip_part, require_public):
                             return ip_part
         else:
             ip_part = header_value.strip()
-            if is_valid_ip(ip_part) and (not require_public or is_public_ip(ip_part)):
+            if _is_acceptable_ip(ip_part, require_public):
                 return ip_part
 
     return None
@@ -96,7 +92,7 @@ def get_client_ip(request: Request | WebSocket) -> str:
 
     Returns empty string if no public IP found.
     """
-    real_ip = extract_ip_from_headers(dict(request.headers), require_public=True)
+    real_ip = extract_ip_from_headers(request.headers, require_public=True)
     if real_ip:
         return real_ip
 
@@ -106,25 +102,23 @@ def get_client_ip(request: Request | WebSocket) -> str:
     return ""
 
 
-def get_client_ip_any(request: Request | WebSocket) -> tuple[str, bool]:
+def get_client_ip_any(request: Request | WebSocket) -> str:
     """
     Get the client IP, including private IPs as fallback.
 
-    Returns:
-        Tuple of (ip_address, is_from_proxy_header)
-        Returns ("unknown", False) if nothing found.
+    Returns "unknown" if nothing is found.
     """
-    real_ip = extract_ip_from_headers(dict(request.headers), require_public=True)
+    real_ip = extract_ip_from_headers(request.headers, require_public=True)
     if real_ip:
-        return (real_ip, True)
+        return real_ip
 
-    real_ip = extract_ip_from_headers(dict(request.headers), require_public=False)
+    real_ip = extract_ip_from_headers(request.headers, require_public=False)
     if real_ip:
-        return (real_ip, True)
+        return real_ip
 
     if request.client and request.client.host:
         ip = request.client.host
         if is_valid_ip(ip):
-            return (ip, False)
+            return ip
 
-    return ("unknown", False)
+    return "unknown"

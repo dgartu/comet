@@ -21,12 +21,12 @@ class StrictKodiRequest(BaseModel):
 
 
 class GenerateSetupCodeRequest(StrictKodiRequest):
-    secret_string: str = Field(default="", max_length=65_536)
+    secret_string: str = ""
 
 
 class AssociateManifestRequest(StrictKodiRequest):
     code: str = Field(pattern=r"^[0-9a-f]{8}$")
-    manifest_url: str = Field(min_length=1, max_length=131_072)
+    manifest_url: str
 
 
 def _url_origin(parsed):
@@ -151,12 +151,7 @@ async def associate_manifest(request: Request, payload: AssociateManifestRequest
     description="Returns the Comet configuration for a setup code.",
 )
 async def get_manifest(code: str):
-    try:
-        b64config = await consume_b64config_for_setup_code(code)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=404, detail="Manifest not ready or setup code expired"
-        ) from exc
+    b64config = await consume_b64config_for_setup_code(code)
     if b64config is None:
         raise HTTPException(
             status_code=404, detail="Manifest not ready or setup code expired"

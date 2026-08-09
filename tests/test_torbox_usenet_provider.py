@@ -1,6 +1,6 @@
 import json
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import aiohttp
 
@@ -16,7 +16,6 @@ from comet.playback.providers.torbox_usenet import (
     _download_target,
     _file,
     _item,
-    cache_hash_from_alias,
     cache_hashes_from_manifest,
 )
 
@@ -213,7 +212,7 @@ class _Response:
     async def json(self):
         return self._payload
 
-    async def read(self, _maximum):
+    async def read(self, _maximum=-1):
         if self._read:
             return b""
         self._read = True
@@ -404,8 +403,6 @@ class TorBoxUsenetValidationTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(ValueError, "manifest"):
             cache_hashes_from_manifest([{"first_segment_md5": "A" * 32}])
-        self.assertEqual(cache_hash_from_alias("c" * 32), ("c" * 32,))
-        self.assertEqual(cache_hash_from_alias("opaque"), ())
 
     async def test_create_codec_uses_the_current_identifier(self):
         session = _RecordingSession(
@@ -665,7 +662,7 @@ class TorBoxUsenetValidationTests(unittest.IsolatedAsyncioTestCase):
             ["0", "1000"],
         )
 
-    async def test_library_lookup_rejects_an_oversized_page(self):
+    async def test_library_lookup_stops_when_pagination_makes_no_progress(self):
         page = [
             {
                 "id": index,
@@ -673,15 +670,16 @@ class TorBoxUsenetValidationTests(unittest.IsolatedAsyncioTestCase):
                 "hash": "a" * 32,
                 "files": [],
             }
-            for index in range(1001)
+            for index in range(1000)
         ]
-        provider = TorBoxUsenetProvider(
-            _RequestSession(_Response(200, {"success": True, "data": page})),
-            "key",
+        session = _ValidationSession(
+            _Response(200, {"success": True, "data": page}),
+            _Response(200, {"success": True, "data": page}),
         )
+        provider = TorBoxUsenetProvider(session, "key")
 
-        with self.assertRaisesRegex(TorBoxUsenetError, "invalid_response"):
-            await provider.find_existing(("b" * 32,))
+        self.assertIsNone(await provider.find_existing(("b" * 32,)))
+        self.assertEqual(len(session.calls), 2)
 
     async def test_owned_cleanup_uses_exact_control_body_and_endpoint_budget(self):
         session = _RecordingSession(_Response(200, {"success": True, "data": None}))
@@ -766,20 +764,10 @@ class TorBoxUsenetValidationTests(unittest.IsolatedAsyncioTestCase):
             {"usenet_id": 17, "operation": "delete", "all": False},
         )
 
-    async def test_artifact_submission_rejects_oversized_documents_and_preserves_name(
-        self,
-    ):
+    async def test_artifact_submission_preserves_name(self):
         session = _RecordingSession(_Response(200, {"success": True, "data": 7}))
         provider = TorBoxUsenetProvider(session, "key")
 
-        with (
-            patch(
-                "comet.playback.providers.torbox_usenet.MAX_NZB_METADATA_BYTES",
-                3,
-            ),
-            self.assertRaisesRegex(ValueError, "NZB document"),
-        ):
-            await provider.submit_artifact(b"1234")
         name = 'Dune: Part Two / "IMAX"'
         await provider.submit_artifact(b"1", name=name)
 

@@ -25,7 +25,7 @@ class CinemetaSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_extract_catalog_page({"metas": []}), ([], True, 0))
         self.assertEqual(
             _extract_catalog_page({"metas": [{"id": "tt1"}], "hasMore": 0}),
-            ([{"id": "tt1"}], True, 1),
+            ([{"id": "tt1"}], False, 1),
         )
 
     async def test_catalog_pagination_isolates_items_and_uses_raw_page_size(self):
@@ -59,7 +59,9 @@ class CinemetaSchemaTests(unittest.IsolatedAsyncioTestCase):
                     None,
                     {"season": True, "episode": 1},
                     {"season": 1, "episode": 1.5},
+                    {"season": "bad", "episode": 1},
                     {"season": 0, "episode": 1},
+                    {"season": 1, "episode": 1},
                     {"season": 2, "episode": 3},
                     {"season": 1, "number": 4},
                     {"season": "03", "episode": "005"},

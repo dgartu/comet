@@ -23,37 +23,22 @@ class _ClosedBinaryStderr:
         return False
 
 
-class ClosedStderr:
+class _ClosedStderr(_ClosedBinaryStderr):
     encoding = "utf-8"
     errors = "replace"
 
     def __init__(self) -> None:
         self.buffer = _ClosedBinaryStderr()
 
-    def write(self, payload: Any) -> int:
-        try:
-            return len(payload)
-        except Exception:
-            return 0
-
-    def flush(self) -> None:
-        return None
-
-    def fileno(self) -> int:
-        return 2
-
-    def isatty(self) -> bool:
-        return False
-
     def writable(self) -> bool:
         return True
 
 
-_closed_stderr = ClosedStderr()
+_closed_stderr = _ClosedStderr()
 
 
 def install_stderr_proxy() -> None:
     sys.stderr = _closed_stderr
 
 
-__all__ = ("ClosedStderr", "install_stderr_proxy")
+__all__ = ("install_stderr_proxy",)

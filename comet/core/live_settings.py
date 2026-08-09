@@ -55,7 +55,6 @@ async def _restart_cometnet(config) -> None:
 
 @dataclass(frozen=True, slots=True)
 class SettingsApplication:
-    revision: int
     live_keys: tuple[str, ...]
     component_keys: tuple[str, ...]
     restart_keys: tuple[str, ...]
@@ -72,12 +71,7 @@ class PreparedSettingsApplication:
 
 
 _apply_lock = asyncio.Lock()
-_observed_revision = 0
 _pending_restart_keys: tuple[str, ...] = ()
-
-
-def observed_revision() -> int:
-    return _observed_revision
 
 
 def pending_restart_keys() -> tuple[str, ...]:
@@ -85,8 +79,7 @@ def pending_restart_keys() -> tuple[str, ...]:
 
 
 def record_settings_application(application: SettingsApplication) -> None:
-    global _observed_revision, _pending_restart_keys
-    _observed_revision = application.revision
+    global _pending_restart_keys
     _pending_restart_keys = application.restart_keys
 
 
@@ -142,7 +135,6 @@ async def prepare_settings_application(database) -> PreparedSettingsApplication:
     if restart_keys:
         candidate._applied_settings_revision = current.APPLIED_SETTINGS_REVISION
     application = SettingsApplication(
-        payload.revision,
         live_keys,
         component_keys,
         restart_keys,

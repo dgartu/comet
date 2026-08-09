@@ -59,7 +59,7 @@ async def eligible_usenet_provider_badges(
         ),
     )
     badges = []
-    for binding, state in zip(bindings, states, strict=True):
+    for binding, state in zip(bindings, states):
         badge = _USENET_PROVIDER_BADGES.get(binding.binding.binding_kind)
         if badge is not None and state.eligible and badge not in badges:
             badges.append(badge)

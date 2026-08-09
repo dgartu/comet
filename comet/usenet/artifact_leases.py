@@ -79,7 +79,7 @@ class RenewableArtifactLease:
                 # heartbeat can recover after a transient database failure.
                 continue
 
-    async def close(self) -> None:
+    async def _close(self) -> None:
         async with self._close_lock:
             if self._closed:
                 return
@@ -102,11 +102,19 @@ class RenewableArtifactLease:
             )
             self._closed = True
 
+    async def close(self) -> None:
+        close_task = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            await close_task
+            raise
+
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
-        await asyncio.shield(self.close())
+        await self.close()
 
 
 class ArtifactReaderLease(RenewableArtifactLease):

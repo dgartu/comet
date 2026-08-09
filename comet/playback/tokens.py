@@ -13,7 +13,6 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from comet.core.capability_states import deterministic_cbor
 
-MAX_NZB_HANDOFF_LOCATORS = 3
 PLAYBACK_INTENT_TTL_SECONDS = 6 * 60 * 60
 _SALT = b"comet-capability-root-v1"
 _DOMAIN = b"comet-cap-v1\0"
@@ -119,7 +118,7 @@ def _valid_suffix(prefix: str, suffix: object) -> bool:
             and _is_uuid_bytes(suffix[0])
             and _is_uuid_bytes(suffix[1])
             and isinstance(suffix[2], list)
-            and 1 <= len(suffix[2]) <= 16
+            and bool(suffix[2])
             and all(_is_uuid_bytes(locator) for locator in suffix[2])
             and len(set(suffix[2])) == len(suffix[2])
             and _is_selection_intent(suffix[3])
@@ -131,7 +130,7 @@ def _valid_suffix(prefix: str, suffix: object) -> bool:
             and _is_uuid_bytes(suffix[0])
             and _is_uuid_bytes(suffix[1])
             and isinstance(suffix[2], list)
-            and 1 <= len(suffix[2]) <= MAX_NZB_HANDOFF_LOCATORS
+            and bool(suffix[2])
             and all(_is_uuid_bytes(locator) for locator in suffix[2])
             and len(set(suffix[2])) == len(suffix[2])
             and _is_selection_intent(suffix[3])

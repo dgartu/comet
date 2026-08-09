@@ -4,15 +4,15 @@ from unittest.mock import AsyncMock, patch
 from starlette.requests import Request
 
 from comet.api.endpoints.playback import (
-    _build_playback_media_id,
     _parse_playback_path,
-    _valid_download_url,
     playback,
 )
 from comet.debrid.link_cache import (
     cache_download_link_best_effort,
     get_cached_download_link,
+    valid_download_url,
 )
+from comet.debrid.manager import build_playback_media_id
 
 
 class PlaybackCacheTests(unittest.IsolatedAsyncioTestCase):
@@ -142,65 +142,21 @@ class PlaybackCacheTests(unittest.IsolatedAsyncioTestCase):
         )
         credentials.assert_called_once_with(config, 0)
 
-    async def test_legacy_playback_rejects_oversized_query_state_before_io(self):
-        request = Request(
-            {
-                "type": "http",
-                "method": "GET",
-                "scheme": "https",
-                "server": ("comet.example", 443),
-                "path": "/config/playback/legacy",
-                "query_string": b"",
-                "headers": (),
-                "client": ("127.0.0.1", 1234),
-            }
-        )
-        with (
-            patch(
-                "comet.api.endpoints.playback.config_check",
-                return_value={"schemaVersion": 1},
-            ),
-            patch(
-                "comet.api.endpoints.playback.get_debrid_credentials",
-            ) as credentials,
-            patch(
-                "comet.api.endpoints.playback.database.fetch_one",
-                AsyncMock(),
-            ) as database_read,
-        ):
-            response = await playback(
-                request,
-                "config",
-                "a" * 40,
-                "0",
-                "n",
-                "n",
-                "n",
-                torrent_name="x" * 2_049,
-                name="Movie",
-                media_id=None,
-                media_type=None,
-            )
-
-        self.assertEqual(response.status_code, 200)
-        credentials.assert_not_called()
-        database_read.assert_not_awaited()
-
     def test_playback_media_id_preserves_aggregate_series_scopes(self):
         self.assertEqual(
-            _build_playback_media_id("tt1234567", "series", None, None),
+            build_playback_media_id("tt1234567", "series", None, None),
             "tt1234567",
         )
         self.assertEqual(
-            _build_playback_media_id("tt1234567", "series", 2, None),
+            build_playback_media_id("tt1234567", "series", 2, None),
             "tt1234567:2",
         )
         self.assertEqual(
-            _build_playback_media_id("tt1234567", "series", 2, 3),
+            build_playback_media_id("tt1234567", "series", 2, 3),
             "tt1234567:2:3",
         )
         self.assertEqual(
-            _build_playback_media_id("tt1234567", "movie", None, None),
+            build_playback_media_id("tt1234567", "movie", None, None),
             "tt1234567",
         )
 
@@ -255,7 +211,7 @@ class PlaybackCacheTests(unittest.IsolatedAsyncioTestCase):
 
     def test_download_urls_require_absolute_http_current_shape(self):
         valid = "https://download.test/video?token=secret"
-        self.assertEqual(_valid_download_url(valid), valid)
+        self.assertEqual(valid_download_url(valid), valid)
 
         for value in (
             None,
@@ -275,7 +231,7 @@ class PlaybackCacheTests(unittest.IsolatedAsyncioTestCase):
             "https://download.test/" + "x" * 8192,
         ):
             with self.subTest(value=value):
-                self.assertIsNone(_valid_download_url(value))
+                self.assertIsNone(valid_download_url(value))
 
     async def test_link_cache_keys_file_selection_and_client_scope(self):
         database = type(

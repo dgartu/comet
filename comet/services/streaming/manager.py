@@ -3,7 +3,6 @@ import os
 import time
 import uuid
 
-import mediaflow_proxy.handlers
 import mediaflow_proxy.utils.http_utils
 from starlette.background import BackgroundTask
 
@@ -27,6 +26,13 @@ def _observe_cleanup_failure(operation: str, error: Exception) -> None:
     )
 
 
+async def _delete_active_connection(connection_id: str, ip: str) -> None:
+    await database.execute(
+        "DELETE FROM active_connections WHERE id = :connection_id AND ip = :ip",
+        {"connection_id": connection_id, "ip": ip},
+    )
+
+
 async def on_stream_end(
     connection_id: str,
     ip: str,
@@ -47,10 +53,13 @@ async def on_stream_end(
         _observe_cleanup_failure("bandwidth_cleanup", error)
 
     try:
-        await database.execute(
-            "DELETE FROM active_connections WHERE id = :connection_id AND ip = :ip",
-            {"connection_id": connection_id, "ip": ip},
-        )
+        await _delete_active_connection(connection_id, ip)
+    except asyncio.CancelledError as exc:
+        cancellation = cancellation or exc
+        try:
+            await _delete_active_connection(connection_id, ip)
+        except Exception as error:
+            _observe_cleanup_failure("database_cleanup", error)
     except Exception as error:
         _observe_cleanup_failure("database_cleanup", error)
 
@@ -105,10 +114,7 @@ async def add_active_connection(media_id: str, ip: str, service: str):
         )
     except BaseException:
         try:
-            await database.execute(
-                "DELETE FROM active_connections WHERE id = :connection_id AND ip = :ip",
-                {"connection_id": connection_id, "ip": ip},
-            )
+            await _delete_active_connection(connection_id, ip)
         except Exception as error:
             _observe_cleanup_failure("database_rollback", error)
         raise

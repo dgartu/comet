@@ -1,17 +1,16 @@
-import asyncio
 import xml.etree.ElementTree as ET
 
 from comet.core.models import settings
 from comet.core.provider_json import is_success_status
-from comet.discovery.torrent_base import TorrentDiscoveryAdapter
+from comet.discovery.torrent_base import TorrentDiscoveryAdapter, gather_concurrently
 from comet.discovery.torrent_models import ScrapeRequest
 
 
 class BitmagnetScraper(TorrentDiscoveryAdapter):
     url_setting = "BITMAGNET_URL"
 
-    def __init__(self, manager, session, url: str):
-        super().__init__(manager, session, url)
+    def __init__(self, session, url: str):
+        super().__init__(session, url)
 
     def parse_items(self, root):
         torrents = []
@@ -82,24 +81,19 @@ class BitmagnetScraper(TorrentDiscoveryAdapter):
         offset = 0
 
         while True:
-            if offset >= settings.BITMAGNET_MAX_OFFSET:
-                break
-
-            tasks = []
-            for i in range(batch_size):
-                current_offset = offset + (i * limit)
-                if current_offset >= settings.BITMAGNET_MAX_OFFSET:
-                    break
-                tasks.append(
-                    self.scrape_page(
-                        imdb_id, scrape_type, current_offset, limit, season, episode
-                    )
+            tasks = [
+                self.scrape_page(
+                    imdb_id,
+                    scrape_type,
+                    offset + i * limit,
+                    limit,
+                    season,
+                    episode,
                 )
+                for i in range(batch_size)
+            ]
 
-            if not tasks:
-                break
-
-            results = await asyncio.gather(*tasks)
+            results = await gather_concurrently(tasks)
 
             should_stop = False
             for batch_results in results:

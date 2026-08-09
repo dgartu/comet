@@ -15,7 +15,6 @@ from comet.playback.groups import (
 )
 from comet.playback.repository import RenderedCandidateIds
 from comet.playback.tokens import (
-    MAX_NZB_HANDOFF_LOCATORS,
     PLAYBACK_INTENT_TTL_SECONDS,
     CapabilityCodec,
 )
@@ -46,9 +45,7 @@ def build_provider_options(
         candidate_options = []
         for provider_id, locators in locators_by_provider.items():
             provider = providers_by_id[provider_id]
-            ordered = tuple(
-                sorted(locators, key=lambda locator: locator.locator_id)[:16]
-            )
+            ordered = tuple(sorted(locators, key=lambda locator: locator.locator_id))
             candidate_options.append(
                 ProviderOption(
                     candidate.candidate_id,
@@ -177,13 +174,12 @@ def issue_nzb_handoff_capability(
     ttl: int,
 ) -> str:
     """Create one reusable lazy handoff from committed NZB transforms."""
-    locators = option.locators[:MAX_NZB_HANDOFF_LOCATORS]
     suffix = [
         uuid.UUID(persisted.candidate_id).bytes,
         uuid.UUID(option.provider.configuration_id).bytes,
         [
             uuid.UUID(persisted.locator_ids[locator.locator_id]).bytes
-            for locator in locators
+            for locator in option.locators
         ],
         selection_intent,
         "stremio",

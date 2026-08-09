@@ -3,7 +3,6 @@ import re
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from urllib.parse import quote
 
 from comet.core.build_metadata import (
     normalize_branch,
@@ -14,14 +13,13 @@ from comet.core.models import settings
 from comet.core.provider_json import (
     ProviderJsonError,
     is_success_status,
-    read_provider_json,
+    read_json_object,
 )
 from comet.observability.context import create_detached_task
 from comet.utils.http_client import http_client_manager
 
 GITHUB_REPO = "g0ldyy/comet"
 GITHUB_DEVELOPMENT_BRANCH = "development"
-_GITHUB_RESPONSE_LIMIT = 64 * 1024
 _GITHUB_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -47,15 +45,8 @@ class UpdateCheckError(RuntimeError):
 
 
 class UpdateManager:
-    _instance = None
     _version_info: VersionInfo | None = None
-    _update_status: UpdateStatus | None = None
     _check_task: asyncio.Task | None = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     @classmethod
     def get_version_info(cls) -> VersionInfo:
@@ -79,61 +70,58 @@ class UpdateManager:
             )
             return cls._version_info
 
+        commit_hash = None
+        build_date = None
+        branch = "main"
+
         try:
-            commit_hash = None
-            build_date = None
-            branch = "main"
-
-            try:
-                commit_hash = (
-                    subprocess.check_output(
-                        ["git", "rev-parse", "--short", "HEAD"],
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                    )
-                    .decode()
-                    .strip()
+            commit_hash = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
                 )
-                commit_hash = normalize_commit(commit_hash)
-            except Exception:
-                pass
-
-            try:
-                build_date = (
-                    subprocess.check_output(
-                        ["git", "show", "-s", "--format=%cI", "HEAD"],
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                    )
-                    .decode()
-                    .strip()
-                )
-                build_date = normalize_build_date(build_date)
-            except Exception:
-                pass
-
-            try:
-                branch = (
-                    subprocess.check_output(
-                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                    )
-                    .decode()
-                    .strip()
-                )
-                branch = normalize_branch(branch) or "main"
-            except Exception:
-                pass
-
-            cls._version_info = VersionInfo(
-                commit_hash=commit_hash,
-                build_date=build_date,
-                branch=branch,
-                is_docker=False,
+                .decode()
+                .strip()
             )
+            commit_hash = normalize_commit(commit_hash)
         except Exception:
-            cls._version_info = VersionInfo()
+            pass
+
+        try:
+            build_date = (
+                subprocess.check_output(
+                    ["git", "show", "-s", "--format=%cI", "HEAD"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                .decode()
+                .strip()
+            )
+            build_date = normalize_build_date(build_date)
+        except Exception:
+            pass
+
+        try:
+            branch = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                .decode()
+                .strip()
+            )
+            branch = normalize_branch(branch) or "main"
+        except Exception:
+            pass
+
+        cls._version_info = VersionInfo(
+            commit_hash=commit_hash,
+            build_date=build_date,
+            branch=branch,
+            is_docker=False,
+        )
 
         return cls._version_info
 
@@ -163,11 +151,8 @@ class UpdateManager:
         )
 
         try:
-            if normalize_branch(branch) is None:
-                raise ValueError("current branch is unavailable or invalid")
             session = await http_client_manager.get_session()
-            branch_path = quote(branch, safe="")
-            url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/{branch_path}"
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/commits/{branch}"
             async with session.get(
                 url,
                 allow_redirects=False,
@@ -182,17 +167,14 @@ class UpdateManager:
                     raise UpdateCheckError(f"GitHub API returned {resp.status}")
 
                 try:
-                    data = await read_provider_json(
-                        resp,
-                        maximum=_GITHUB_RESPONSE_LIMIT,
-                    )
+                    data = await read_json_object(resp)
                 except ProviderJsonError as exc:
                     raise UpdateCheckError(
                         "GitHub API returned an invalid response"
                     ) from exc
                 latest_sha, latest_url, latest_date = cls._validate_latest_commit(data)
                 current_sha = current_info.commit_hash
-                if normalize_commit(current_sha) is None:
+                if current_sha is None:
                     raise ValueError("current commit hash is unavailable or invalid")
 
                 short_latest_sha = latest_sha[:7]
@@ -200,7 +182,7 @@ class UpdateManager:
                     latest_date,
                     current_info.build_date,
                 )
-                cls._update_status = UpdateStatus(
+                return UpdateStatus(
                     has_update=has_update,
                     latest_commit_hash=short_latest_sha,
                     latest_url=latest_url,
@@ -211,19 +193,14 @@ class UpdateManager:
                 error = str(exc)
             else:
                 error = "GitHub API request failed"
-            cls._update_status = UpdateStatus(
+            return UpdateStatus(
                 has_update=False,
                 error=error,
                 checked_at=datetime.now(UTC),
             )
 
-        return cls._update_status
-
     @staticmethod
-    def _validate_latest_commit(data) -> tuple[str, str, str]:
-        if type(data) is not dict:
-            raise ValueError("GitHub commit response must be an object")
-
+    def _validate_latest_commit(data: dict) -> tuple[str, str, str]:
         sha = data.get("sha")
         html_url = data.get("html_url")
         commit = data.get("commit")

@@ -31,6 +31,12 @@ class _Response:
     async def __aexit__(self, exc_type, exc, traceback):
         return False
 
+    async def read(self):
+        body = bytearray()
+        while chunk := await self.content.read(64 * 1024):
+            body.extend(chunk)
+        return bytes(body)
+
 
 class _Session:
     def __init__(self, response=None, error=None):
@@ -74,21 +80,23 @@ class MetadataHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.payload)
         self.assertEqual(response.content.reads, 0)
 
-    async def test_invalid_or_oversized_success_is_one_safe_error(self):
-        bodies = (
-            b"not-json",
-            b"{" + b'"value":"' + (b"x" * (2 * 1024 * 1024)) + b'"}',
+    async def test_invalid_success_is_one_safe_error(self):
+        with self.assertRaisesRegex(
+            MetadataHttpError,
+            "metadata service returned an invalid response",
+        ):
+            await get_metadata_json(
+                _Session(_Response(200, b"not-json")),
+                "https://metadata.example/item",
+            )
+
+    async def test_large_official_response_has_no_local_transport_cap(self):
+        body = b"{" + b'"value":"' + (b"x" * (2 * 1024 * 1024)) + b'"}'
+        result = await get_metadata_json(
+            _Session(_Response(200, body)),
+            "https://metadata.example/item",
         )
-        for body in bodies:
-            with self.subTest(size=len(body)):
-                with self.assertRaisesRegex(
-                    MetadataHttpError,
-                    "metadata service returned an invalid response",
-                ):
-                    await get_metadata_json(
-                        _Session(_Response(200, body)),
-                        "https://metadata.example/item",
-                    )
+        self.assertEqual(len(result.payload["value"]), 2 * 1024 * 1024)
 
     async def test_transport_details_are_not_retained(self):
         with self.assertRaisesRegex(

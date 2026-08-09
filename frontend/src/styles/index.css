@@ -19,7 +19,6 @@
     --color-live: #3bcb8d;
     --color-live-soft: rgb(59 203 141 / 10%);
     --color-usenet: #9a7cf8;
-    --color-usenet-soft: rgb(154 124 248 / 10%);
     --color-success: #3bcb8d;
     --color-warning: #ff9b50;
     --color-danger: #ff5c6c;
@@ -1381,9 +1380,6 @@
 
   .configuration-stage__header h1 {
     margin: 0;
-  }
-
-  .configuration-stage__header h1 {
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -1493,26 +1489,6 @@
     display: grid;
     gap: 1rem;
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .choice-grid {
-    min-width: 0;
-    margin: 0;
-    padding: 1rem;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-  }
-
-  .choice-grid {
-    display: grid;
-    gap: 0.35rem 1rem;
-    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  }
-
-  .choice-grid legend {
-    padding-inline: 0.4rem;
-    font-size: 0.82rem;
-    font-weight: 650;
   }
 
   .switch-list {
@@ -2031,15 +2007,9 @@
     padding: 0;
   }
 
-  .binding-card__note,
-  .binding-card__warning,
   .binding-card__account {
     margin: 0;
     font-size: 0.8rem;
-  }
-
-  .binding-card__warning {
-    color: var(--color-warning);
   }
 
   .binding-card__account {
@@ -2334,12 +2304,16 @@
   }
 
   .event-row__message {
+    display: flex;
+    min-width: 0;
+    gap: 0.65rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .event-row__message--wrap {
+    flex-wrap: wrap;
     overflow: visible;
     white-space: normal;
   }
@@ -2362,22 +2336,8 @@
     white-space: nowrap;
   }
 
-  .event-row__message {
-    display: flex;
-    min-width: 0;
-    gap: 0.65rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .event-row__message strong {
     color: var(--color-text);
-  }
-
-  .event-row__message--wrap {
-    flex-wrap: wrap;
-    white-space: normal;
   }
 
   .empty-state {
@@ -2764,10 +2724,6 @@
 
   .incident-list code {
     color: var(--color-danger);
-  }
-
-  .analytics-chart {
-    min-height: 31rem;
   }
 
   .analytics-chart .recharts-wrapper,
@@ -3572,9 +3528,6 @@
     display: grid;
     align-items: end;
     gap: 0.75rem;
-  }
-
-  .member-form {
     grid-template-columns: minmax(0, 1fr) minmax(8rem, 0.3fr) auto;
     margin-block: 1rem;
   }
@@ -4723,7 +4676,6 @@
     .field-grid,
     .language-groups,
     .binding-card__fields,
-    .choice-grid,
     .indexer-identity__choices,
     .indexer-identity__custom {
       grid-template-columns: 1fr;

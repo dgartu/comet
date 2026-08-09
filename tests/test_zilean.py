@@ -48,7 +48,7 @@ class ZileanScraperTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         )
-        scraper = ZileanScraper(None, _Session(response), "https://zilean.test")
+        scraper = ZileanScraper(_Session(response), "https://zilean.test")
         request = ScrapeRequest(
             media_type="movie",
             media_id="tt123",
@@ -67,7 +67,6 @@ class ZileanScraperTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_malformed_result_fails_the_source_batch(self):
         scraper = ZileanScraper(
-            None,
             _Session(_Response([{"raw_title": "Movie", "size": 100}])),
             "https://zilean.test",
         )
@@ -98,7 +97,7 @@ class ZileanScraperTests(unittest.IsolatedAsyncioTestCase):
         for media_id, episode, expected_params in cases:
             with self.subTest(episode=episode):
                 session = _Session(_Response([]))
-                scraper = ZileanScraper(None, session, "https://zilean.test")
+                scraper = ZileanScraper(session, "https://zilean.test")
                 request = ScrapeRequest(
                     media_type="series",
                     media_id=media_id,

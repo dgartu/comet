@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import orjson
 
+from comet.core.provider_json import MAX_PROVIDER_JSON_BYTES
 from comet.core.sources import TransportKind
 from comet.discovery.adapters.easynews import (
     EasynewsSearchAccount,
@@ -22,12 +23,20 @@ class _Response:
         self.headers = headers or {}
         self.document = payload if isinstance(payload, bytes) else orjson.dumps(payload)
         self.content = self
+        self.offset = 0
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *_args):
         return False
+
+    async def read(self, size=-1):
+        if size < 0:
+            return self.document
+        chunk = self.document[self.offset : self.offset + size]
+        self.offset += len(chunk)
+        return chunk
 
     async def iter_chunked(self, size):
         for offset in range(0, len(self.document), size):
@@ -47,6 +56,18 @@ class _Session:
 
 
 class EasynewsDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_response_is_bounded_before_json_decoding(self):
+        adapter = EasynewsSearchAdapter(
+            _Session(_Response(200, b"x" * (MAX_PROVIDER_JSON_BYTES + 1))),
+            EasynewsSearchAccount("member", "secret", PROVIDER_ID),
+        )
+
+        with self.assertRaisesRegex(EasynewsSearchError, "easynews_search_invalid"):
+            await adapter.search(
+                MediaQuery("tt123", "movie"),
+                DiscoveryContext(frozenset({"usenet"}), b"a" * 32),
+            )
+
     async def test_generated_nzb_uses_and_releases_account_scoped_capacity(self):
         lease = type("Lease", (), {"release": AsyncMock()})()
         governor = type(
@@ -309,28 +330,7 @@ class EasynewsDiscoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(candidate)
 
-    def test_account_and_candidate_domains_are_closed_before_persistence(self):
-        invalid_accounts = (
-            ("member", "secret", "provider"),
-            (
-                "member",
-                "secret",
-                None,
-                None,
-                frozenset({"stremio_nntp"}),
-            ),
-            (
-                "member",
-                "secret",
-                None,
-                SOURCE_ID,
-                frozenset({"unknown"}),
-            ),
-        )
-        for values in invalid_accounts:
-            with self.subTest(values=values), self.assertRaises(ValueError):
-                EasynewsSearchAccount(*values)
-
+    def test_candidate_size_outside_the_storage_domain_is_omitted(self):
         adapter = EasynewsSearchAdapter(
             None,
             EasynewsSearchAccount("member", "secret", PROVIDER_ID),
@@ -344,12 +344,6 @@ class EasynewsDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             "size": 1 << 63,
         }
         query = MediaQuery("tt123", "movie")
-        with self.assertRaisesRegex(ValueError, "partition"):
-            adapter._candidate(
-                row,
-                query,
-                DiscoveryContext(frozenset({"usenet"})),
-            )
         candidate = adapter._candidate(
             row,
             query,
@@ -662,14 +656,10 @@ class EasynewsDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             EasynewsSearchAccount("member", "secret", PROVIDER_ID),
         )
 
-        with patch(
-            "comet.discovery.adapters.easynews._MAX_JSON_BYTES",
-            24,
-        ):
-            result = await adapter.search(
-                MediaQuery("tt123", "movie", title_aliases=("Movie",)),
-                DiscoveryContext(frozenset({"usenet"}), b"a" * 32),
-            )
+        result = await adapter.search(
+            MediaQuery("tt123", "movie", title_aliases=("Movie",)),
+            DiscoveryContext(frozenset({"usenet"}), b"a" * 32),
+        )
 
         self.assertEqual(result.coverage, frozenset({"usenet"}))
         self.assertEqual(result.diagnostics, ())

@@ -816,21 +816,22 @@ async def _run(args: argparse.Namespace) -> None:
             par2_binary=str(args.par2),
             libarchive_library=str(args.libarchive),
             log_profile="normal",
-            log_format="json",
             no_color=True,
         )
         supervisor.prepare_runtime_dir()
         supervisor.next_engine_generation()
-        native_log = (root / "native.log").open("wb")
-        child = await asyncio.create_subprocess_exec(
-            *supervisor.engine_command(),
-            env=supervisor.engine_environment(),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=native_log,
-            close_fds=True,
-            start_new_session=True,
-        )
+        native_log = None
+        child = None
         try:
+            native_log = (root / "native.log").open("wb")
+            child = await asyncio.create_subprocess_exec(
+                *supervisor.engine_command(),
+                env=supervisor.engine_environment(),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=native_log,
+                close_fds=True,
+                start_new_session=True,
+            )
             await supervisor.publish_descriptor(timeout=30)
             engine = EngineClient(supervisor.descriptor_path)
             _event(stage="engine_ready", health=await engine.health())
@@ -973,14 +974,15 @@ async def _run(args: argparse.Namespace) -> None:
                             )
         finally:
             supervisor.withdraw_descriptor()
-            if child.returncode is None:
+            if child is not None and child.returncode is None:
                 os.killpg(child.pid, signal.SIGTERM)
                 try:
                     await asyncio.wait_for(child.wait(), timeout=10)
                 except TimeoutError:
                     os.killpg(child.pid, signal.SIGKILL)
                     await asyncio.wait_for(child.wait(), timeout=5)
-            native_log.close()
+            if native_log is not None:
+                native_log.close()
             supervisor.close()
 
 

@@ -154,7 +154,7 @@ def stop_event_persistence() -> None:
         _stop_event = None
         _writer_thread = None
     stop.set()
-    writer.join(timeout=3)
+    writer.join()
 
 
 def _reset_after_fork() -> None:

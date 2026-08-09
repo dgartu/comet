@@ -5,6 +5,12 @@ from RTN import ParsedData
 from comet.debrid.exceptions import DebridAuthError
 from comet.debrid.file_selection import select_best_availability_files
 from comet.debrid.manager import retrieve_debrid_availability
+from comet.metadata.media_info import (
+    MediaInfo,
+    enrich_parsed,
+    media_info_from_json,
+    prefer_media_info,
+)
 from comet.observability import metrics
 from comet.services.debrid_cache import (
     get_cached_availability,
@@ -12,7 +18,7 @@ from comet.services.debrid_cache import (
     schedule_cache_availability,
     schedule_cache_availability_after_response,
 )
-from comet.utils.parsing import MediaScope, ensure_multi_language, load_cached_parsed
+from comet.utils.parsing import MediaScope, load_cached_parsed
 
 
 class DebridService:
@@ -25,48 +31,6 @@ class DebridService:
     def _coerce_file_index(value):
         return None if value is None else int(value)
 
-    @staticmethod
-    def _backfill_attr(merged: ParsedData, original: ParsedData, attr: str):
-        merged_value = getattr(merged, attr)
-        original_value = getattr(original, attr)
-        if not merged_value and original_value:
-            setattr(merged, attr, original_value)
-
-    @staticmethod
-    def _merge_parsed(
-        original: ParsedData | None, incoming: ParsedData | None
-    ) -> ParsedData | None:
-        if incoming is None:
-            return original
-        if original is None:
-            ensure_multi_language(incoming)
-            return incoming
-
-        merged = incoming
-
-        incoming_resolution = incoming.resolution
-        original_resolution = original.resolution
-        if incoming_resolution in (None, "unknown") and original_resolution not in (
-            None,
-            "unknown",
-        ):
-            merged.resolution = original_resolution
-
-        for attr in (
-            "quality",
-            "languages",
-            "audio",
-            "channels",
-            "codec",
-            "hdr",
-            "bit_depth",
-            "group",
-        ):
-            DebridService._backfill_attr(merged, original, attr)
-
-        ensure_multi_language(merged)
-        return merged
-
     @classmethod
     def _build_torrent_update(
         cls,
@@ -76,6 +40,7 @@ class DebridService:
         title: str | None,
         size: int | None,
         parsed: ParsedData | None,
+        media_info: MediaInfo | None = None,
     ) -> dict:
         update = {}
         original_parsed = torrent.get("parsed")
@@ -86,8 +51,8 @@ class DebridService:
             and not original_parsed.trash
         )
 
-        if parsed is not None and not metadata_is_downgrade:
-            merged_parsed = cls._merge_parsed(original_parsed, parsed)
+        if (parsed is not None or media_info is not None) and not metadata_is_downgrade:
+            merged_parsed = enrich_parsed(original_parsed, parsed, media_info)
             if merged_parsed is not None:
                 update["parsed"] = merged_parsed
 
@@ -98,8 +63,28 @@ class DebridService:
             update["title"] = title
         if size is not None:
             update["size"] = size
+        if media_info is not None and not metadata_is_downgrade:
+            update["mediaInfo"] = media_info
+        elif not metadata_is_downgrade and (
+            (file_index is not None and file_index != torrent.get("fileIndex"))
+            or (title is not None and title != torrent.get("title"))
+        ):
+            update["mediaInfo"] = None
 
         return update
+
+    @staticmethod
+    def _cached_file(row, season: int | None, episode: int | None) -> dict:
+        return {
+            "info_hash": row["info_hash"],
+            "index": row["file_index"],
+            "title": row["title"],
+            "size": row["size"],
+            "season": season,
+            "episode": episode,
+            "parsed": load_cached_parsed(row["parsed"]),
+            "media_info": media_info_from_json(row.get("media_info", None)),
+        }
 
     async def get_and_cache_availability(
         self,
@@ -180,6 +165,7 @@ class DebridService:
                     title=file["title"],
                     size=file["size"],
                     parsed=file["parsed"],
+                    media_info=file.get("media_info"),
                 )
                 if update:
                     torrent_updates.setdefault(info_hash, {}).update(update)
@@ -237,18 +223,7 @@ class DebridService:
             return {row["info_hash"] for row in rows}, {}
 
         rows = select_best_availability_files(
-            (
-                {
-                    "info_hash": row["info_hash"],
-                    "index": row["file_index"],
-                    "title": row["title"],
-                    "size": row["size"],
-                    "season": season,
-                    "episode": episode,
-                    "parsed": load_cached_parsed(row["parsed"]),
-                }
-                for row in rows
-            ),
+            (self._cached_file(row, season, episode) for row in rows),
             torrents,
         )
 
@@ -268,6 +243,7 @@ class DebridService:
                     title=row["title"],
                     size=row["size"],
                     parsed=row["parsed"],
+                    media_info=row["media_info"],
                 )
                 if update:
                     torrent_updates[info_hash] = update
@@ -288,18 +264,7 @@ class DebridService:
 
         rows = await get_cached_availability_any_service(info_hashes, season, episode)
         rows = select_best_availability_files(
-            (
-                {
-                    "info_hash": row["info_hash"],
-                    "index": row["file_index"],
-                    "title": row["title"],
-                    "size": row["size"],
-                    "season": season,
-                    "episode": episode,
-                    "parsed": load_cached_parsed(row["parsed"]),
-                }
-                for row in rows
-            ),
+            (cls._cached_file(row, season, episode) for row in rows),
             torrents,
         )
 
@@ -315,5 +280,26 @@ class DebridService:
                 title=row["title"],
                 size=row["size"],
                 parsed=row["parsed"],
+                media_info=row["media_info"],
             )
             torrent.update(update)
+
+
+def prefer_torrent_update(current: dict | None, candidate: dict) -> dict:
+    if current is None:
+        return candidate
+    if (current.get("fileIndex"), current.get("title")) != (
+        candidate.get("fileIndex"),
+        candidate.get("title"),
+    ):
+        return current
+    preferred = prefer_media_info(
+        current.get("mediaInfo"),
+        candidate.get("mediaInfo"),
+    )
+    candidate_media_info = candidate.get("mediaInfo")
+    return (
+        candidate
+        if candidate_media_info is not None and preferred is candidate_media_info
+        else current
+    )

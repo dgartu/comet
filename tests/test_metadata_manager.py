@@ -100,7 +100,7 @@ class MetadataRefreshTests(unittest.IsolatedAsyncioTestCase):
         scraper = MetadataScraper(session=None)
         cases = (
             (None, MetadataFetchStatus.NOT_FOUND),
-            (TimeoutError(), MetadataFetchStatus.TIMEOUT),
+            (TimeoutError(), MetadataFetchStatus.UNAVAILABLE),
         )
         for value, expected in cases:
             with self.subTest(expected=expected):
@@ -351,7 +351,7 @@ class MetadataRefreshTests(unittest.IsolatedAsyncioTestCase):
             MetadataScraper._load_cached_aliases(
                 orjson.dumps({"US": ["First", "bad\nvalue"]})
             ),
-            {"us": ["First"]},
+            {"us": ["First", "bad value"]},
         )
         aliases = MetadataScraper._load_cached_aliases(
             orjson.dumps({"ez": [f"Alias {index}" for index in range(513)]})
@@ -360,17 +360,28 @@ class MetadataRefreshTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(orjson.JSONDecodeError):
             MetadataScraper._load_cached_aliases(b"not-json")
 
-    async def test_parallel_provider_failure_is_not_masked(self):
+    async def test_parallel_provider_failure_cancels_and_settles_siblings(self):
+        sibling_settled = asyncio.Event()
+        blocker = asyncio.Future()
+
         async def fail():
             raise RuntimeError("token=do-not-log")
 
-        async def succeed():
-            return {"us": ["Movie"]}
+        async def wait_forever():
+            try:
+                await blocker
+            finally:
+                sibling_settled.set()
+
+        sibling = asyncio.create_task(wait_forever())
 
         with self.assertRaisesRegex(RuntimeError, "token=do-not-log"):
             await _settle_metadata_tasks(
                 {
                     "metadata": asyncio.create_task(fail()),
-                    "aliases": asyncio.create_task(succeed()),
+                    "aliases": sibling,
                 }
             )
+
+        self.assertTrue(sibling.cancelled())
+        self.assertTrue(sibling_settled.is_set())

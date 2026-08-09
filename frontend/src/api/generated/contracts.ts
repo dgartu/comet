@@ -2,6 +2,8 @@
 /* Do not edit it directly. */
 
 export const CONFIGURATION_DICTIONARY_V1 = "\"nativeAccessToken\":\"debridStreamProxyPassword\":\"scrapeDebridAccountTorrents\":\"maxResultsPerResolution\":\"remove_unknown_languages\":\"allow_english_in_languages\":\"discoverySources\":\"playbackProviders\":\"enabledTransports\":\"configurationId\":\"displayName\":\"accountId\":\"schemaVersion\":\"accounts\":\"cachedOnly\":\"removeTrash\":\"resultFormat\":\"maxSize\":\"languages\":\"resolutions\":\"options\":\"enabled\":\"kind\":\"apiKey\":\"endpoint\":\"required\":\"allowed\":\"exclude\":\"preferred\":\"bittorrent\":\"usenet\":\"realdebrid\":\"direct_torrent\":\"newznab\":\"comet_native_usenet\":\"personal_servers\":\"instance_pool\":\"source\":\"servers\":\"username\":\"password\":\"host\":\"port\":\"tls\":";
+export const MAX_CONFIG_JSON_BYTES = 24576;
+export const MAX_CONFIG_SEGMENT_BYTES = 32768;
 
 export type AddMemberRequest = { readonly "member_key": string; readonly "role"?: "admin" | "member"; };
 export type ApiError = { readonly "error": ApiErrorBody; };
@@ -79,7 +81,7 @@ export type MetricPointData = { readonly "timestamp": number; readonly "value": 
 export type MetricRangeData = { readonly "metric": string; readonly "range": "15m" | "1h" | "6h" | "24h" | "7d" | "30d"; readonly "step": number; readonly "series": ReadonlyArray<MetricSeriesData>; };
 export type MetricSampleData = { readonly "name": string; readonly "labels": { readonly [key: string]: string; }; readonly "value": number; };
 export type MetricSeriesData = { readonly "labels": { readonly [key: string]: string; }; readonly "points": ReadonlyArray<MetricPointData>; };
-export type OperationalEventData = { readonly "id": number; readonly "created_at": number; readonly "instance_id": string; readonly "process_id": number; readonly "role": string; readonly "level": "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL"; readonly "category": string; readonly "event": string; readonly "message": string; readonly "request_id": string | null; readonly "run_id": string | null; readonly "connection_id": string | null; readonly "media_type": string | null; readonly "provider_name": string | null; readonly "outcome": string | null; readonly "error_code": string | null; readonly "details": { readonly [key: string]: string | boolean | number | number; }; };
+export type OperationalEventData = { readonly "id": number; readonly "created_at": number; readonly "instance_id": string; readonly "process_id": number; readonly "role": string; readonly "level": "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL"; readonly "category": string; readonly "event": string; readonly "message": string; readonly "request_id": string | null; readonly "run_id": string | null; readonly "connection_id": string | null; readonly "media_type": string | null; readonly "provider_name": string | null; readonly "outcome": string | null; readonly "error_code": string | null; readonly "details": { readonly [key: string]: string | boolean | number; }; };
 export type OperationalEventPageData = { readonly "items": ReadonlyArray<OperationalEventData>; readonly "next_cursor": number | null; readonly "dropped_events": number; };
 export type PlaybackProviderEntry = { readonly "configurationId": string; readonly "displayName": string; readonly "kind": string; readonly "enabled"?: boolean; readonly "accountId"?: string | null; readonly "options"?: { readonly [key: string]: unknown; }; };
 export type ProxyConnectionView = { readonly "id": string; readonly "ip": string; readonly "content": string; readonly "service": string; readonly "instance_id": string; readonly "process_id": number; readonly "started_at": number; readonly "updated_at": number; readonly "duration": number; readonly "bytes_transferred": number; readonly "current_speed": number; readonly "average_speed": number; readonly "peak_speed": number; readonly "cancellation_pending": boolean; };
@@ -330,7 +332,7 @@ export interface ApiV1Paths {
   readonly "/api/v1/admin/scraping/queue/{kind}": {
     readonly get: {
       readonly request: never;
-      readonly parameters: { readonly path: { readonly "kind": "item" | "episode"; }; readonly query: { readonly "limit"?: number; readonly "cursor"?: string | null; readonly "status"?: string | null; readonly "search"?: string | null; }; };
+      readonly parameters: { readonly path: { readonly "kind": "item" | "episode"; }; readonly query: { readonly "limit"?: number; readonly "cursor"?: string | null; readonly "status"?: "discovered" | "running" | "success" | "failed" | "dead" | "deferred" | null; readonly "search"?: string | null; }; };
       readonly success: ApiSuccess_ScraperQueuePageData_;
       readonly error: ApiError;
     };

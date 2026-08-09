@@ -3,7 +3,6 @@ import re
 import secrets
 import stat
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from urllib.parse import urlsplit
@@ -48,11 +47,12 @@ from comet.core.server_settings import ServerSettings
 from comet.core.sources import USENET_PLAYBACK_PROVIDER_KINDS
 from comet.usenet.nntp_config import parse_instance_servers, parse_personal_servers
 from comet.usenet.stremio_nntp_config import validate_handoff_config
+from comet.utils.text import has_ascii_control
 
 _comet_fk_enabled = False
 _SQLITE_BUSY_TIMEOUT_MS = 30000
 _MAX_PERSISTED_TOKEN_BYTES = 4_096
-_PUBLIC_API_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,256}")
+_PUBLIC_API_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 VALID_DEBRID_SERVICES = (
     "realdebrid",
     "alldebrid",
@@ -109,9 +109,7 @@ def _bounded_path(value: object, *, field: str) -> str:
         size = len(value.encode("utf-8"))
     except UnicodeEncodeError:
         raise ValueError(f"{field} must be valid UTF-8") from None
-    if size > 4_096 or any(
-        ord(character) < 32 or ord(character) == 127 for character in value
-    ):
+    if size > 4_096 or "\x00" in value:
         raise ValueError(f"{field} must be a non-empty bounded path")
     return value
 
@@ -128,23 +126,20 @@ def _bounded_credential(value: object) -> str:
         size = len(value.encode("utf-8"))
     except UnicodeEncodeError:
         raise ValueError("configured credential must be valid UTF-8") from None
-    if size > 4_096 or any(
-        ord(character) < 32 or ord(character) == 127 for character in value
-    ):
+    if size > 4_096:
         raise ValueError("configured credential must be bounded text")
     return value
 
 
-def _is_bounded_opaque_credential(value: object, maximum_bytes: int) -> bool:
+def _is_opaque_credential(value: object) -> bool:
     if not isinstance(value, str) or not value:
         return False
     try:
-        encoded = value.encode("utf-8")
+        value.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return len(encoded) <= maximum_bytes and not any(
-        character.isspace() or ord(character) < 33 or ord(character) == 127
-        for character in value
+    return not has_ascii_control(value) and not any(
+        character.isspace() for character in value
     )
 
 
@@ -237,7 +232,6 @@ class AppSettings(ServerSettings):
     INDEXER_MANAGER_TIMEOUT: int = 30
     INDEXER_MANAGER_INDEXERS: list[str] = Field(default_factory=list)
     INDEXER_MANAGER_UPDATE_INTERVAL: int = 900
-    INDEXER_MANAGER_WAIT_TIMEOUT: int = 30
     INDEXER_INCLUDE_CANONICAL_TITLE: bool = True
     INDEXER_INCLUDE_ORIGINAL_TITLE: bool = True
     INDEXER_LANGUAGES: list[str] = Field(default_factory=list)
@@ -252,7 +246,6 @@ class AppSettings(ServerSettings):
     INDEXER_PRIVATE_TORRENTS_ENABLED: bool = True
     GET_TORRENT_TIMEOUT: int = 5
     MAGNET_RESOLVE_TIMEOUT: int = 60
-    CATALOG_TIMEOUT: int = 30
     DOWNLOAD_TORRENT_FILES: bool = False
     SCRAPE_COMET: ScraperMode = False
     COMET_URL: str | list[str] = "https://comet.feels.legal"
@@ -280,7 +273,6 @@ class AppSettings(ServerSettings):
     SCRAPE_BITMAGNET: ScraperMode = False
     BITMAGNET_URL: str | list[str] = "https://bitmagnetfortheweebs.midnightignite.me"
     BITMAGNET_MAX_CONCURRENT_PAGES: int = 5
-    BITMAGNET_MAX_OFFSET: int = 15000
     SCRAPE_TORRENTIO: ScraperMode = False
     TORRENTIO_URL: str | list[str] = "https://torrentio.strem.fun"
     SCRAPE_MEDIAFUSION: ScraperMode = False
@@ -312,8 +304,6 @@ class AppSettings(ServerSettings):
     PROXY_DEBRID_STREAM_INACTIVITY_THRESHOLD: int = 300
     DEBRID_ACCOUNT_SCRAPE_REFRESH_INTERVAL: int = 900
     DEBRID_ACCOUNT_SCRAPE_CACHE_TTL: int = 86400
-    DEBRID_ACCOUNT_SCRAPE_MAX_SNAPSHOT_ITEMS: int = 5000
-    DEBRID_ACCOUNT_SCRAPE_MAX_MATCH_ITEMS: int = 1500
     DEBRID_ACCOUNT_SCRAPE_INITIAL_WARM_TIMEOUT: float = 5.0
     STREMTHRU_URL: str | None = "https://stremthru.13377001.xyz"
     DISABLE_TORRENT_STREAMS: bool = False
@@ -419,7 +409,6 @@ class AppSettings(ServerSettings):
     HTTP_CACHE_STREAMS_TTL: int = 300
     HTTP_CACHE_STALE_WHILE_REVALIDATE: int = 60
     HTTP_CACHE_MANIFEST_TTL: int = 86400
-    HTTP_CACHE_CONFIGURE_TTL: int = 86400
     DOWNLOAD_GENERIC_TRACKERS: bool = False
     SMART_LANGUAGE_DETECTION: bool = False
     RTN_FILTER_DEBUG: bool = False
@@ -563,10 +552,6 @@ class AppSettings(ServerSettings):
 
     @field_validator("USENET_PRIVATE_UPSTREAM_ORIGINS")
     def validate_usenet_private_upstream_origins(cls, value):
-        if len(value) > 64:
-            raise ValueError(
-                "USENET_PRIVATE_UPSTREAM_ORIGINS may contain at most 64 origins"
-            )
         normalized = []
         for origin in value:
             if not isinstance(origin, str):
@@ -593,7 +578,9 @@ class AppSettings(ServerSettings):
                     "USENET_PRIVATE_UPSTREAM_ORIGINS contains an invalid port"
                 ) from exc
             host = parsed.hostname.lower()
-            if any(character.isspace() or ord(character) < 33 for character in host):
+            if has_ascii_control(host) or any(
+                character.isspace() for character in host
+            ):
                 raise ValueError(
                     "USENET_PRIVATE_UPSTREAM_ORIGINS contains an invalid host"
                 )
@@ -608,10 +595,9 @@ class AppSettings(ServerSettings):
     def validate_usenet_native_access_token(cls, value):
         if value is None:
             return None
-        if not _is_bounded_opaque_credential(value, 256):
+        if not _is_opaque_credential(value):
             raise ValueError(
-                "USENET_NATIVE_ACCESS_TOKEN must be a non-empty opaque value "
-                "of at most 256 bytes"
+                "USENET_NATIVE_ACCESS_TOKEN must be a non-empty opaque value"
             )
         return value
 
@@ -629,22 +615,14 @@ class AppSettings(ServerSettings):
 
     @field_validator("USENET_REPLICA_COUNT")
     def validate_usenet_replica_count(cls, value):
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 1 <= value <= 64
-        ):
-            raise ValueError("USENET_REPLICA_COUNT must be between 1 and 64")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("USENET_REPLICA_COUNT must be positive")
         return value
 
     @field_validator("USENET_NATIVE_MAX_STREAMS")
     def validate_usenet_native_max_streams(cls, value):
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 1 <= value <= 1024
-        ):
-            raise ValueError("USENET_NATIVE_MAX_STREAMS must be between 1 and 1024")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("USENET_NATIVE_MAX_STREAMS must be positive")
         return value
 
     @field_validator("USENET_MEMORY_CACHE_BYTES")
@@ -661,12 +639,8 @@ class AppSettings(ServerSettings):
 
     @field_validator("USENET_DISK_CACHE_BYTES")
     def validate_usenet_disk_cache_bytes(cls, value):
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 0 <= value <= 1024**4
-        ):
-            raise ValueError("USENET_DISK_CACHE_BYTES must be between zero and 1 TiB")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("USENET_DISK_CACHE_BYTES must be non-negative")
         return value
 
     @field_validator("USENET_SPOOL_MAX_BYTES")
@@ -699,22 +673,14 @@ class AppSettings(ServerSettings):
 
     @field_validator("USENET_START_TIMEOUT_SECONDS")
     def validate_usenet_start_timeout(cls, value):
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 5 <= value <= 120
-        ):
-            raise ValueError("USENET_START_TIMEOUT_SECONDS must be between 5 and 120")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("USENET_START_TIMEOUT_SECONDS must be positive")
         return value
 
     @field_validator("USENET_DRAIN_TIMEOUT_SECONDS")
     def validate_usenet_drain_timeout(cls, value):
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 5 <= value <= 300
-        ):
-            raise ValueError("USENET_DRAIN_TIMEOUT_SECONDS must be between 5 and 300")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("USENET_DRAIN_TIMEOUT_SECONDS must be positive")
         return value
 
     @model_validator(mode="after")
@@ -782,6 +748,16 @@ class AppSettings(ServerSettings):
     def normalize_executor_workers(cls, value):
         if value is None or value == "" or str(value).lower() == "none":
             return 1
+        return value
+
+    @field_validator(
+        "NYAA_MAX_CONCURRENT_PAGES",
+        "ANIMETOSHO_MAX_CONCURRENT_PAGES",
+        "BITMAGNET_MAX_CONCURRENT_PAGES",
+    )
+    def validate_scraper_page_concurrency(cls, value):
+        if value < 1:
+            raise ValueError("scraper page concurrency must be a positive integer")
         return value
 
     @field_validator(
@@ -1283,32 +1259,16 @@ _SOURCE_ACCOUNT_KINDS = {
 }
 
 
-def _validate_config_account_id(value: object, description: str) -> str:
-    if (
-        type(value) is not str
-        or not 1 <= len(value) <= 128
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
-    ):
-        raise ValueError(f"{description} must be a bounded identifier")
-    return value
-
-
 def _validate_config_display_name(value: object, description: str) -> str:
     if type(value) is not str:
-        raise ValueError(f"{description} must be bounded display text")
+        raise ValueError(f"{description} must be display text")
     value = value.strip()
     if not value:
-        raise ValueError(f"{description} must be bounded display text")
+        raise ValueError(f"{description} must be non-empty display text")
     try:
-        size = len(value.encode("utf-8"))
+        value.encode("utf-8")
     except UnicodeEncodeError:
         raise ValueError(f"{description} must be valid UTF-8") from None
-    if (
-        len(value) > 64
-        or size > 256
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
-    ):
-        raise ValueError(f"{description} must be bounded display text")
     return value
 
 
@@ -1326,16 +1286,9 @@ class PlaybackProviderEntry(BaseModel):
     def validate_usenet_provider_options(self):
         if not self.enabled or self.kind not in USENET_PLAYBACK_PROVIDER_KINDS:
             return self
-        try:
-            if str(uuid.UUID(self.configurationId)) != self.configurationId:
-                raise ValueError
-        except ValueError as exc:
-            raise ValueError(
-                "provider configurationId must be a canonical UUID"
-            ) from exc
+        if not self.configurationId:
+            raise ValueError("provider configurationId must be non-empty")
         _validate_config_display_name(self.displayName, "provider displayName")
-        if self.accountId is not None:
-            _validate_config_account_id(self.accountId, "provider accountId")
         if self.kind == "stremio_nntp" and self.accountId is None:
             try:
                 validate_handoff_config(self.options)
@@ -1349,9 +1302,13 @@ class PlaybackProviderEntry(BaseModel):
             return self
         if source == "personal_servers" and "servers" in self.options:
             try:
-                parse_personal_servers(self.options["servers"])
+                servers = parse_personal_servers(self.options["servers"])
             except ValueError as exc:
                 raise ValueError("native personal NNTP servers are invalid") from exc
+            self.options = {
+                **self.options,
+                "servers": [asdict(server) for server in servers],
+            }
             return self
         raise ValueError("native Usenet options must select one valid server source")
 
@@ -1368,14 +1325,8 @@ class DiscoverySourceEntry(BaseModel):
 
     @field_validator("configurationId")
     def validate_configuration_id(cls, value):
-        if not isinstance(value, str):
-            raise ValueError("discovery configurationId must be a UUID")
-        try:
-            parsed = uuid.UUID(value)
-        except ValueError as exc:
-            raise ValueError("discovery configurationId must be a UUID") from exc
-        if str(parsed) != value:
-            raise ValueError("discovery configurationId must be a canonical UUID")
+        if not value:
+            raise ValueError("discovery configurationId must be non-empty")
         return value
 
     @field_validator("kind")
@@ -1389,12 +1340,6 @@ class DiscoverySourceEntry(BaseModel):
         if value is None:
             return None
         return _validate_config_display_name(value, "discovery displayName")
-
-    @field_validator("accountId")
-    def validate_account_identifier(cls, value):
-        if value is None:
-            return None
-        return _validate_config_account_id(value, "source accountId")
 
     @model_validator(mode="after")
     def validate_source_options(self):
@@ -1416,11 +1361,6 @@ class DiscoverySourceEntry(BaseModel):
                 not isinstance(authorization, str)
                 or not authorization
                 or authorization != authorization.strip()
-                or len(authorization) > 2_048
-                or any(
-                    ord(character) < 32 or ord(character) == 127
-                    for character in authorization
-                )
             ):
                 raise ValueError("Stremio addon credential is invalid")
         return self
@@ -1527,7 +1467,6 @@ class ConfigModel(BaseModel):
             account = accounts.get(entry.accountId)
             if account is None:
                 raise ValueError("Usenet account reference is unavailable")
-            _validate_config_account_id(entry.accountId, "Usenet account ID")
             if account.get("kind") != expected_kind:
                 raise ValueError("Usenet account kind does not match its binding")
 
@@ -1545,12 +1484,10 @@ class ConfigModel(BaseModel):
             except ValueError as exc:
                 raise ValueError("Stremio NNTP options are invalid") from exc
 
-        if self.nativeAccessToken is not None and not _is_bounded_opaque_credential(
-            self.nativeAccessToken, 256
+        if self.nativeAccessToken is not None and not _is_opaque_credential(
+            self.nativeAccessToken
         ):
-            raise ValueError(
-                "nativeAccessToken must be an opaque value of at most 256 bytes"
-            )
+            raise ValueError("nativeAccessToken must be a non-empty opaque value")
         return self
 
 
@@ -1571,6 +1508,7 @@ web_config = {
         "size",
         "tracker",
         "languages",
+        "subtitles",
     ],
 }
 

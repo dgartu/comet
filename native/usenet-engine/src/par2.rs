@@ -15,11 +15,10 @@ const TYPE_RECOVERY_SLICE: &[u8; 16] = b"PAR 2.0\0RecvSlic";
 pub(crate) const MAX_IN_MEMORY_INPUT_BYTES: usize = 150 * 1024 * 1024;
 const SCAN_BYTES: usize = 64 * 1024;
 const MAX_PACKETS: usize = 100_000;
-const MAX_FILES: usize = 20_000;
+const MAX_FILES: usize = crate::nzb::MAX_FILES;
 const MAX_SLICES: usize = 32_768;
 const MAX_CATALOG_PACKET_BYTES: u64 = 64 + 16 + 20 * MAX_SLICES as u64;
 const MAX_RECOVERY_SETS: usize = MAX_FILES;
-const MAX_SOURCE_BYTES: u64 = crate::limits::MAX_LOGICAL_BYTES;
 
 pub type FileId = [u8; 16];
 pub type RecoverySetId = [u8; 16];
@@ -103,15 +102,47 @@ impl RecoverySetDiscovery {
         set_id: RecoverySetId,
         packet: &[u8],
     ) -> Result<(), &'static str> {
+        self.observe_with(input_index, set_id, |catalog| {
+            parse_catalog_packet(catalog, packet)
+        })
+    }
+
+    fn observe_reader(
+        &mut self,
+        input_index: usize,
+        set_id: RecoverySetId,
+        packet: ReaderPacket<'_>,
+    ) -> Result<(), &'static str> {
+        self.observe_with(input_index, set_id, |catalog| {
+            parse_reader_packet(catalog, set_id, packet)
+        })
+    }
+
+    fn observe_with<F>(
+        &mut self,
+        input_index: usize,
+        set_id: RecoverySetId,
+        parse: F,
+    ) -> Result<(), &'static str>
+    where
+        F: FnOnce(&mut Catalog) -> Result<(), &'static str>,
+    {
         if !self.catalogs.contains_key(&set_id) && self.catalogs.len() >= MAX_RECOVERY_SETS {
             return Err("par2_recovery_set_limit");
         }
-        let (catalog, input_indices) = self.catalogs.entry(set_id).or_default();
-        let previous_files = catalog.files.len();
-        let previous_slices = catalog.slices;
-        parse_catalog_packet(catalog, packet)?;
-        self.files += catalog.files.len() - previous_files;
-        self.slices += catalog.slices - previous_slices;
+        let (files, slices) = {
+            let (catalog, input_indices) = self.catalogs.entry(set_id).or_default();
+            let previous_files = catalog.files.len();
+            let previous_slices = catalog.slices;
+            parse(catalog)?;
+            input_indices.insert(input_index);
+            (
+                catalog.files.len() - previous_files,
+                catalog.slices - previous_slices,
+            )
+        };
+        self.files += files;
+        self.slices += slices;
         if self.files > MAX_FILES || self.slices > MAX_SLICES {
             return Err(if self.files > MAX_FILES {
                 "par2_file_limit"
@@ -119,7 +150,6 @@ impl RecoverySetDiscovery {
                 "par2_slice_limit"
             });
         }
-        input_indices.insert(input_index);
         Ok(())
     }
 
@@ -256,7 +286,7 @@ impl Catalog {
         .map_err(|_| "par2_main_invalid")?;
         let total_files = (body.len() - 12) / 16;
         if slice_size == 0
-            || slice_size > MAX_SOURCE_BYTES
+            || slice_size > crate::limits::MAX_LOGICAL_BYTES
             || !slice_size.is_multiple_of(4)
             || recoverable_files == 0
             || recoverable_files > total_files
@@ -338,7 +368,7 @@ impl Catalog {
             .chunks_exact(2)
             .map(|unit| u16::from_le_bytes(unit.try_into().expect("PAR2 Unicode code unit")))
             .collect::<Vec<_>>();
-        if units.len().is_multiple_of(2) && units.last() == Some(&0) {
+        if units.last() == Some(&0) {
             units.pop();
         }
         if units.is_empty() || units.contains(&0) {
@@ -545,7 +575,7 @@ where
             .map_err(|_| "materialization_unavailable")?;
         total = total
             .checked_add(input_len)
-            .filter(|value| *value <= MAX_SOURCE_BYTES)
+            .filter(|value| *value <= crate::limits::MAX_LOGICAL_BYTES)
             .ok_or("par2_input_invalid")?;
         if input_len == 0 {
             return Err("par2_input_invalid");
@@ -584,7 +614,7 @@ where
                 return Err("par2_packet_limit");
             }
             let length = u64::from_le_bytes(header[8..16].try_into().expect("PAR2 packet length"));
-            let valid_length = (64..=MAX_SOURCE_BYTES).contains(&length)
+            let valid_length = (64..=crate::limits::MAX_LOGICAL_BYTES).contains(&length)
                 && length.is_multiple_of(4)
                 && packet_offset
                     .checked_add(length)
@@ -776,26 +806,7 @@ where
             if matches!(&packet, ReaderPacket::Other) {
                 return Ok(());
             }
-            if !discovery.catalogs.contains_key(&set_id)
-                && discovery.catalogs.len() >= MAX_RECOVERY_SETS
-            {
-                return Err("par2_recovery_set_limit");
-            }
-            let (catalog, input_indices) = discovery.catalogs.entry(set_id).or_default();
-            let previous_files = catalog.files.len();
-            let previous_slices = catalog.slices;
-            parse_reader_packet(catalog, set_id, packet)?;
-            discovery.files += catalog.files.len() - previous_files;
-            discovery.slices += catalog.slices - previous_slices;
-            if discovery.files > MAX_FILES || discovery.slices > MAX_SLICES {
-                return Err(if discovery.files > MAX_FILES {
-                    "par2_file_limit"
-                } else {
-                    "par2_slice_limit"
-                });
-            }
-            input_indices.insert(input_index);
-            Ok(())
+            discovery.observe_reader(input_index, set_id, packet)
         },
     )?;
     discovery.finish()

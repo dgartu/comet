@@ -61,13 +61,13 @@ def _first_meta_value(value):
     return "" if value is None else value
 
 
-def _build_kodi_meta(parsed, formatted_components: dict):
+def _build_kodi_meta(parsed, formatted_components: dict, media_info=None):
     resolution_value = parsed.resolution
     resolution = str(resolution_value).upper() if resolution_value else ""
     height, width = RESOLUTION_TO_DIMENSIONS.get(resolution, (0, 0))
     languages = parsed.languages
 
-    return {
+    metadata = {
         "width": width,
         "height": height,
         "resolution": resolution,
@@ -86,7 +86,20 @@ def _build_kodi_meta(parsed, formatted_components: dict):
         "sizeInfo": formatted_components.get("size", ""),
         "trackerInfo": formatted_components.get("tracker", ""),
         "languagesInfo": formatted_components.get("languages", ""),
+        "subtitlesInfo": formatted_components.get("subtitles", ""),
     }
+    if media_info is not None:
+        metadata["subtitles"] = list(media_info.subtitle_languages)
+        metadata["hasChapters"] = media_info.has_chapters
+        if media_info.container is not None:
+            if media_info.container.duration_seconds is not None:
+                metadata["duration"] = media_info.container.duration_seconds
+            if media_info.container.bitrate is not None:
+                metadata["bitrate"] = media_info.container.bitrate
+        if media_info.video is not None:
+            metadata["width"] = media_info.video.width or metadata["width"]
+            metadata["height"] = media_info.video.height or metadata["height"]
+    return metadata
 
 
 def _stream_notice_name(kodi: bool, emoji_name: str, plain_name: str):
@@ -164,6 +177,7 @@ def _format_release(
     source: str,
     result_format: list | tuple,
     kodi: bool,
+    media_info=None,
 ) -> tuple[dict, str]:
     formatter = get_formatted_components_plain if kodi else get_formatted_components
     components = formatter(
@@ -173,6 +187,7 @@ def _format_release(
         size,
         source,
         result_format,
+        media_info,
     )
     return components, format_title(components)
 
@@ -185,6 +200,7 @@ def _release_behavior_hints(
     parsed,
     formatted_components: dict,
     kodi: bool,
+    media_info=None,
 ) -> dict:
     hints = {
         "bingeGroup": binge_group,
@@ -196,6 +212,7 @@ def _release_behavior_hints(
         hints["cometKodiMetaV1"] = _build_kodi_meta(
             parsed,
             formatted_components,
+            media_info,
         )
     return hints
 
@@ -219,6 +236,7 @@ def _candidate_presentation(
         source=source,
         result_format=result_format,
         kodi=kodi,
+        media_info=candidate.media_info,
     )
     if not components:
         components, description = _format_release(
@@ -229,6 +247,7 @@ def _candidate_presentation(
             source=source,
             result_format=("title",),
             kodi=kodi,
+            media_info=candidate.media_info,
         )
     return (
         parsed,
@@ -323,6 +342,7 @@ def _render_server_usenet_options(
                 parsed=parsed,
                 formatted_components=components,
                 kodi=kodi,
+                media_info=candidate.media_info,
             ),
             "url": f"{playback_base_url}/playback/v2/{capability}",
         }
@@ -481,6 +501,7 @@ async def _render_stremio_nntp_options(
             parsed=parsed,
             formatted_components=components,
             kodi=kodi,
+            media_info=candidate.media_info,
         )
         streams[(option.candidate_id, option.provider.configuration_id)] = handoff
     return streams
@@ -815,6 +836,7 @@ async def stream(
             source=torrent["tracker"],
             result_format=config["resultFormat"],
             kodi=kodi,
+            media_info=torrent.get("mediaInfo"),
         )
         info_hash_cache_status = service_cache_status.get(info_hash)
         quoted_torrent_title = quote(torrent_title)
@@ -857,6 +879,7 @@ async def stream(
                     parsed=rtn_data,
                     formatted_components=formatted_components,
                     kodi=kodi,
+                    media_info=torrent.get("mediaInfo"),
                 ),
             }
 
@@ -912,6 +935,7 @@ async def stream(
                     parsed=rtn_data,
                     formatted_components=formatted_components,
                     kodi=kodi,
+                    media_info=torrent.get("mediaInfo"),
                 ),
                 "infoHash": info_hash,
             }

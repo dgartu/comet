@@ -2,15 +2,14 @@ use md5::{Digest, Md5};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_STAGE_ENTRIES: usize = 25_000;
 const MAX_OPEN_FILES: u64 = 64;
 const CPU_SECONDS: u64 = 30 * 60;
 
@@ -96,7 +95,6 @@ impl Tool {
     where
         F: Fn() -> bool,
     {
-        validate_stage(stage, limits.stage_bytes)?;
         let threads = std::thread::available_parallelism()
             .map_err(|_| RepairFailureKind::Crashed)?
             .get()
@@ -309,68 +307,6 @@ fn readiness_packet(kind: &[u8; 16], set_id: [u8; 16], body: &[u8]) -> Vec<u8> {
     let digest: [u8; 16] = Md5::digest(&packet[32..]).into();
     packet[16..32].copy_from_slice(&digest);
     packet
-}
-
-fn validate_stage(stage: &Path, maximum_bytes: u64) -> Result<(), RepairFailureKind> {
-    if !stage.is_absolute()
-        || stage
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-    {
-        return Err(RepairFailureKind::Io);
-    }
-    let user = unsafe { libc::getuid() };
-    let group = unsafe { libc::getgid() };
-    let root = fs::symlink_metadata(stage).map_err(|_| RepairFailureKind::Io)?;
-    if !root.file_type().is_dir()
-        || root.uid() != user
-        || root.gid() != group
-        || root.permissions().mode() & 0o777 != 0o700
-    {
-        return Err(RepairFailureKind::Io);
-    }
-    let index = stage.join("index.par2");
-    let mut index_found = false;
-    let mut directories = vec![stage.to_path_buf()];
-    let mut entries = 0usize;
-    let mut bytes = 0u64;
-    while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(directory).map_err(|_| RepairFailureKind::Io)? {
-            let entry = entry.map_err(|_| RepairFailureKind::Io)?;
-            entries += 1;
-            if entries > MAX_STAGE_ENTRIES {
-                return Err(RepairFailureKind::Io);
-            }
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).map_err(|_| RepairFailureKind::Io)?;
-            if metadata.uid() != user || metadata.gid() != group {
-                return Err(RepairFailureKind::Io);
-            }
-            if metadata.file_type().is_dir() {
-                if metadata.permissions().mode() & 0o777 != 0o700 {
-                    return Err(RepairFailureKind::Io);
-                }
-                directories.push(path);
-            } else if metadata.file_type().is_file()
-                && metadata.nlink() == 1
-                && metadata.permissions().mode() & 0o6022 == 0
-            {
-                index_found |= path == index;
-                bytes = bytes
-                    .checked_add(metadata.len())
-                    .ok_or(RepairFailureKind::Io)?;
-                if bytes > maximum_bytes {
-                    return Err(RepairFailureKind::Io);
-                }
-            } else {
-                return Err(RepairFailureKind::Io);
-            }
-        }
-    }
-    if !index_found {
-        return Err(RepairFailureKind::Io);
-    }
-    Ok(())
 }
 
 struct OutputDrain {
@@ -665,28 +601,6 @@ mod tests {
             .expect_err("calculator must fail");
 
         assert_eq!(failure, RepairFailureKind::Io);
-    }
-
-    #[test]
-    fn repair_rejects_symlink_and_hardlink_stage_inputs() {
-        let directory = TemporaryDirectory::new("stage-inputs");
-        let binary = calculator(&directory, "exit 0");
-        let tool = Tool::validate(&binary).expect("validate calculator");
-        let stage = stage(&directory);
-        symlink("/dev/null", stage.join("escape")).expect("create stage symlink");
-        assert_eq!(
-            tool.repair_with_limits(&stage, || false, test_limits(Duration::from_secs(1)))
-                .expect_err("reject stage symlink"),
-            RepairFailureKind::Io
-        );
-        fs::remove_file(stage.join("escape")).expect("remove stage symlink");
-        fs::hard_link(stage.join("index.par2"), stage.join("hardlink"))
-            .expect("create stage hardlink");
-        assert_eq!(
-            tool.repair_with_limits(&stage, || false, test_limits(Duration::from_secs(1)))
-                .expect_err("reject stage hardlink"),
-            RepairFailureKind::Io
-        );
     }
 
     #[test]

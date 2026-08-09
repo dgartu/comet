@@ -20,8 +20,8 @@ def api_credential(value: object) -> str | None:
         return None
     for key in API_CREDENTIAL_KEYS:
         candidate = value.get(key)
-        if candidate and candidate.strip():
-            return candidate.strip()
+        if isinstance(candidate, str) and (candidate := candidate.strip()):
+            return candidate
     return None
 
 
@@ -30,6 +30,6 @@ def easynews_credentials(value: object) -> tuple[str, str] | None:
     if value is None:
         return None
     username, password = (value.get(key) for key in EASYNEWS_CREDENTIAL_KEYS)
-    if not username or not password:
+    if not all(isinstance(item, str) and item for item in (username, password)):
         return None
     return username, password

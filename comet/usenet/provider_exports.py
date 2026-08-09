@@ -3,16 +3,14 @@
 import re
 import secrets
 import time
-import uuid
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
 from comet.core.models import settings
-from comet.usenet.identity import partition_hex
+from comet.utils.text import has_ascii_control
 
 _AUDIENCE = "stremthru-newz"
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
-_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 _EXPORT_IDLE_TTL_SECONDS = 30 * 24 * 60 * 60
 _MAX_GC_BATCH = 256
 
@@ -47,7 +45,8 @@ def export_base_url() -> str:
         or parsed.password
         or parsed.query
         or parsed.fragment
-        or any(character.isspace() or ord(character) < 33 for character in value)
+        or has_ascii_control(value)
+        or any(character.isspace() for character in value)
     ):
         raise NzbProviderExportError("nzb_export_base_url_invalid")
     return urlunsplit(
@@ -61,35 +60,6 @@ class NzbProviderExportRepository:
     def __init__(self, database):
         self._database = database
 
-    @staticmethod
-    def _binding(
-        partition: bytes,
-        grant_id: str,
-        provider_configuration_id: str,
-        credential_fingerprint: str,
-    ) -> dict[str, str]:
-        try:
-            parsed_grant = uuid.UUID(grant_id)
-            parsed_provider = uuid.UUID(provider_configuration_id)
-        except (TypeError, ValueError, AttributeError) as exc:
-            raise ValueError("invalid provider export binding") from exc
-        if (
-            str(parsed_grant) != grant_id
-            or str(parsed_provider) != provider_configuration_id
-        ):
-            raise ValueError("invalid provider export binding")
-        if not isinstance(credential_fingerprint, str) or not _FINGERPRINT_RE.fullmatch(
-            credential_fingerprint
-        ):
-            raise ValueError("invalid provider export binding")
-        return {
-            "owner_configuration_partition": partition_hex(partition),
-            "grant_id": grant_id,
-            "provider_configuration_id": provider_configuration_id,
-            "credential_fingerprint": credential_fingerprint,
-            "audience": _AUDIENCE,
-        }
-
     async def get_or_create(
         self,
         *,
@@ -99,12 +69,13 @@ class NzbProviderExportRepository:
         credential_fingerprint: str,
         now: float | None = None,
     ) -> str:
-        binding = self._binding(
-            owner_configuration_partition,
-            grant_id,
-            provider_configuration_id,
-            credential_fingerprint,
-        )
+        binding = {
+            "owner_configuration_partition": owner_configuration_partition.hex(),
+            "grant_id": grant_id,
+            "provider_configuration_id": provider_configuration_id,
+            "credential_fingerprint": credential_fingerprint,
+            "audience": _AUDIENCE,
+        }
         current_time = time.time() if now is None else now
         existing = await self._database.fetch_one(
             """

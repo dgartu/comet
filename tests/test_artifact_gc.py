@@ -1,3 +1,4 @@
+import asyncio
 import os
 import unittest
 import uuid
@@ -19,6 +20,35 @@ from comet.usenet.artifact_leases import ArtifactReaderLease
 
 
 class ArtifactReaderLeaseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_finishes_lease_deletion_before_propagating_cancellation(self):
+        started = asyncio.Event()
+        allow_delete = asyncio.Event()
+        finished = asyncio.Event()
+
+        class Database:
+            async def execute(self, *_args, **_kwargs):
+                started.set()
+                await allow_delete.wait()
+                finished.set()
+
+        lease = ArtifactReaderLease(
+            Database(),
+            lease_id=str(uuid.uuid4()),
+            artifact_sha256="a" * 64,
+        )
+        close_task = asyncio.create_task(lease.close())
+        await started.wait()
+        close_task.cancel()
+        await asyncio.sleep(0)
+        completed_before_delete = close_task.done()
+        allow_delete.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await close_task
+
+        self.assertFalse(completed_before_delete)
+        self.assertTrue(finished.is_set())
+
     async def test_close_can_retry_after_a_transient_database_failure(self):
         class Database:
             def __init__(self):

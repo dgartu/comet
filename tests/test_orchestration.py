@@ -9,7 +9,6 @@ from comet.core.sources import (
     MAX_SIGNED_BIGINT,
     LocatorKind,
     LocatorPolicy,
-    RealNzbRef,
     ReleaseCandidate,
     ReleaseScope,
     TorrentLocator,
@@ -30,7 +29,7 @@ from comet.services.orchestration import (
 
 
 class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_background_scrape_rejects_candidate_outside_torrent_plan(self):
+    async def test_background_scrape_builds_torrent_only_plan(self):
         manager = TorrentResultAccumulator(
             media_type="movie",
             media_full_id="tt123",
@@ -43,24 +42,6 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             aliases={},
             remove_adult_content=False,
         )
-        usenet_candidate = ReleaseCandidate(
-            candidate_id="usenet-candidate",
-            media_id="tt123",
-            scope=ReleaseScope.MOVIE,
-            transport=TransportKind.USENET,
-            title="Movie.2026.1080p.WEB-DL",
-            locators=(
-                RealNzbRef(
-                    locator_id="nzb",
-                    kind=LocatorKind.REAL_NZB,
-                    policy=LocatorPolicy(frozenset({"comet_native_usenet"})),
-                    adapter_configuration_id="source",
-                    remote_guid="guid",
-                ),
-            ),
-            size=1000,
-            source="unexpected",
-        )
         captured = {}
 
         class CaptureCoordinator:
@@ -71,10 +52,10 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                 captured["query"] = query
                 captured["plan"] = plan
                 captured["search_options"] = kwargs
-                return DiscoveryResult((usenet_candidate,), (), plan)
+                return DiscoveryResult((), (), plan)
 
         class TorrentAdapter:
-            discovery_timeout = 120.0
+            pass
 
         with (
             patch.object(
@@ -89,8 +70,7 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(manager, "filter_manager", new=AsyncMock()) as filter_manager,
             patch.object(manager, "cache_torrents", new=AsyncMock()),
         ):
-            with self.assertRaisesRegex(ValueError, "non-torrent candidate"):
-                await manager.scrape_torrents(ScrapeContext.BACKGROUND)
+            await manager.scrape_torrents(ScrapeContext.BACKGROUND)
 
         plan = captured["plan"]
         self.assertEqual(plan.transports, frozenset({TransportKind.BITTORRENT}))
@@ -103,7 +83,7 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             captured["search_options"]["work_class"],
             ScrapeContext.BACKGROUND,
         )
-        filter_manager.assert_not_awaited()
+        filter_manager.assert_awaited_once_with([])
         self.assertEqual(manager.torrents, {})
 
     async def test_discovered_torrent_candidate_uses_existing_filter_contract(self):
@@ -177,14 +157,13 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         captured = []
 
         class CaptureAdapter:
-            discovery_timeout = 23.0
-
             async def search(self, query, context):
                 captured.append((query, context))
                 return DiscoveryBatch(coverage=frozenset({"bittorrent"}))
 
         with (
             patch.object(settings, "INDEXER_LANGUAGES", ["it"]),
+            patch.object(settings, "LIVE_SCRAPE_TIMEOUT", 23.0),
             patch.object(settings, "INDEXER_INCLUDE_CANONICAL_TITLE", False),
             patch.object(settings, "INDEXER_INCLUDE_ORIGINAL_TITLE", True),
             patch.object(
@@ -206,10 +185,6 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             ("La vita davanti a se",),
         )
         self.assertIs(captured[0][1].work_class, ScrapeContext.LIVE)
-        self.assertGreater(
-            captured[0][1].hard_deadline - asyncio.get_running_loop().time(),
-            22.0,
-        )
 
     async def test_filter_manager_accepts_empty_results(self):
         manager = TorrentResultAccumulator(
@@ -245,6 +220,7 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.ready_to_cache, [])
 
     def test_torrent_projections_preserve_values_without_validation(self):
+        media_info = object()
         torrent = {
             "title": "Movie.2026.1080p.WEB-DL",
             "infoHash": "a" * 40,
@@ -254,6 +230,7 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             "tracker": "Test",
             "sources": [],
             "parsed": None,
+            "mediaInfo": media_info,
         }
         runtime = torrent_candidate_from_runtime(
             torrent["infoHash"],
@@ -269,6 +246,7 @@ class TorrentOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(runtime.size, MAX_SIGNED_BIGINT + 1)
+        self.assertIs(runtime.media_info, media_info)
         self.assertEqual(discovery.size, MAX_SIGNED_BIGINT + 1)
 
     def test_private_torrents_are_hidden_unless_results_are_enabled(self):

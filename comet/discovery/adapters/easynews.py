@@ -4,14 +4,17 @@ import hashlib
 import re
 import uuid
 from dataclasses import dataclass
-from uuid import UUID
 
 import aiohttp
 import orjson
 
-from comet.core.provider_json import is_success_status
+from comet.core.provider_json import (
+    ProviderJsonError,
+    is_success_status,
+    read_provider_body,
+)
 from comet.core.sources import (
-    REAL_NZB_PROVIDER_KINDS,
+    MAX_SIGNED_BIGINT,
     EasynewsHttpRef,
     LocatorKind,
     LocatorPolicy,
@@ -27,11 +30,10 @@ from comet.usenet.easynews import (
     credential,
     generate_nzb,
 )
+from comet.utils.text import has_ascii_control
 
 _SEARCH_V2_URL = "https://members.easynews.com/2.0/search/solr-search/advanced"
-_MAX_RESULTS = 100
-_MAX_JSON_BYTES = 2 * 1024 * 1024
-_MAX_SIGNED_64 = (1 << 63) - 1
+_PAGE_SIZE = 100
 _QUERY_WHITESPACE = re.compile(r"\s+")
 
 
@@ -62,20 +64,6 @@ class EasynewsSearchAccount:
     def __post_init__(self):
         credential(self.username)
         credential(self.password)
-        for value in (
-            self.provider_configuration_id,
-            self.source_configuration_id,
-        ):
-            if value is not None:
-                _configuration_id(value)
-        provider_kinds = self.generated_provider_kinds
-        if (
-            not isinstance(provider_kinds, frozenset)
-            or provider_kinds
-            and self.source_configuration_id is None
-            or not provider_kinds <= REAL_NZB_PROVIDER_KINDS
-        ):
-            raise ValueError("Easynews generated provider kinds are invalid")
 
 
 def _text(value: object, maximum: int) -> str | None:
@@ -83,7 +71,7 @@ def _text(value: object, maximum: int) -> str | None:
         not isinstance(value, str)
         or not value
         or len(value) > maximum
-        or any(ord(character) < 32 for character in value)
+        or has_ascii_control(value)
     ):
         return None
     return value
@@ -145,8 +133,6 @@ class EasynewsSearchAdapter:
             normalized = _normalize_search_row(row, payload)
             if normalized is not None:
                 rows.append(normalized)
-                if len(rows) == _MAX_RESULTS:
-                    break
         return rows
 
     def _candidate(
@@ -154,11 +140,6 @@ class EasynewsSearchAdapter:
     ) -> ReleaseCandidate | None:
         if _known_passworded(row):
             return None
-        if (
-            not isinstance(context.account_partition, bytes)
-            or len(context.account_partition) != 32
-        ):
-            raise ValueError("Easynews discovery partition is invalid")
         file_identifier = _text(row.get("file_id"), 256)
         filename = _text(row.get("filename"), 512)
         extension = _text(row.get("extension"), 32)
@@ -182,7 +163,7 @@ class EasynewsSearchAdapter:
             if (
                 not isinstance(raw_size, bool)
                 and isinstance(raw_size, int)
-                and 1 <= raw_size <= _MAX_SIGNED_64
+                and 1 <= raw_size <= MAX_SIGNED_BIGINT
             )
             else None
         )
@@ -427,7 +408,10 @@ class EasynewsSearchAdapter:
                     )
                 if not is_success_status(response.status):
                     raise EasynewsSearchError("easynews_search_rejected")
-                document = await _read_bounded(response, _MAX_JSON_BYTES)
+                try:
+                    document = await read_provider_body(response)
+                except ProviderJsonError as exc:
+                    raise EasynewsSearchError("easynews_search_invalid") from exc
                 return self._rows(_json_object(document))
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise EasynewsSearchError(
@@ -452,18 +436,6 @@ def _search_query(query: MediaQuery) -> str:
     return normalized
 
 
-def _configuration_id(value: object) -> str:
-    if not isinstance(value, str):
-        raise ValueError("Easynews configuration ID is invalid")
-    try:
-        parsed = UUID(value)
-    except ValueError as exc:
-        raise ValueError("Easynews configuration ID is invalid") from exc
-    if str(parsed) != value:
-        raise ValueError("Easynews configuration ID is invalid")
-    return value
-
-
 def _search_params(query_text: str) -> dict[str, str]:
     return {
         "gps": query_text,
@@ -473,20 +445,11 @@ def _search_params(query_text: str) -> dict[str, str]:
         "s1": "relevance",
         "s1d": "-",
         "fty[]": "VIDEO",
-        "pby": str(_MAX_RESULTS),
+        "pby": str(_PAGE_SIZE),
         "sb": "1",
         "st": "adv",
         "sS": "3",
     }
-
-
-async def _read_bounded(response, maximum: int) -> bytes:
-    body = bytearray()
-    async for chunk in response.content.iter_chunked(64 * 1024):
-        body.extend(chunk)
-        if len(body) > maximum:
-            raise EasynewsSearchError("easynews_search_response_too_large")
-    return bytes(body)
 
 
 def _json_object(document: bytes) -> dict:

@@ -13,6 +13,7 @@ from comet.debrid.stremthru import StremThru
 from comet.observability.context import create_detached_task
 from comet.services.filtering import filter_release_records
 from comet.services.lock import DistributedLock
+from comet.utils.http_client import http_client_manager
 from comet.utils.parsing import MediaScope
 
 _SYNC_LOCK_PREFIX = "debrid-account-sync"
@@ -101,25 +102,27 @@ def _should_force_requested_episode_scope(
     )
 
 
-async def _fetch_all_magnets(client: StremThru, max_items: int):
+async def _fetch_all_magnets(client: StremThru):
     limit = 500
     items_by_id = {}
     offset = 0
 
-    while offset < max_items:
-        page_limit = min(limit, max_items - offset)
-        items, total_items = await client.list_magnets(limit=page_limit, offset=offset)
+    while True:
+        items, total_items = await client.list_magnets(limit=limit, offset=offset)
 
         if not items:
-            return list(items_by_id.values())
+            break
 
+        previous_count = len(items_by_id)
         for item in items:
             items_by_id[item["id"]] = item
 
         offset += len(items)
-        if offset >= total_items:
-            break
-        if len(items) < page_limit:
+        if (
+            offset >= total_items
+            or len(items) < limit
+            or len(items_by_id) == previous_count
+        ):
             break
 
     return list(items_by_id.values())
@@ -177,9 +180,7 @@ async def _sync_single_account(
     client = StremThru(session, "", "", f"{service}:{api_key}", ip)
     synced_at = time.time()
 
-    magnets = await _fetch_all_magnets(
-        client, settings.DEBRID_ACCOUNT_SCRAPE_MAX_SNAPSHOT_ITEMS
-    )
+    magnets = await _fetch_all_magnets(client)
 
     rows = []
     for item in magnets:
@@ -202,16 +203,16 @@ async def _sync_single_account(
 
 async def _sync_task(
     lock: DistributedLock,
-    session,
     service: str,
     api_key: str,
     ip: str,
     account_key_hash: str,
 ):
     try:
-        await lock.run(
-            _sync_single_account(session, service, api_key, ip, account_key_hash)
-        )
+        async with http_client_manager.bind() as session:
+            await lock.run(
+                _sync_single_account(session, service, api_key, ip, account_key_hash)
+            )
     finally:
         await lock.release()
 
@@ -222,14 +223,13 @@ def _handle_sync_task_done(task: asyncio.Task):
 
 def _schedule_sync_task(
     lock: DistributedLock,
-    session,
     service: str,
     api_key: str,
     ip: str,
     account_key_hash: str,
 ) -> asyncio.Task:
     task = create_detached_task(
-        _sync_task(lock, session, service, api_key, ip, account_key_hash),
+        _sync_task(lock, service, api_key, ip, account_key_hash),
         name="debrid-account-sync",
     )
     _background_tasks[task] = lock
@@ -314,7 +314,7 @@ async def _wait_for_snapshot_targets(
         await asyncio.sleep(0.15)
 
 
-async def ensure_account_snapshot_ready(session, debrid_entries: list[dict], ip: str):
+async def ensure_account_snapshot_ready(debrid_entries: list[dict], ip: str):
     accounts = _dedupe_accounts(debrid_entries)
     if not accounts:
         return
@@ -336,12 +336,11 @@ async def ensure_account_snapshot_ready(session, debrid_entries: list[dict], ip:
     waiting_targets = []
 
     for service, api_key, account_key_hash in missing:
-        lock = DistributedLock(_sync_lock_key(service, account_key_hash), timeout=300)
+        lock = DistributedLock(_sync_lock_key(service, account_key_hash))
         if await lock.acquire():
             sync_tasks.append(
                 _schedule_sync_task(
                     lock,
-                    session,
                     service,
                     api_key,
                     ip,
@@ -354,29 +353,22 @@ async def ensure_account_snapshot_ready(session, debrid_entries: list[dict], ip:
     if sync_tasks:
         remaining = deadline - time.monotonic()
         if remaining > 0:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*sync_tasks),
-                    timeout=remaining,
-                )
-            except TimeoutError:
-                pass
+            await asyncio.wait(sync_tasks, timeout=remaining)
     if waiting_targets:
         await _wait_for_snapshot_targets(waiting_targets, min_timestamp, deadline)
 
 
-async def trigger_account_snapshot_sync(session, service: str, api_key: str, ip: str):
+async def trigger_account_snapshot_sync(service: str, api_key: str, ip: str):
     if not api_key:
         return False
 
     account_key_hash = build_account_key_hash(api_key)
-    lock = DistributedLock(_sync_lock_key(service, account_key_hash), timeout=300)
+    lock = DistributedLock(_sync_lock_key(service, account_key_hash))
     if not await lock.acquire():
         return False
 
     _schedule_sync_task(
         lock,
-        session,
         service,
         api_key,
         ip,
@@ -386,7 +378,6 @@ async def trigger_account_snapshot_sync(session, service: str, api_key: str, ip:
 
 
 async def _refresh_account_snapshots(
-    session,
     debrid_entries: list[dict],
     ip: str,
 ) -> None:
@@ -426,14 +417,13 @@ async def _refresh_account_snapshots(
         ):
             continue
 
-        lock = DistributedLock(_sync_lock_key(service, account_key_hash), timeout=300)
+        lock = DistributedLock(_sync_lock_key(service, account_key_hash))
         lock_acquired = await lock.acquire()
         if not lock_acquired:
             continue
 
         _schedule_sync_task(
             lock,
-            session,
             service,
             api_key,
             ip,
@@ -443,13 +433,11 @@ async def _refresh_account_snapshots(
 
 def schedule_account_snapshot_refresh(
     add_background_task,
-    session,
     debrid_entries: list[dict],
     ip: str,
 ) -> None:
     add_background_task(
         _refresh_account_snapshots,
-        session,
         debrid_entries,
         ip,
     )
@@ -487,13 +475,11 @@ async def get_account_torrents_for_media(
               AND account_key_hash = :account_key_hash
               AND synced_at >= :min_timestamp
             ORDER BY added_at DESC
-            LIMIT :limit
             """,
             {
                 "debrid_service": service,
                 "account_key_hash": account_key_hash,
                 "min_timestamp": min_timestamp,
-                "limit": settings.DEBRID_ACCOUNT_SCRAPE_MAX_MATCH_ITEMS,
             },
             force_primary=True,
         )

@@ -26,8 +26,6 @@ def target_database(preparation_id: str):
                 "locator_ids_json": f'["{uuid.uuid4()}"]',
                 "selection_intent_json": "[0]",
                 "provider_preparation_id": None,
-                "manifest_identity": None,
-                "parser_version": 2,
                 "client": "stremio",
                 "state": "pending",
                 "absolute_expires_at": 3601,

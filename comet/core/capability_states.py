@@ -67,7 +67,7 @@ class CapabilityStateRepository:
         now: float | None = None,
     ) -> EffectiveCapabilityState:
         fingerprint = binding_fingerprint
-        observed_at = time.time() if now is None else _timestamp(now)
+        observed_at = time.time() if now is None else now
         row = await self._database.fetch_one(
             """
             SELECT state, last_success_at, observed_at, fresh_until, last_known_good_until,
@@ -121,7 +121,7 @@ class CapabilityStateRepository:
 
     async def cleanup_expired(self, *, now: float | None = None) -> None:
         """Discard fingerprints after their validation evidence is no longer useful."""
-        observed_at = time.time() if now is None else _timestamp(now)
+        observed_at = time.time() if now is None else now
         await self._database.execute(
             """
             DELETE FROM capability_validation_states
@@ -268,10 +268,9 @@ class CapabilityStateRepository:
                 state = await self._validate_pending(binding, validator, now=now)
                 return binding.binding_fingerprint, state
 
-        pairs = await asyncio.gather(
+        return await _gather_state_pairs(
             *(ensure_one(binding) for binding in unique.values())
         )
-        return dict(pairs)
 
     async def retest(
         self,
@@ -302,10 +301,9 @@ class CapabilityStateRepository:
                 )
                 return binding.binding_fingerprint, state
 
-        pairs = await asyncio.gather(
+        return await _gather_state_pairs(
             *(retest_one(binding) for binding in unique.values())
         )
-        return dict(pairs)
 
     async def _validate_pending(
         self,
@@ -446,6 +444,14 @@ def _unique_bindings(
     return {binding.binding_fingerprint: binding for binding in bindings}
 
 
+async def _gather_state_pairs(*operations) -> dict[str, EffectiveCapabilityState]:
+    results = await asyncio.gather(*operations, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return dict(results)
+
+
 @asynccontextmanager
 async def _binding_backend_lock(binding: CapabilityBinding, *, deadline: float):
     from comet.core.database import backend_lock, settings
@@ -502,18 +508,18 @@ def binding_fingerprint(
     ).hex()
 
 
-def _deterministic_cbor(value: object, depth: int = 0) -> bytes:
+def _deterministic_cbor(value: object) -> bytes:
     encoded = bytearray()
-    _encode_deterministic_cbor(value, encoded, depth)
+    _encode_deterministic_cbor(value, encoded)
     return bytes(encoded)
 
 
 def deterministic_cbor(value: object) -> bytes:
-    """Encode one bounded RFC 8949 core deterministic value."""
+    """Encode one RFC 8949 core deterministic value."""
     return _deterministic_cbor(value)
 
 
-def _encode_deterministic_cbor(value: object, encoded: bytearray, depth: int) -> None:
+def _encode_deterministic_cbor(value: object, encoded: bytearray) -> None:
     if value is None:
         chunk = b"\xf6"
     elif value is False:
@@ -531,27 +537,23 @@ def _encode_deterministic_cbor(value: object, encoded: bytearray, depth: int) ->
         utf8 = value.encode("utf-8")
         chunk = _cbor_major(3, len(utf8)) + utf8
     elif isinstance(value, (list, tuple)):
-        _append_cbor(encoded, _cbor_major(4, len(value)))
+        encoded.extend(_cbor_major(4, len(value)))
         for item in value:
-            _encode_deterministic_cbor(item, encoded, depth + 1)
+            _encode_deterministic_cbor(item, encoded)
         return
     elif isinstance(value, Mapping):
         encoded_items = []
         for key, item in value.items():
-            encoded_key = _deterministic_cbor(key, depth + 1)
+            encoded_key = _deterministic_cbor(key)
             encoded_items.append((encoded_key, item))
         encoded_items.sort(key=lambda item: item[0])
-        _append_cbor(encoded, _cbor_major(5, len(encoded_items)))
+        encoded.extend(_cbor_major(5, len(encoded_items)))
         for encoded_key, item in encoded_items:
-            _append_cbor(encoded, encoded_key)
-            _encode_deterministic_cbor(item, encoded, depth + 1)
+            encoded.extend(encoded_key)
+            _encode_deterministic_cbor(item, encoded)
         return
     else:
         raise ValueError("capability fingerprint value type is unsupported")
-    _append_cbor(encoded, chunk)
-
-
-def _append_cbor(encoded: bytearray, chunk: bytes) -> None:
     encoded.extend(chunk)
 
 
@@ -569,15 +571,11 @@ def _cbor_major(major: int, value: int) -> bytes:
     raise ValueError("capability fingerprint integer is out of range")
 
 
-def _timestamp(value: object) -> float:
-    return float(value)
-
-
 def _binding_values(
     binding: CapabilityBinding,
     now: float | None,
 ) -> dict[str, object]:
-    observed_at = time.time() if now is None else _timestamp(now)
+    observed_at = time.time() if now is None else now
     return {
         "binding_fingerprint": binding.binding_fingerprint,
         "binding_kind": binding.binding_kind,

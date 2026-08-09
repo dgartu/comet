@@ -11,13 +11,6 @@ SPEC.loader.exec_module(parser)
 
 
 class KodiParserTests(unittest.TestCase):
-    def test_malformed_hints_degrade_to_current_empty_metadata(self):
-        for hints in (None, [], "metadata"):
-            with self.subTest(hints=hints):
-                result = parser.parse_stream_info("name", "description", hints)
-                self.assertEqual(result["size"], 0)
-                self.assertEqual(result["languages"], [])
-
     def test_malformed_kodi_fields_are_isolated(self):
         result = parser.parse_stream_info(
             "name",

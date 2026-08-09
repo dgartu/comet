@@ -10,7 +10,7 @@ import orjson
 from comet.core.database import database, encode_json_param
 from comet.core.models import settings
 from comet.metadata.http import MetadataHttpError
-from comet.metadata.validation import metadata_text, metadata_year, normalize_aliases
+from comet.metadata.validation import metadata_text, normalize_aliases
 from comet.services.anime import anime_mapper
 from comet.utils.languages import merge_aliases
 from comet.utils.parsing import parse_media_id
@@ -103,9 +103,7 @@ class MetadataFetchStatus(StrEnum):
     OK = "ok"
     NOT_FOUND = "not_found"
     UNSUPPORTED = "unsupported"
-    PROVIDER_UNAVAILABLE = "provider_unavailable"
-    TIMEOUT = "timeout"
-    INVALID_RESPONSE = "invalid_response"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +142,13 @@ def _alias_cache_timestamp(current_time: float, succeeded: bool) -> float:
 async def _settle_metadata_tasks(tasks: dict[str, asyncio.Task]) -> dict[str, object]:
     if not tasks:
         return {}
-    values = await asyncio.gather(*tasks.values())
+    try:
+        values = await asyncio.gather(*tasks.values())
+    except BaseException:
+        for task in tasks.values():
+            task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        raise
     return dict(zip(tasks, values, strict=True))
 
 
@@ -396,10 +400,8 @@ class MetadataScraper:
                 is_kitsu,
                 media_type,
             )
-        except TimeoutError:
-            return _MetadataValue(MetadataFetchStatus.TIMEOUT, None)
-        except MetadataHttpError:
-            return _MetadataValue(MetadataFetchStatus.INVALID_RESPONSE, None)
+        except (TimeoutError, MetadataHttpError):
+            return _MetadataValue(MetadataFetchStatus.UNAVAILABLE, None)
         return _MetadataValue(
             (
                 MetadataFetchStatus.OK
@@ -440,8 +442,8 @@ class MetadataScraper:
         title = metadata_text(metadata.get("title"))
         if title is None:
             return None
-        year = metadata_year(metadata.get("year"))
-        year_end = metadata_year(metadata.get("year_end"))
+        year = metadata.get("year")
+        year_end = metadata.get("year_end")
         if year is not None and year_end is not None and year_end < year:
             year_end = None
         return {
@@ -463,9 +465,8 @@ class MetadataScraper:
         if is_kitsu:
             raw_metadata = await get_kitsu_metadata(self.session, id)
             return self.normalize_metadata(raw_metadata, 1, episode)
-        else:
-            raw_metadata = await get_imdb_metadata(self.session, id, media_type)
-            return self.normalize_metadata(raw_metadata, season, episode)
+        raw_metadata = await get_imdb_metadata(self.session, id, media_type)
+        return self.normalize_metadata(raw_metadata, season, episode)
 
     async def fetch_aliases_with_metadata(
         self,

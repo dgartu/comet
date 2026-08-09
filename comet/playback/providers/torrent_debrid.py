@@ -9,7 +9,7 @@ import aiohttp
 from comet.core.provider_json import (
     ProviderJsonError,
     is_success_status,
-    read_provider_json,
+    read_json_object,
 )
 from comet.debrid.manager import get_debrid
 from comet.playback.base import (
@@ -83,7 +83,7 @@ class TorrentDebridProvider:
                         Actionability.NONE,
                         code="plan_incompatible",
                     )
-                await read_provider_json(response)
+                await read_json_object(response)
         except (aiohttp.ClientError, TimeoutError, ProviderJsonError):
             return ProviderStatus(
                 Readiness.RETRYABLE_FAILURE,

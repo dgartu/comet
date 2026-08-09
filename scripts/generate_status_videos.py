@@ -166,8 +166,6 @@ def bitrate(value: str) -> str:
 
 
 def status_code(value: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise argparse.ArgumentTypeError("status code must be a non-empty string")
     normalized = normalize_status_key_runtime(value)
     if normalized is None:
         raise argparse.ArgumentTypeError("status code must contain letters or digits")
@@ -563,8 +561,6 @@ def load_message_overrides(messages_file: str | None) -> dict[str, str]:
 
     normalized_map = {}
     for key, value in payload.items():
-        if not isinstance(key, str) or not key.strip():
-            raise TypeError("Message keys must be non-empty strings.")
         if type(value) is not str or not value.strip():
             raise TypeError("Message values must be non-empty strings.")
         normalized_key = normalize_status_key_runtime(key)
@@ -612,7 +608,7 @@ def main() -> int:
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=min(args.ffmpeg_timeout, 30),
+        timeout=args.ffmpeg_timeout,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -620,9 +616,9 @@ def main() -> int:
     single_mode = args.single_file is not None or args.single_message is not None
     if single_mode:
         if (
-            type(args.single_file) is not str
+            not args.single_file
             or not args.single_file.strip()
-            or type(args.single_message) is not str
+            or not args.single_message
             or not args.single_message.strip()
         ):
             raise ValueError(

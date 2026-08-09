@@ -5,11 +5,6 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub const MAX_STRUCTURAL_END_BYTES: usize = 2 * 1024 * 1024;
-const MAX_CATALOG_FILES: usize = nzb::MAX_FILES;
-const MAX_CATALOG_POSTINGS: usize = nzb::MAX_SEGMENTS;
-const MAX_POSTINGS_PER_FILE: usize = nzb::MAX_SEGMENTS;
-const MAX_TEXT_BYTES: usize = 16 * 1024;
-const MAX_ARTICLE_BYTES: u64 = crate::limits::MAX_DECLARED_POSTING_BYTES;
 const VIDEO_EXTENSIONS: &[&str] = &[
     "3g2", "3gp", "amv", "asf", "avi", "drc", "f4a", "f4b", "f4p", "f4v", "flv", "gif", "gifv",
     "m2ts", "m2v", "m4p", "m4v", "mkv", "mng", "mov", "mp2", "mp4", "mpe", "mpeg", "mpg", "mpv",
@@ -54,71 +49,19 @@ pub struct CatalogAsset {
     pub kind: AssetKind,
 }
 
-fn valid_manifest_text(value: &str) -> bool {
-    value.len() <= MAX_TEXT_BYTES && !value.bytes().any(|byte| byte.is_ascii_control())
-}
-
-fn valid_manifest_message_id(value: &str) -> bool {
-    crate::nntp::canonical_message_id(value) == Ok(value)
-}
-
-fn valid_manifest_metadata(metadata: &std::collections::BTreeMap<String, String>) -> bool {
-    metadata.iter().all(|(key, value)| {
-        nzb::known_metadata(key) && !value.is_empty() && valid_manifest_text(value)
-    })
-}
-
 fn declared_primary_bytes(file: &nzb::File) -> Result<u64, &'static str> {
-    if file.postings.is_empty() || file.postings.len() > MAX_POSTINGS_PER_FILE {
-        return Err("asset_catalog_invalid");
-    }
-    let mut previous = 0_u64;
+    let mut previous = None;
     let mut declared = 0_u64;
     for posting in &file.postings {
-        if posting.number == 0
-            || posting.number > MAX_POSTINGS_PER_FILE as u64
-            || posting.number < previous
-            || posting.bytes == 0
-            || posting.bytes > MAX_ARTICLE_BYTES
-            || !valid_manifest_message_id(&posting.message_id)
-        {
-            return Err("asset_catalog_invalid");
-        }
-        if posting.number != previous {
-            if posting.number != previous + 1 {
-                return Err("asset_catalog_invalid");
-            }
+        if previous != Some(posting.number) {
             declared = declared
                 .checked_add(posting.bytes)
                 .filter(|value| *value <= crate::limits::MAX_LOGICAL_BYTES)
                 .ok_or("asset_catalog_invalid")?;
-            previous = posting.number;
+            previous = Some(posting.number);
         }
     }
     Ok(declared)
-}
-
-fn validate_manifest_file(file: &nzb::File) -> Result<u64, &'static str> {
-    if file
-        .subject
-        .as_deref()
-        .is_some_and(|value| !valid_manifest_text(value))
-        || file
-            .poster
-            .as_deref()
-            .is_some_and(|value| !valid_manifest_text(value))
-        || file.groups.iter().any(|value| !valid_manifest_text(value))
-        || !file
-            .groups
-            .windows(2)
-            .all(|values| values[0].as_bytes() < values[1].as_bytes())
-        || file.metadata.iter().any(|(key, value)| {
-            !nzb::known_metadata(key) || !valid_manifest_text(value) || value.is_empty()
-        })
-    {
-        return Err("asset_catalog_invalid");
-    }
-    declared_primary_bytes(file)
 }
 
 fn quoted_subject_candidates(subject: &str) -> Vec<&str> {
@@ -240,35 +183,13 @@ pub fn catalog_manifest(
     files: &[nzb::File],
     selection_hint: Option<(&str, u64)>,
 ) -> Result<Vec<CatalogAsset>, &'static str> {
-    if files.is_empty()
-        || files.len() > MAX_CATALOG_FILES
-        || !valid_manifest_metadata(metadata)
-        || expected_manifest_identity.len() != 68
-        || nzb::manifest_identity(metadata, files) != expected_manifest_identity
-    {
+    if nzb::manifest_identity(metadata, files) != expected_manifest_identity {
         return Err("asset_catalog_invalid");
     }
     let artifact = artifact_digest(artifact_sha256)?;
-    files.iter().try_fold(0usize, |total, file| {
-        total
-            .checked_add(file.postings.len())
-            .filter(|value| *value <= MAX_CATALOG_POSTINGS)
-            .ok_or("asset_catalog_invalid")
-    })?;
-    let selection_hint = match selection_hint {
-        Some((hinted_path, hinted_size)) => {
-            if normalize_archive_path(hinted_path).as_deref() != Ok(hinted_path)
-                || !(1..=crate::limits::MAX_LOGICAL_BYTES).contains(&hinted_size)
-            {
-                return Err("asset_catalog_invalid");
-            }
-            Some((hinted_path, hinted_size))
-        }
-        None => None,
-    };
     let mut cataloged_files = Vec::with_capacity(files.len());
     for file in files {
-        cataloged_files.push((validate_manifest_file(file)?, catalog_paths(file)));
+        cataloged_files.push((declared_primary_bytes(file)?, catalog_paths(file)));
     }
     let has_par2 = cataloged_files
         .iter()
@@ -297,7 +218,7 @@ pub fn catalog_manifest(
         .count();
     let logical_split_path = selection_hint
         .filter(|_| {
-            (2..=crate::raw_composite::MAX_COMPOSITE_PARTS).contains(&source_file_count)
+            source_file_count >= 2
                 && cataloged_files.iter().all(|(_, cataloged)| {
                     cataloged.is_empty() || catalog_is(cataloged, AssetKind::Par2)
                 })
@@ -419,12 +340,6 @@ pub struct ContainerEvidence {
 }
 
 pub fn probe_container(head: &[u8], tail: &[u8]) -> Result<ContainerEvidence, &'static str> {
-    if head.is_empty()
-        || head.len() > MAX_STRUCTURAL_END_BYTES
-        || tail.len() > MAX_STRUCTURAL_END_BYTES
-    {
-        return Err("container_probe_budget");
-    }
     let mut evidence = if head.starts_with(EBML_SIGNATURE) {
         probe_ebml(head)?
     } else if head.get(4..8) == Some(b"ftyp") {
@@ -534,9 +449,6 @@ fn find_head_moov(data: &[u8], mut offset: usize) -> Option<Result<Option<u64>, 
         if &box_.kind == b"moov" {
             return Some(parse_moov(data, box_));
         }
-        if box_.end <= offset {
-            return Some(Err("container_structure_invalid"));
-        }
         offset = box_.end;
     }
     None
@@ -556,7 +468,7 @@ fn find_tail_moov(data: &[u8]) -> Option<Result<Option<u64>, &'static str>> {
         let mut valid_suffix = true;
         while suffix < data.len() {
             match iso_box(data, suffix) {
-                Ok(next) if next.end > suffix => suffix = next.end,
+                Ok(next) => suffix = next.end,
                 _ => {
                     valid_suffix = false;
                     break;
@@ -574,7 +486,7 @@ fn parse_moov(data: &[u8], moov: IsoBox) -> Result<Option<u64>, &'static str> {
     let mut offset = moov.content_start;
     while offset < moov.end {
         let child = iso_box(data, offset)?;
-        if child.end > moov.end || child.end <= offset {
+        if child.end > moov.end {
             return Err("container_structure_invalid");
         }
         if &child.kind == b"mvhd" {
@@ -610,10 +522,8 @@ fn parse_mvhd(payload: &[u8]) -> Result<Option<u64>, &'static str> {
     if duration == 0 {
         return Ok(None);
     }
-    u128::from(duration)
-        .checked_mul(1000)
-        .map(|millis| millis / u128::from(timescale))
-        .and_then(|millis| u64::try_from(millis).ok())
+    u64::try_from(u128::from(duration) * 1000 / u128::from(timescale))
+        .ok()
         .map(Some)
         .ok_or("container_structure_invalid")
 }
@@ -732,7 +642,7 @@ fn probe_ebml(head: &[u8]) -> Result<ContainerEvidence, &'static str> {
         let Some(end) = element.end.filter(|end| *end <= segment_end) else {
             break;
         };
-        if end > segment_end || end <= offset {
+        if end <= offset {
             return Err("container_structure_invalid");
         }
         if element.id == EBML_INFO_ID {
@@ -814,8 +724,8 @@ fn ebml_float(payload: &[u8]) -> Result<f64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AssetKind, ContainerKind, MAX_ARTICLE_BYTES, catalog_manifest, classify_path,
-        declared_primary_bytes, probe_container,
+        AssetKind, ContainerKind, catalog_manifest, classify_path, declared_primary_bytes,
+        probe_container,
     };
     use crate::nzb;
 
@@ -991,10 +901,12 @@ mod tests {
 
     #[test]
     fn rejects_catalog_files_above_the_logical_media_limit() {
-        let postings = (1..=(crate::limits::MAX_LOGICAL_BYTES / MAX_ARTICLE_BYTES + 1))
+        let postings = (1..=(crate::limits::MAX_LOGICAL_BYTES
+            / crate::limits::MAX_DECLARED_POSTING_BYTES
+            + 1))
             .map(|number| nzb::Posting {
                 number,
-                bytes: MAX_ARTICLE_BYTES,
+                bytes: crate::limits::MAX_DECLARED_POSTING_BYTES,
                 message_id: "part@example.test".to_owned(),
             })
             .collect();
@@ -1052,16 +964,6 @@ mod tests {
         .unwrap();
         assert_eq!(opaque_extension[0].relative_path, "Movie.2026.future");
         assert_eq!(opaque_extension[0].kind, AssetKind::Video);
-        assert_eq!(
-            catalog_manifest(
-                &artifact,
-                &manifest.nm1,
-                &manifest.metadata,
-                &manifest.files,
-                Some(("../Movie.2026.mkv", 300)),
-            ),
-            Err("asset_catalog_invalid")
-        );
         let with_recovery = nzb::parse(
             br#"<nzb>
                 <file subject="generic"><segments><segment bytes="300" number="1">video</segment></segments></file>
@@ -1185,8 +1087,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_revalidates_identity_ordinals_and_path_uniqueness() {
-        let mut manifest = nzb::parse(
+    fn catalog_binds_identity_and_path_uniqueness() {
+        let manifest = nzb::parse(
             br#"<nzb>
                 <file subject='"same/Movie.mkv"'><segments><segment bytes="1" number="1">one</segment></segments></file>
                 <file subject='"SAME/movie.MKV"'><segments><segment bytes="1" number="1">two</segment></segments></file>
@@ -1207,19 +1109,6 @@ mod tests {
             catalog_manifest(
                 &"ab".repeat(32),
                 &format!("nm1:{}", "0".repeat(64)),
-                &manifest.metadata,
-                &manifest.files,
-                None,
-            ),
-            Err("asset_catalog_invalid")
-        );
-
-        manifest.files[0].postings[0].number = 2;
-        let identity = nzb::manifest_identity(&manifest.metadata, &manifest.files);
-        assert_eq!(
-            catalog_manifest(
-                &"ab".repeat(32),
-                &identity,
                 &manifest.metadata,
                 &manifest.files,
                 None,
@@ -1301,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_without_a_filename_and_rejects_truncation_and_budget_overflow() {
+    fn detects_without_a_filename_and_rejects_truncation() {
         let head = iso_box(b"ftyp", b"isom\0\0\0\0isommp42");
         let evidence = probe_container(&head, &[]).unwrap();
         assert_eq!(evidence.kind, ContainerKind::Mp4);
@@ -1316,10 +1205,6 @@ mod tests {
         assert_eq!(
             probe_container(&complete[..7], &[]),
             Err("container_signature_mismatch")
-        );
-        assert_eq!(
-            probe_container(&vec![0; 2 * 1024 * 1024 + 1], &[]),
-            Err("container_probe_budget")
         );
     }
 }

@@ -86,10 +86,6 @@ def _normalize_v2_torrent_providers(
     return normalized, direct_enabled
 
 
-def _default_validated_config():
-    return _DEFAULT_VALIDATED_CONFIG
-
-
 _DEFAULT_VALIDATED_CONFIG = default_config.copy()
 _DEFAULT_VALIDATED_CONFIG["_debridEntries"] = []
 _DEFAULT_VALIDATED_CONFIG["_enableTorrent"] = True
@@ -162,7 +158,7 @@ def _parse_and_validate_config(b64config: str):
             decoded.decode("utf-8"),
             parse_constant=_reject_nonfinite_json_constant,
         )
-    except (UnicodeDecodeError, ValueError):
+    except ValueError:
         return None
     try:
         validated_config = ConfigModel.model_validate(config).model_dump()
@@ -179,7 +175,7 @@ def _parse_and_validate_config(b64config: str):
 
 def config_check(b64config: str | None):
     if not b64config:
-        return _default_validated_config()
+        return _DEFAULT_VALIDATED_CONFIG
 
     return _parse_and_validate_config(b64config)
 

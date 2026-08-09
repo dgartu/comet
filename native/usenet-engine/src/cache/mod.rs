@@ -1,4 +1,3 @@
-use crate::limits;
 use crate::yenc::DecodedPart;
 use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
@@ -17,12 +16,10 @@ pub use disk::{DiskCacheStats, DiskSegmentCache};
 pub use singleflight::NetworkSingleflight;
 pub(crate) use singleflight::{FlightCancellation, FlightPriority, NetworkFlightWaiter};
 
-const MAX_VERIFIED_SEGMENT_BYTES: usize = limits::MAX_DECLARED_POSTING_BYTES as usize;
 // CacheNode, the hash-table entry, Arc control blocks, allocator metadata and
 // spare vector/hash capacity remain resident alongside each payload.
 const SEGMENT_CACHE_ENTRY_OVERHEAD: usize = 512;
 const NEGATIVE_CACHE_DEFAULT_CAPACITY: usize = 500_000;
-const NEGATIVE_CACHE_HARD_CAPACITY: usize = 2_000_000;
 const MISSING_TTL: Duration = Duration::from_secs(10 * 60);
 const CORRUPT_TTL: Duration = Duration::from_secs(5 * 60);
 
@@ -122,7 +119,6 @@ impl VerifiedSegment {
         let part_crc32 = part.expected_crc32.ok_or("segment_integrity_unverified")?;
         let byte_size = part.bytes.len() as u64;
         if part.bytes.is_empty()
-            || part.bytes.len() > MAX_VERIFIED_SEGMENT_BYTES
             || part.begin == 0
             || part.end < part.begin
             || part.end > part.total_size
@@ -152,19 +148,10 @@ impl VerifiedSegment {
         }
     }
 
-    pub fn read_logical_range_into(
-        &self,
-        begin: u64,
-        end: u64,
-        output: &mut Vec<u8>,
-    ) -> Result<(), &'static str> {
-        if begin < self.begin || end < begin || end > self.end {
-            return Err("segment_range_unavailable");
-        }
+    pub(crate) fn read_logical_range_into(&self, begin: u64, end: u64, output: &mut Vec<u8>) {
         let start = (begin - self.begin) as usize;
         let finish = (end - self.begin + 1) as usize;
         output.extend_from_slice(&self.bytes[start..finish]);
-        Ok(())
     }
 }
 
@@ -247,11 +234,8 @@ pub struct VerifiedSegmentCache {
 }
 
 impl VerifiedSegmentCache {
-    pub fn new(budget: usize) -> Result<Self, &'static str> {
-        if budget < 8 {
-            return Err("segment_cache_budget_too_small");
-        }
-        Ok(Self {
+    pub fn new(budget: usize) -> Self {
+        Self {
             budget,
             used: 0,
             queue_weights: [0, 0],
@@ -260,7 +244,7 @@ impl VerifiedSegmentCache {
             nodes: Vec::new(),
             free: Vec::new(),
             entries: HashMap::new(),
-        })
+        }
     }
 
     pub fn budget(&self) -> usize {
@@ -291,9 +275,6 @@ impl VerifiedSegmentCache {
 
     pub fn insert(&mut self, key: SegmentCacheKey, segment: VerifiedSegment) -> Admission {
         let weight = segment.bytes.len() + SEGMENT_CACHE_ENTRY_OVERHEAD;
-        if weight > self.budget / 8 {
-            return Admission::Bypassed;
-        }
         let replaced = self.entries.get(&key).copied();
         if replaced.is_some_and(|index| self.node(index).pins.load(Ordering::Acquire) != 0) {
             return Admission::Bypassed;
@@ -338,6 +319,7 @@ impl VerifiedSegmentCache {
         }
     }
 
+    #[cfg(test)]
     pub fn purge(&mut self) {
         for index in 0..self.nodes.len() {
             if self.nodes[index]
@@ -509,26 +491,23 @@ pub struct NegativeSegmentCache {
 }
 
 impl NegativeSegmentCache {
-    pub fn new(capacity: usize) -> Result<Self, &'static str> {
-        if capacity == 0 || capacity > NEGATIVE_CACHE_HARD_CAPACITY {
-            return Err("invalid_negative_cache_capacity");
-        }
-        Ok(Self {
+    pub fn new(capacity: usize) -> Self {
+        Self {
             capacity,
             next_sequence: 0,
             records: HashMap::new(),
             order: VecDeque::new(),
             expirations: BinaryHeap::new(),
-        })
+        }
     }
 
     pub fn with_default_capacity() -> Self {
-        Self::new(NEGATIVE_CACHE_DEFAULT_CAPACITY).expect("valid default negative cache capacity")
+        Self::new(NEGATIVE_CACHE_DEFAULT_CAPACITY)
     }
 
     pub fn insert(&mut self, key: SegmentCacheKey, kind: NegativeKind, now: Instant) {
         self.prune(now);
-        self.next_sequence += 1;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
         let sequence = self.next_sequence;
         let ttl = match kind {
             NegativeKind::Missing => MISSING_TTL,
@@ -692,9 +671,7 @@ mod tests {
         })
         .unwrap();
         let mut output = Vec::new();
-        segment
-            .read_logical_range_into(u64::MAX, u64::MAX, &mut output)
-            .unwrap();
+        segment.read_logical_range_into(u64::MAX, u64::MAX, &mut output);
         assert_eq!(output, [7]);
         assert_eq!(
             VerifiedSegment::from_decoded(DecodedPart {
@@ -713,7 +690,7 @@ mod tests {
     #[test]
     fn promotes_on_the_second_hit_and_evicts_probationary_entries_first() {
         let weight = 10 + SEGMENT_CACHE_ENTRY_OVERHEAD;
-        let mut cache = VerifiedSegmentCache::new(cache_budget(10)).unwrap();
+        let mut cache = VerifiedSegmentCache::new(cache_budget(10));
         for value in 1..=8 {
             assert_eq!(
                 cache.insert(key(value), segment(value, 10)),
@@ -735,7 +712,7 @@ mod tests {
 
     #[test]
     fn pinned_entries_make_admission_bypass_without_changing_accounting() {
-        let mut cache = VerifiedSegmentCache::new(cache_budget(10)).unwrap();
+        let mut cache = VerifiedSegmentCache::new(cache_budget(10));
         for value in 1..=8 {
             cache.insert(key(value), segment(value, 10));
         }
@@ -753,7 +730,7 @@ mod tests {
     #[test]
     fn victim_selection_reserves_by_entry_count() {
         let payload_bytes = 8 * 1024 * 1024;
-        let mut cache = VerifiedSegmentCache::new(cache_budget(payload_bytes)).unwrap();
+        let mut cache = VerifiedSegmentCache::new(cache_budget(payload_bytes));
         cache.insert(key(1), segment(1, payload_bytes));
 
         let victims = cache.select_victims(payload_bytes, None).unwrap();
@@ -766,7 +743,7 @@ mod tests {
     fn failed_replacement_restores_the_old_entry_exactly() {
         let budget =
             2 * (10 + SEGMENT_CACHE_ENTRY_OVERHEAD) + 7 * (20 + SEGMENT_CACHE_ENTRY_OVERHEAD);
-        let mut cache = VerifiedSegmentCache::new(budget).unwrap();
+        let mut cache = VerifiedSegmentCache::new(budget);
         cache.insert(key(1), segment(1, 10));
         for value in 2..=8 {
             cache.insert(key(value), segment(value, 20));
@@ -788,7 +765,7 @@ mod tests {
 
     #[test]
     fn replacement_and_purge_keep_capacity_equal_to_resident_weights() {
-        let mut cache = VerifiedSegmentCache::new(cache_budget(20)).unwrap();
+        let mut cache = VerifiedSegmentCache::new(cache_budget(20));
         assert_eq!(cache.insert(key(1), segment(1, 20)), Admission::Admitted);
         assert_eq!(cache.insert(key(1), segment(2, 10)), Admission::Replaced);
         assert_eq!(cache.stats().used_bytes, 10 + SEGMENT_CACHE_ENTRY_OVERHEAD);
@@ -804,7 +781,7 @@ mod tests {
 
     #[test]
     fn replacing_a_pinned_entry_bypasses_and_keeps_the_old_value() {
-        let mut cache = VerifiedSegmentCache::new(cache_budget(20)).unwrap();
+        let mut cache = VerifiedSegmentCache::new(cache_budget(20));
         cache.insert(key(1), segment(1, 10));
         let lease = cache.get(key(1)).unwrap();
         let before = cache.stats();
@@ -820,20 +797,10 @@ mod tests {
     }
 
     #[test]
-    fn oversized_entries_bypass_each_tier_without_eviction() {
-        let mut cache = VerifiedSegmentCache::new(cache_budget(20)).unwrap();
-        cache.insert(key(1), segment(1, 20));
-        let before = cache.stats();
-
-        assert_eq!(cache.insert(key(2), segment(2, 21)), Admission::Bypassed);
-        assert_eq!(cache.stats(), before);
-    }
-
-    #[test]
     fn tiny_segments_cannot_escape_the_resident_memory_budget() {
         let weight = 1 + SEGMENT_CACHE_ENTRY_OVERHEAD;
         let budget = weight * 8;
-        let mut cache = VerifiedSegmentCache::new(budget).unwrap();
+        let mut cache = VerifiedSegmentCache::new(budget);
         for value in 1..=64 {
             assert_eq!(
                 cache.insert(key(value), segment(value, 1)),
@@ -847,7 +814,7 @@ mod tests {
     #[test]
     fn negative_entries_are_bounded_scoped_and_expire_by_kind() {
         let now = Instant::now();
-        let mut cache = NegativeSegmentCache::new(2).unwrap();
+        let mut cache = NegativeSegmentCache::new(2);
         cache.insert(key(1), NegativeKind::Missing, now);
         cache.insert(key(2), NegativeKind::Corrupt, now);
         assert_eq!(cache.get(key(1), now), Some(NegativeKind::Missing));
@@ -880,7 +847,7 @@ mod tests {
     #[test]
     fn successful_churn_keeps_negative_cache_indexes_bounded() {
         let now = Instant::now();
-        let mut cache = NegativeSegmentCache::new(2).unwrap();
+        let mut cache = NegativeSegmentCache::new(2);
         for value in 0..20 {
             let cache_key = key(value);
             cache.insert(cache_key, NegativeKind::Missing, now);

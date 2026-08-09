@@ -35,8 +35,8 @@ class DigitalReleaseFilter:
             },
         )
 
-        if self._release_timestamp(cached_date) is not None:
-            return self._is_released(cached_date)
+        if (cached_timestamp := self._release_timestamp(cached_date)) is not None:
+            return cached_timestamp <= time.time()
 
         release_date_str = None
         imdb_id = media_id.partition(":")[0]
@@ -95,7 +95,7 @@ class DigitalReleaseFilter:
             },
         )
 
-        return self._is_released(release_date_timestamp)
+        return release_date_timestamp <= time.time()
 
     @staticmethod
     def _release_timestamp(value: object) -> float | None:
@@ -103,12 +103,6 @@ class DigitalReleaseFilter:
             return None
         parsed = float(value)
         return parsed if math.isfinite(parsed) and 0 <= parsed <= 253402300799 else None
-
-    def _is_released(self, release_timestamp: float):
-        release_timestamp = self._release_timestamp(release_timestamp)
-        if release_timestamp is None:
-            return True
-        return release_timestamp <= time.time()
 
 
 release_filter = DigitalReleaseFilter()

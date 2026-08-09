@@ -2,12 +2,18 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from databases import Database
 
 import comet.services.debrid_account_scraper as account_scraper
+
+
+@asynccontextmanager
+async def _http_session_lease():
+    yield object()
 
 
 class DebridAccountSnapshotTests(unittest.IsolatedAsyncioTestCase):
@@ -31,31 +37,37 @@ class DebridAccountSnapshotTests(unittest.IsolatedAsyncioTestCase):
         )()
 
         self.assertEqual(
-            await account_scraper._fetch_all_magnets(client, 500),
+            await account_scraper._fetch_all_magnets(client),
             [{"id": "one", "hash": "a" * 40}],
         )
         client.list_magnets.assert_awaited_once_with(limit=500, offset=0)
 
-    async def test_snapshot_scan_stops_at_the_operator_item_ceiling(self):
-        rows = [
+    async def test_snapshot_scan_fetches_every_page(self):
+        first_page = [
             {
                 "id": str(index),
                 "hash": f"{index:040x}",
             }
-            for index in range(3)
+            for index in range(500)
         ]
+        last_page = [{"id": "500", "hash": f"{500:040x}"}]
         client = type(
             "Client",
             (),
             {
-                "list_magnets": AsyncMock(return_value=(rows, 100)),
+                "list_magnets": AsyncMock(
+                    side_effect=[(first_page, 501), (last_page, 501)]
+                ),
             },
         )()
 
-        result = await account_scraper._fetch_all_magnets(client, 3)
+        result = await account_scraper._fetch_all_magnets(client)
 
-        self.assertEqual(result, rows)
-        client.list_magnets.assert_awaited_once_with(limit=3, offset=0)
+        self.assertEqual(result, first_page + last_page)
+        self.assertEqual(
+            client.list_magnets.await_args_list,
+            [call(limit=500, offset=0), call(limit=500, offset=500)],
+        )
 
     async def test_failed_snapshot_replacement_rolls_back_all_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -146,7 +158,7 @@ class DebridAccountTaskTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(account_scraper, "_sync_single_account", new=sync):
             task = account_scraper._schedule_sync_task(
-                lock, object(), "realdebrid", "key", "ip", "account"
+                lock, "realdebrid", "key", "ip", "account"
             )
             await account_scraper.shutdown_account_sync_tasks()
 
@@ -168,9 +180,16 @@ class DebridAccountTaskTests(unittest.IsolatedAsyncioTestCase):
             return await operation
 
         lock.run.side_effect = run_locked
-        with patch.object(account_scraper, "_sync_single_account", new=sync_account):
+        with (
+            patch.object(account_scraper, "_sync_single_account", new=sync_account),
+            patch.object(
+                account_scraper.http_client_manager,
+                "bind",
+                new=_http_session_lease,
+            ),
+        ):
             task = account_scraper._schedule_sync_task(
-                lock, object(), "alldebrid", "key", "ip", "account"
+                lock, "alldebrid", "key", "ip", "account"
             )
             await started.wait()
             await account_scraper.shutdown_account_sync_tasks()
@@ -199,14 +218,57 @@ class DebridAccountTaskTests(unittest.IsolatedAsyncioTestCase):
         ]
         with patch.object(account_scraper, "_has_fresh_snapshot", new=has_snapshot):
             await asyncio.wait_for(
-                account_scraper.ensure_account_snapshot_ready(
-                    object(), entries, "127.0.0.1"
-                ),
+                account_scraper.ensure_account_snapshot_ready(entries, "127.0.0.1"),
                 timeout=1,
             )
 
         self.assertTrue(realdebrid_started.is_set())
         self.assertTrue(alldebrid_started.is_set())
+
+    async def test_initial_wait_keeps_unfinished_sync_running(self):
+        started = asyncio.Event()
+        finish = asyncio.Event()
+        lock = AsyncMock()
+        lock.acquire.return_value = True
+
+        async def run_locked(operation):
+            return await operation
+
+        async def sync_account(*args):
+            started.set()
+            await finish.wait()
+
+        async def return_without_cancelling(tasks, *, timeout):
+            self.assertGreater(timeout, 0)
+            await started.wait()
+            return set(), set(tasks)
+
+        lock.run.side_effect = run_locked
+        entries = [{"service": "realdebrid", "apiKey": "key"}]
+        with (
+            patch.object(
+                account_scraper,
+                "_get_fresh_snapshot_states",
+                new=AsyncMock(return_value=[False]),
+            ),
+            patch.object(account_scraper, "DistributedLock", return_value=lock),
+            patch.object(account_scraper, "_sync_single_account", new=sync_account),
+            patch.object(
+                account_scraper.http_client_manager,
+                "bind",
+                new=_http_session_lease,
+            ),
+            patch.object(
+                account_scraper.asyncio, "wait", new=return_without_cancelling
+            ),
+        ):
+            await account_scraper.ensure_account_snapshot_ready(entries, "127.0.0.1")
+
+        tasks = tuple(account_scraper._background_tasks)
+        self.assertEqual(len(tasks), 1)
+        self.assertFalse(tasks[0].done())
+        finish.set()
+        await asyncio.gather(*tasks)
 
     async def test_refresh_state_reads_start_concurrently(self):
         scheduled = []
@@ -230,7 +292,6 @@ class DebridAccountTaskTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(account_scraper.database, "fetch_one", new=fetch_one):
             account_scraper.schedule_account_snapshot_refresh(
                 lambda *args: scheduled.append(args),
-                object(),
                 entries,
                 "127.0.0.1",
             )

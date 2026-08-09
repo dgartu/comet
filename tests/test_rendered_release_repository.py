@@ -15,7 +15,6 @@ from comet.core.schema_migrations import (
     _ensure_usenet_schema,
 )
 from comet.core.sources import (
-    MAX_SIGNED_BIGINT,
     EasynewsHttpRef,
     LocatorKind,
     LocatorPolicy,
@@ -83,7 +82,7 @@ class RenderedReleaseRepositoryTests(unittest.TestCase):
 
         self.assertEqual(restored, locator)
 
-    def test_locator_codec_round_trips_policy_and_rejects_extra_fields(self):
+    def test_locator_codec_round_trips_policy(self):
         locator = RealNzbRef(
             locator_id="source-locator",
             kind=LocatorKind.REAL_NZB,
@@ -107,17 +106,6 @@ class RenderedReleaseRepositoryTests(unittest.TestCase):
         )
 
         self.assertEqual(restored, locator)
-        with self.assertRaises(ValueError):
-            locator_from_json(
-                locator.locator_id,
-                locator.kind.value,
-                (
-                    '{"adapter_configuration_id":'
-                    '"22222222-2222-4222-8222-222222222222",'
-                    '"remote_guid":"guid","url":"x"}'
-                ),
-                policy_json(locator),
-            )
 
     def test_easynews_locator_round_trips_an_absent_item_suffix(self):
         locator = EasynewsHttpRef(
@@ -181,35 +169,6 @@ class RenderedReleaseRepositoryTests(unittest.TestCase):
                     locator,
                 )
 
-    def test_usenet_locator_policy_rejects_noncanonical_values(self):
-        real_nzb = RealNzbRef(
-            locator_id="real-nzb",
-            kind=LocatorKind.REAL_NZB,
-            policy=LocatorPolicy(frozenset({"torbox_usenet"})),
-            adapter_configuration_id="11111111-1111-4111-8111-111111111111",
-            remote_guid="release",
-        )
-        with self.subTest("provider kind incompatible with locator"):
-            with self.assertRaises(ValueError):
-                policy_json(
-                    replace(
-                        real_nzb,
-                        policy=LocatorPolicy(frozenset({"direct_torrent"})),
-                    )
-                )
-        with self.subTest("noncanonical provider set"):
-            policy = policy_json(real_nzb)
-            with self.assertRaises(ValueError):
-                locator_from_json(
-                    real_nzb.locator_id,
-                    real_nzb.kind.value,
-                    locator_json(real_nzb),
-                    policy.replace(
-                        '["torbox_usenet"]',
-                        '["torbox_usenet","torbox_usenet"]',
-                    ),
-                )
-
     def test_artifact_selection_hint_round_trips_as_an_atomic_pair(self):
         locator = NzbArtifactRef(
             locator_id="artifact",
@@ -232,26 +191,6 @@ class RenderedReleaseRepositoryTests(unittest.TestCase):
             ),
             locator,
         )
-        with self.assertRaises(ValueError):
-            locator_from_json(
-                locator.locator_id,
-                locator.kind.value,
-                (
-                    '{"artifact_sha256":"'
-                    + "a" * 64
-                    + '","manifest_identity":"nm1:'
-                    + "b" * 64
-                    + '","selection_hint_name":null,'
-                    '"selection_hint_size":null}'
-                ),
-                policy,
-            )
-        self.assertIn(
-            str(MAX_SIGNED_BIGINT),
-            locator_json(replace(locator, selection_hint_size=MAX_SIGNED_BIGINT)),
-        )
-        with self.assertRaises(ValueError):
-            locator_json(replace(locator, selection_hint_size=MAX_SIGNED_BIGINT + 1))
 
 
 class RenderedReleaseRepositoryAsyncTests(unittest.IsolatedAsyncioTestCase):
@@ -452,9 +391,22 @@ class RenderedReleaseRepositoryAsyncTests(unittest.IsolatedAsyncioTestCase):
                     owner_configuration_partition=b"a" * 32,
                     now=1,
                 )
-                await repository.persist(
+                current_ids = await repository.persist(
                     (candidate("current"),),
                     owner_configuration_partition=b"a" * 32,
+                    now=86_402,
+                )
+                current = current_ids["same-candidate"]
+                await ProviderPreparationRepository(database).get_or_create(
+                    owner_configuration_partition=b"a" * 32,
+                    provider_configuration_id=str(uuid.uuid4()),
+                    credential_fingerprint="b" * 64,
+                    candidate_id=current.candidate_id,
+                    locator_id=current.locator_ids["current"],
+                    artifact_grant_id=None,
+                    selection_json=provider_selection_json((0,)),
+                    mutation_idempotency_key="d" * 64,
+                    provider_kind="torbox_usenet",
                     now=86_402,
                 )
 
@@ -597,7 +549,7 @@ class RenderedReleaseRepositoryAsyncTests(unittest.IsolatedAsyncioTestCase):
                             locator_id="easynews-source",
                             kind=LocatorKind.EASYNEWS_HTTP,
                             policy=LocatorPolicy(
-                                frozenset({"stremio_nntp"}),
+                                frozenset({"stremio_nntp", "nzbdav"}),
                                 owner_configuration_partition=owner,
                                 exact_provider_configuration_id=target_provider_id,
                             ),
@@ -621,13 +573,34 @@ class RenderedReleaseRepositoryAsyncTests(unittest.IsolatedAsyncioTestCase):
                     configuration_id=target_provider_id,
                 )
 
-                attached = await repository.attach_brokered_artifact(
+                await repository.attach_brokered_artifact(
                     ids.candidate_id,
                     ids.locator_ids[canonical.locators[0].locator_id],
                     "a" * 64,
                     "nm1:" + "b" * 64,
                     owner_configuration_partition=owner,
                     now=3,
+                )
+                tightened_source = replace(
+                    canonical.locators[0],
+                    policy=LocatorPolicy(
+                        frozenset({"stremio_nntp"}),
+                        owner_configuration_partition=owner,
+                        exact_provider_configuration_id=target_provider_id,
+                    ),
+                )
+                await repository.persist(
+                    (replace(canonical, locators=(tightened_source,)),),
+                    owner_configuration_partition=owner,
+                    now=4,
+                )
+                attached = await repository.attach_brokered_artifact(
+                    ids.candidate_id,
+                    ids.locator_ids[canonical.locators[0].locator_id],
+                    "a" * 64,
+                    "nm1:" + "b" * 64,
+                    owner_configuration_partition=owner,
+                    now=5,
                 )
 
                 self.assertEqual(

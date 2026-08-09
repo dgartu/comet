@@ -25,7 +25,6 @@ MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024
 MAX_EXPANDED_BYTES = 64 * 1024 * 1024
 MAX_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_MEMBERS = 5_000
-MAX_SOURCE_TIMESTAMP = 4_102_444_800  # 2100-01-01 UTC
 
 
 def _safe_relative_path(member: tarfile.TarInfo) -> Path:
@@ -65,8 +64,6 @@ def extract_source(payload: bytes, output: Path) -> None:
             seen.add(relative)
             if member.size < 0 or member.size > MAX_MEMBER_BYTES:
                 raise RuntimeError("source archive member size limit exceeded")
-            if member.mtime < 0 or member.mtime > MAX_SOURCE_TIMESTAMP:
-                raise RuntimeError("source archive timestamp is invalid")
             expanded += member.size
             if expanded > MAX_EXPANDED_BYTES:
                 raise RuntimeError("source archive expanded size limit exceeded")
@@ -109,7 +106,13 @@ def _write_exclusive(path: Path, payload: bytes, mode: int) -> None:
         mode,
     )
     try:
-        with os.fdopen(descriptor, "wb") as stream:
+        stream = os.fdopen(descriptor, "wb")
+    except BaseException:
+        os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
+    try:
+        with stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())

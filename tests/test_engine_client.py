@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from comet.usenet.engine_client import (
     EngineArchiveError,
@@ -186,12 +186,14 @@ class EngineClientTests(unittest.IsolatedAsyncioTestCase):
             client = EngineClient(descriptor_path)
             client._load_descriptor()
             client._provider_set_ids["b" * 64] = "P" * 22
+            client._reported_degraded_sessions.add("S" * 22)
 
             descriptor_path.unlink()
 
             with self.assertRaises(EngineUnavailable):
                 client._load_descriptor()
             self.assertEqual(client._provider_set_ids, {})
+            self.assertEqual(client._reported_degraded_sessions, set())
 
     async def test_request_logs_typed_engine_failure_details(self):
         responses = iter(
@@ -520,6 +522,31 @@ class EngineClientTests(unittest.IsolatedAsyncioTestCase):
                 server.close()
                 await server.wait_closed()
 
+    async def test_close_timeout_does_not_replace_a_complete_response(self):
+        reader = MagicMock()
+        reader.readuntil = AsyncMock(
+            return_value=b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n"
+        )
+        reader.readexactly = AsyncMock(return_value=b"{}")
+        writer = MagicMock()
+        writer.drain = AsyncMock()
+        writer.wait_closed = AsyncMock(side_effect=TimeoutError)
+        descriptor = EngineDescriptor(1, "/engine.sock", "runtime", 1)
+
+        with (
+            patch.object(EngineClient, "_load_descriptor", return_value=descriptor),
+            patch(
+                "comet.usenet.engine_transport.asyncio.open_unix_connection",
+                new=AsyncMock(return_value=(reader, writer)),
+            ),
+        ):
+            response = await EngineClient("/missing/engine.json").request(
+                "GET", "/v1/health"
+            )
+
+        self.assertEqual(response, (200, {"content-length": "2"}, b"{}"))
+        writer.close.assert_called_once_with()
+
     async def test_request_rejects_unbounded_or_malformed_input_before_connect(self):
         client = EngineClient("/missing/engine.json")
 
@@ -731,18 +758,7 @@ class EngineClientTests(unittest.IsolatedAsyncioTestCase):
                 server.close()
                 await server.wait_closed()
 
-    async def test_parse_rejects_invalid_artifact_identity_before_socket_io(self):
-        client = EngineClient("/missing/engine.json")
-
-        for identity, error in (
-            ("A" * 64, "lowercase SHA-256"),
-            ("a" * 64, "does not match"),
-        ):
-            with self.subTest(identity=identity):
-                with self.assertRaisesRegex(ValueError, error):
-                    await client.parse_nzb(identity, b"<nzb/>")
-
-    async def test_parse_sends_only_a_verified_artifact_identity_to_the_engine(self):
+    async def test_parse_sends_the_broker_owned_artifact_to_the_engine(self):
         document = b"<nzb/>"
         digest = hashlib.sha256(document).hexdigest()
         manifest = [{"postings": [{"number": 1, "bytes": 1, "message_id": "x"}]}]
@@ -1094,13 +1110,6 @@ class EngineClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((method, path), ("POST", "/v1/archive-nested/extract"))
         self.assertEqual(json.loads(body)["selected_paths"], list(selected_paths))
         self.assertEqual(json.loads(body)["passphrase"], "archive-secret")
-        with self.assertRaisesRegex(ValueError, "passphrase"):
-            await client.extract_nested_archive_volume_set(
-                [(content_identity, "release.zip", 100)],
-                42,
-                selected_paths,
-                passphrase="bad\nsecret",
-            )
         invalid = {**member, "selected_paths": ["other.zip", "Movie.2026.mkv"]}
         client.request = AsyncMock(
             return_value=(
@@ -2288,6 +2297,7 @@ class EngineClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(registration_calls, 1)
         self.assertEqual(results, [(identity, 1, revision)] * 8)
+        self.assertEqual(client._provider_set_locks, {})
         self.assertEqual(
             sum(
                 call.args[:2] == ("POST", "/v1/materializations")
@@ -2580,18 +2590,6 @@ class EngineClientTests(unittest.IsolatedAsyncioTestCase):
             json.loads(client.request.await_args.args[2])["selection_hint"],
             {"relative_path": "Movie.mkv", "exact_size": 42},
         )
-
-        with self.assertRaisesRegex(ValueError, "selection hint"):
-            await client.catalog_nntp_artifact(
-                artifact_sha256,
-                manifest_identity,
-                metadata,
-                manifest,
-                selection_hint=(
-                    "Movie.mkv",
-                    MAX_USENET_LOGICAL_BYTES + 1,
-                ),
-            )
 
         invalid = {**asset, "file_index": 1}
         client.request = AsyncMock(

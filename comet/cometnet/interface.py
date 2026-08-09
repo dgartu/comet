@@ -9,6 +9,8 @@ to interact with CometNet transparently properly regardless of the running mode.
 from abc import ABC, abstractmethod
 from typing import Any
 
+from comet.cometnet.protocol import TorrentMetadata
+
 
 class CometNetBackend(ABC):
     """Abstract base class for CometNet backends."""
@@ -27,11 +29,11 @@ class CometNetBackend(ABC):
         """Get connected peers information."""
 
     @abstractmethod
-    async def broadcast_torrent(self, metadata) -> None:
+    async def broadcast_torrent(self, metadata: TorrentMetadata) -> None:
         """Broadcast a torrent to the network."""
 
     @abstractmethod
-    async def broadcast_torrents(self, metadata_list: list[Any]) -> None:
+    async def broadcast_torrents(self, metadata_list: list[TorrentMetadata]) -> None:
         """Broadcast multiple torrents to the network."""
 
     # --- Pool Management ---

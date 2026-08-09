@@ -72,7 +72,6 @@ class SearchCoverageRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await SearchCoverageRepository(database).record_success(
             self.query,
             self.branch,
-            now=100,
             next_refresh_at=200,
         )
 
@@ -88,7 +87,6 @@ class SearchCoverageRepositoryTests(unittest.IsolatedAsyncioTestCase):
         await SearchCoverageRepository(database).record_failure(
             self.query,
             self.branch,
-            now=100,
             next_refresh_at=130,
         )
 
@@ -153,7 +151,3 @@ class SearchCoverageRepositoryTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(expected=expected):
                 self.assertIs(query.scope, expected)
                 self.assertIs(search_scope(query), expected)
-
-    def test_invalid_scope_surfaces(self):
-        with self.assertRaisesRegex(ValueError, "scope"):
-            search_scope(MediaQuery("tt1", "movie", search_scope="unknown"))

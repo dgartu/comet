@@ -92,13 +92,13 @@ class NyaaNekoBTTests(unittest.IsolatedAsyncioTestCase):
                 "more": False,
             },
         }
-        scraper = NekoBTScraper(None, _Session(payload))
+        scraper = NekoBTScraper(_Session(payload))
 
         with self.assertRaises(TypeError):
             await scraper._fetch_page({})
 
     async def test_nekobt_propagates_transport_failures(self):
-        scraper = NekoBTScraper(None, _FailingSession())
+        scraper = NekoBTScraper(_FailingSession())
 
         with self.assertRaisesRegex(RuntimeError, "transport failed"):
             await scraper._fetch_page({"query": "Movie"})

@@ -56,7 +56,7 @@ def _status_video_directory_revision() -> int | None:
         return None
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=1)
 def _build_status_video_index(
     directory_revision: int | None,
 ) -> dict[str, str]:

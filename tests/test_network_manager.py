@@ -31,6 +31,7 @@ class NetworkManagerContractTests(unittest.IsolatedAsyncioTestCase):
     def test_retry_delays_are_finite_and_bounded(self):
         self.assertEqual(_retry_delay(None, 1.0, 0), 1.0)
         self.assertEqual(_retry_delay(None, 1.0, 20), 60.0)
+        self.assertEqual(_retry_delay(None, 1.0, 100_000), 60.0)
         self.assertEqual(_retry_delay("0", 1.0, 0), 1.0)
         self.assertEqual(_retry_delay("-1", 1.0, 0), 1.0)
         self.assertIsNone(_retry_delay("61", 1.0, 0))
@@ -167,16 +168,31 @@ class NetworkManagerContractTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
 
-    async def test_aiohttp_response_body_is_bounded_before_decode(self):
+    async def test_aiohttp_response_body_honors_an_explicit_boundary(self):
         response = SimpleNamespace(
             headers={},
             content=_Content((b"x" * (8 * 1024 * 1024), b"x")),
             charset=None,
         )
-        wrapped = ResponseWrapper(response, "aiohttp")
+        wrapped = ResponseWrapper(
+            response,
+            "aiohttp",
+            maximum_body_bytes=8 * 1024 * 1024,
+        )
 
         with self.assertRaises(DiscoveryResponseTooLarge):
             await wrapped.text()
+
+    async def test_discovery_response_has_no_implicit_global_body_cap(self):
+        response = SimpleNamespace(
+            headers={},
+            content=_Content((b"x" * (8 * 1024 * 1024), b"x")),
+            charset=None,
+        )
+
+        body = await ResponseWrapper(response, "aiohttp").read()
+
+        self.assertEqual(len(body), 8 * 1024 * 1024 + 1)
 
     async def test_impersonated_response_is_bounded_during_transfer(self):
         class Session:
@@ -190,7 +206,12 @@ class NetworkManagerContractTests(unittest.IsolatedAsyncioTestCase):
             _resolved_proxy_url=None,
             _get_curl_session=unittest.mock.AsyncMock(return_value=session),
         )
-        request = _RequestContextManager(wrapper, "GET", "https://example.invalid")
+        request = _RequestContextManager(
+            wrapper,
+            "GET",
+            "https://example.invalid",
+            maximum_body_bytes=8 * 1024 * 1024,
+        )
 
         with self.assertRaises(DiscoveryResponseTooLarge):
             await request._attempt_request(None)
@@ -282,6 +303,13 @@ class NetworkManagerContractTests(unittest.IsolatedAsyncioTestCase):
             await manager.close_all()
 
         self.assertEqual(manager._clients, {})
+
+    async def test_manager_instances_do_not_share_client_ownership(self):
+        first = NetworkManager()
+        second = NetworkManager()
+        first._clients["owned"] = SimpleNamespace()
+
+        self.assertEqual(second._clients, {})
 
     async def test_manager_uses_the_exact_configured_scraper_proxy(self):
         manager = NetworkManager()

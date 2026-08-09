@@ -1,6 +1,4 @@
-from typing import Annotated
-
-from fastapi import APIRouter, BackgroundTasks, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 
 from comet.api.endpoints.stream import stream as get_streams
 from comet.core.config_validation import config_check
@@ -72,10 +70,10 @@ async def chilllink_manifest(request: Request, b64config: str | None = None):
 async def chilllink_streams(
     request: Request,
     background_tasks: BackgroundTasks,
-    imdbID: Annotated[str, Query(min_length=1, max_length=64)],
-    type: Annotated[str, Query(min_length=1, max_length=16)],
-    season: Annotated[int | None, Query(ge=0, le=65_535)] = None,
-    episode: Annotated[int | None, Query(ge=0, le=65_535)] = None,
+    imdbID: str,
+    type: str,
+    season: int | None = None,
+    episode: int | None = None,
     b64config: str | None = None,
 ):
     if (type == "movie" and (season is not None or episode is not None)) or (

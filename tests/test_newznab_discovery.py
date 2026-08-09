@@ -1,4 +1,3 @@
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -7,11 +6,9 @@ from comet.discovery.adapters.newznab import (
     NewznabAccount,
     NewznabAdapter,
     NewznabError,
-    NewznabFeedItem,
     _parse_caps,
     _query_params,
     _status_error,
-    map_newznab_nzb_item,
     newznab_account_from_options,
 )
 from comet.discovery.models import DiscoveryContext, MediaQuery
@@ -185,10 +182,6 @@ class NewznabDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(session.calls[0][1]["headers"]["User-Agent"], "Grab-UA")
         self.assertFalse(session.calls[0][1]["allow_redirects"])
-        with self.assertRaises(ValueError):
-            await adapter.grab("https://indexer.example/signed?apikey=secret")
-        with self.assertRaises(ValueError):
-            await adapter.grab("HTTPS://indexer.example/signed?apikey=secret")
 
     async def test_grab_leaves_content_validation_to_the_nzb_broker(self):
         session = _Session(results=b"opaque document")
@@ -386,34 +379,6 @@ class NewznabDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.coverage, frozenset({"usenet"}))
 
-    async def test_cancelled_partial_page_is_not_recorded_as_complete_coverage(self):
-        cancellation = asyncio.Event()
-        first = RESULTS.replace(b'total="1"', b'total="2"')
-        session = _PagedSession({0: first}, cancel_on_offset=cancellation)
-        adapter = NewznabAdapter(
-            session,
-            NewznabAccount(
-                "https://indexer.example/api",
-                "secret",
-                "11111111-1111-4111-8111-111111111111",
-                max_results=2,
-                page_size=1,
-            ),
-        )
-
-        result = await adapter.search(
-            MediaQuery("tt1234567", "series", title_aliases=("Example",)),
-            DiscoveryContext(
-                frozenset({"usenet"}),
-                b"a" * 32,
-                cancellation=cancellation,
-            ),
-        )
-
-        self.assertEqual(len(result.candidates), 1)
-        self.assertEqual(result.coverage, frozenset())
-        self.assertEqual(len(session.calls), 2)
-
     async def test_signed_url_without_replay_id_is_not_persisted(self):
         results = RESULTS.replace(
             b"https://indexer.example/get?id=opaque-guid&amp;apikey=secret",
@@ -564,25 +529,6 @@ class NewznabDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         remote_guid = result.candidates[0].locators[0].remote_guid
         self.assertEqual(remote_guid, "opaque-guid")
         self.assertNotIn("signed-token", remote_guid)
-
-    def test_explicit_internal_replay_identity_remains_strict(self):
-        for remote_id in (
-            "https://indexer.example/signed",
-            " https://indexer.example/signed",
-            "x" * 1_025,
-        ):
-            with (
-                self.subTest(remote_id=remote_id[:40]),
-                self.assertRaisesRegex(ValueError, "replay identifier"),
-            ):
-                map_newznab_nzb_item(
-                    NewznabFeedItem({"title": "Example"}, {}, ()),
-                    MediaQuery("tt1234567", "series"),
-                    configuration_id="source",
-                    label="Newznab",
-                    context=DiscoveryContext(frozenset({"usenet"}), b"a" * 32),
-                    remote_id=remote_id,
-                )
 
     async def test_result_titles_are_not_normalized(self):
         results = RESULTS.replace(

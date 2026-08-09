@@ -60,6 +60,10 @@ class ScraperHelperConfigTests(unittest.TestCase):
             associate_urls_credentials(["one", "two"], ["first", ""]),
             [("one", "first"), ("two", None)],
         )
+        self.assertEqual(
+            associate_urls_credentials(["one", "two"], ["first"]),
+            [("one", "first"), ("two", None)],
+        )
 
 
 if __name__ == "__main__":

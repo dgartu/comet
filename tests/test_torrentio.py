@@ -44,7 +44,7 @@ class TorrentioScraperTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         }
-        scraper = TorrentioScraper(None, _Session(payload), "https://torrentio.test")
+        scraper = TorrentioScraper(_Session(payload), "https://torrentio.test")
         request = ScrapeRequest(
             media_type="movie",
             media_id="tt123",
@@ -63,7 +63,6 @@ class TorrentioScraperTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_malformed_stream_fails_the_source_batch(self):
         scraper = TorrentioScraper(
-            None,
             _Session({"streams": [{"infoHash": "B" * 40}]}),
             "https://torrentio.test",
         )

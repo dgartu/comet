@@ -15,14 +15,12 @@ from comet.discovery.torrent_base import (
 from comet.discovery.torrent_models import ScrapeRequest
 from comet.services.torrent_manager import extract_trackers_from_magnet
 
-_MAX_RESULTS_PER_QUERY = 1_000
-
 
 class AnimeToshoScraper(TorrentDiscoveryAdapter):
     anime_only_setting = "ANIMETOSHO_ANIME_ONLY"
 
-    def __init__(self, manager, session):
-        super().__init__(manager, session)
+    def __init__(self, session):
+        super().__init__(session)
 
     def parse_items(self, items):
         torrents = []
@@ -94,7 +92,7 @@ class AnimeToshoScraper(TorrentDiscoveryAdapter):
         )
         torrents.extend(initial_items)
 
-        target_total = min(total, _MAX_RESULTS_PER_QUERY)
+        target_total = total
         if target_total > page_size:
             batch_size = settings.ANIMETOSHO_MAX_CONCURRENT_PAGES
             current_offset = page_size

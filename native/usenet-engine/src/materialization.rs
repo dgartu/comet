@@ -13,7 +13,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-const MAX_MATERIALIZATION_BYTES: u64 = crate::limits::MAX_LOGICAL_BYTES;
 const ASSET_REVISION_DOMAIN: &[u8] = b"comet-asset-v1\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +67,7 @@ pub struct ImmutableRangeReader {
 
 pub(crate) struct VerifiedInput<'a> {
     input: &'a mut File,
+    cancelled: &'a dyn Fn() -> bool,
     remaining: u64,
     digest: Sha256,
     asset_revision: Option<Sha256>,
@@ -75,6 +75,9 @@ pub(crate) struct VerifiedInput<'a> {
 
 impl Read for VerifiedInput<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if (self.cancelled)() {
+            return Err(std::io::Error::other("materialization cancelled"));
+        }
         if self.remaining == 0 {
             return Ok(0);
         }
@@ -382,17 +385,6 @@ impl Par2RepairStage {
         partial: &PartialSourceStage,
         relative_path: &str,
     ) -> Result<(), &'static str> {
-        let metadata = partial
-            .input
-            .metadata()
-            .map_err(|_| "materialization_unavailable")?;
-        if !metadata.file_type().is_file()
-            || metadata.len() != partial.exact_size
-            || metadata.permissions().mode() & 0o777 != 0o600
-            || metadata.nlink() != 1
-        {
-            return Err("repair_stage_invalid");
-        }
         fs::rename(
             partial.directory.join("source.bin"),
             self.source_path(relative_path)?,
@@ -419,16 +411,6 @@ impl Par2RepairStage {
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&target)
             .map_err(|_| "materialization_unavailable")?;
-        let metadata = output
-            .metadata()
-            .map_err(|_| "materialization_unavailable")?;
-        if !metadata.file_type().is_file()
-            || metadata.len() != exact_size
-            || metadata.permissions().mode() & 0o777 != 0o600
-            || metadata.nlink() != 1
-        {
-            return Err("repair_stage_invalid");
-        }
         output
             .seek(SeekFrom::Start(0))
             .map_err(|_| "materialization_unavailable")?;
@@ -480,27 +462,6 @@ impl Par2RepairStage {
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&target)
             .map_err(|_| "materialization_unavailable")?;
-        let metadata = output
-            .metadata()
-            .map_err(|_| "materialization_unavailable")?;
-        if !metadata.file_type().is_file()
-            || metadata.len() != partial.exact_size
-            || metadata.permissions().mode() & 0o777 != 0o600
-            || metadata.nlink() != 1
-        {
-            return Err("repair_stage_invalid");
-        }
-        let partial_metadata = partial
-            .input
-            .metadata()
-            .map_err(|_| "materialization_unavailable")?;
-        if !partial_metadata.file_type().is_file()
-            || partial_metadata.len() != partial.exact_size
-            || partial_metadata.permissions().mode() & 0o777 != 0o600
-            || partial_metadata.nlink() != 1
-        {
-            return Err("repair_stage_invalid");
-        }
         let mut buffer = [0u8; 64 * 1024];
         for (slice_index, valid) in valid_slices.iter().enumerate() {
             if !valid {
@@ -539,11 +500,6 @@ impl Par2RepairStage {
     where
         F: Fn() -> bool,
     {
-        assert_eq!(
-            volumes.len(),
-            ranges.len(),
-            "PAR2 readers and packet ranges must correspond"
-        );
         let input_bytes = ranges
             .iter()
             .flatten()
@@ -885,7 +841,8 @@ impl ArchiveExtractionStage {
                 }
             }
             output.flush().map_err(|_| "materialization_unavailable")?;
-            fs::set_permissions(&self.input, fs::Permissions::from_mode(0o400))
+            output
+                .set_permissions(fs::Permissions::from_mode(0o400))
                 .map_err(|_| "materialization_unavailable")?;
             let metadata =
                 fs::symlink_metadata(&self.input).map_err(|_| "materialization_unavailable")?;
@@ -1179,9 +1136,8 @@ fn copy_publish_target(
         }
         output
             .flush()
+            .and_then(|_| output.set_permissions(fs::Permissions::from_mode(0o400)))
             .and_then(|_| output.sync_all())
-            .map_err(|_| "materialization_unavailable")?;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o400))
             .map_err(|_| "materialization_unavailable")?;
         match rename_noreplace(&temporary, target) {
             Ok(()) => {}
@@ -1208,7 +1164,10 @@ fn publish_immutable_file(
         .metadata()
         .map_err(|_| "materialization_unavailable")?;
     let size = metadata.len();
-    if size == 0 || size > MAX_MATERIALIZATION_BYTES || !sealed_file_metadata(&metadata, size) {
+    if size == 0
+        || size > crate::limits::MAX_LOGICAL_BYTES
+        || !sealed_file_metadata(&metadata, size)
+    {
         return Err("materialization_conflict");
     }
     let initial_identity = immutable_file_identity(&metadata);
@@ -1248,7 +1207,9 @@ pub fn verified_path(
     identity: &str,
     expected_size: u64,
 ) -> Result<PathBuf, &'static str> {
-    if !valid_identity(identity) || expected_size == 0 || expected_size > MAX_MATERIALIZATION_BYTES
+    if !valid_identity(identity)
+        || expected_size == 0
+        || expected_size > crate::limits::MAX_LOGICAL_BYTES
     {
         return Err("invalid_materialization");
     }
@@ -1273,7 +1234,7 @@ pub fn publish(
 ) -> Result<PathBuf, &'static str> {
     if !valid_identity(identity)
         || expected_size == 0
-        || expected_size > MAX_MATERIALIZATION_BYTES
+        || expected_size > crate::limits::MAX_LOGICAL_BYTES
         || parts.is_empty()
     {
         return Err("invalid_materialization");
@@ -1431,7 +1392,7 @@ where
     F: Fn() -> bool,
     I: FnOnce(&mut VerifiedInput<'_>) -> Result<T, &'static str>,
 {
-    if expected_size == 0 || expected_size > MAX_MATERIALIZATION_BYTES {
+    if expected_size == 0 || expected_size > crate::limits::MAX_LOGICAL_BYTES {
         return Err("invalid_materialization");
     }
     let target = path(root, identity);
@@ -1448,14 +1409,16 @@ where
     let initial_identity = immutable_file_identity(&metadata);
     let mut verified = VerifiedInput {
         input: &mut input,
+        cancelled,
         remaining: expected_size,
         digest: Sha256::new(),
         asset_revision: include_asset_revision.then(|| asset_revision_hasher(expected_size)),
     };
-    let result = inspect(&mut verified)?;
+    let result = inspect(&mut verified);
     if cancelled() {
         return Err("materialization_cancelled");
     }
+    let result = result?;
     if verified.remaining != 0 || format!("{:x}", verified.digest.finalize()) != identity {
         return Err("materialization_conflict");
     }
@@ -1588,12 +1551,11 @@ impl ImmutableRangeReader {
     where
         F: Fn() -> bool,
     {
-        const MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
         if start > end || end >= self.expected_size {
             return Err("invalid_materialization_range");
         }
         let length = end - start + 1;
-        if length > MAX_RANGE_BYTES {
+        if length > crate::limits::MAX_RANGE_BYTES {
             return Err("materialization_range_too_large");
         }
         if cancelled() {
@@ -1678,13 +1640,6 @@ pub(crate) fn verified_samples_trusted_cancellable<F>(
 where
     F: Fn() -> bool,
 {
-    if expected_size == 0
-        || expected_size > MAX_MATERIALIZATION_BYTES
-        || sample_bytes == 0
-        || sample_bytes > crate::inspect::MAX_STRUCTURAL_END_BYTES
-    {
-        return Err("invalid_materialization");
-    }
     let target = path(root, identity);
     let (mut input, identity, _asset_revision) = open_verified_cancellable(
         &target,
@@ -1704,14 +1659,19 @@ where
         .seek(SeekFrom::Start(0))
         .and_then(|_| input.read_exact(&mut head))
         .map_err(|_| "materialization_unavailable")?;
-    if cancelled() {
-        return Err("materialization_cancelled");
-    }
-    let mut tail = vec![0; length];
-    input
-        .seek(SeekFrom::Start(expected_size - length as u64))
-        .and_then(|_| input.read_exact(&mut tail))
-        .map_err(|_| "materialization_unavailable")?;
+    let tail = if length as u64 == expected_size {
+        head.clone()
+    } else {
+        if cancelled() {
+            return Err("materialization_cancelled");
+        }
+        let mut tail = vec![0; length];
+        input
+            .seek(SeekFrom::Start(expected_size - length as u64))
+            .and_then(|_| input.read_exact(&mut tail))
+            .map_err(|_| "materialization_unavailable")?;
+        tail
+    };
     let revalidated_identity = input
         .metadata()
         .map(|metadata| immutable_file_identity(&metadata))
@@ -1876,6 +1836,18 @@ mod tests {
             }),
             Ok(b"ABCDEF".to_vec())
         );
+        let cancelled = std::cell::Cell::new(false);
+        assert_eq!(
+            inspect_verified_cancellable(&root, &identity, 6, &|| cancelled.get(), |input| {
+                let mut first = [0_u8; 1];
+                std::io::Read::read_exact(input, &mut first).map_err(|_| "inspection_failed")?;
+                cancelled.set(true);
+                std::io::Read::read_to_end(input, &mut Vec::new())
+                    .map_err(|_| "inspection_failed")?;
+                Ok(())
+            },),
+            Err("materialization_cancelled")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1973,7 +1945,7 @@ mod tests {
     fn rejects_materializations_above_the_logical_limit() {
         let root = root();
         let identity = format!("{:x}", Sha256::digest(b"A"));
-        let size = super::MAX_MATERIALIZATION_BYTES + 1;
+        let size = crate::limits::MAX_LOGICAL_BYTES + 1;
 
         assert_eq!(
             publish(&root, &identity, vec![part(b"A", 1, 1, size)], size),

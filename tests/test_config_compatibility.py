@@ -263,14 +263,14 @@ class ConfigCompatibilityTests(unittest.TestCase):
             2.0,
         )
 
-    def test_v2_native_tokens_are_bounded(self):
+    def test_v2_native_tokens_have_no_arbitrary_length_cap(self):
         payload = {
             "schemaVersion": 2,
             "enabledTransports": ["bittorrent"],
             "nativeAccessToken": "é" * 129,
         }
 
-        self.assertIsNone(config_check(_encode(payload)))
+        self.assertEqual(config_check(_encode(payload))["nativeAccessToken"], "é" * 129)
 
 
 class InstalledAddonCompatibilityTests(unittest.IsolatedAsyncioTestCase):

@@ -51,14 +51,6 @@ def test_discovery_binding_separates_credentials_from_public_state():
     )
 
 
-def test_discovery_binding_does_not_replace_malformed_accounts_with_empty_values():
-    config = _config()
-    config["accounts"] = []
-
-    with pytest.raises(ValueError, match="accounts"):
-        build_discovery_capability_bindings(config, CapabilityCodec(ROOT))
-
-
 def test_discovery_binding_filter_selects_only_the_requested_source():
     config = _config()
     config["discoverySources"].append(

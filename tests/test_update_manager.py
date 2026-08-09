@@ -33,11 +33,13 @@ class _ResponseContext:
     async def __aexit__(self, exc_type, exc, tb):
         return None
 
+    async def read(self):
+        return await self.content.read(-1)
+
 
 class UpdateManagerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         UpdateManager._check_task = None
-        UpdateManager._update_status = None
         UpdateManager._version_info = None
 
     def tearDown(self):
@@ -172,7 +174,7 @@ class UpdateManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status.has_update)
         self.assertEqual(status.error, "commit dates are unavailable")
 
-    async def test_unbounded_or_malformed_responses_have_one_safe_error(self):
+    async def test_malformed_responses_have_one_safe_error(self):
         for response in (
             _ResponseContext(body=b"{" + b"x" * (64 * 1024)),
             _ResponseContext(body=b'{"sha": 1, "sha": 2}'),

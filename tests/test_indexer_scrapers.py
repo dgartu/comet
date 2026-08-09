@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 from comet.discovery.adapters.torrent.bitmagnet import BitmagnetScraper
@@ -9,10 +10,7 @@ from comet.discovery.adapters.torrent.jackett import JackettScraper
 from comet.discovery.adapters.torrent.prowlarr import ProwlarrScraper
 from comet.discovery.adapters.torrent.stremthru import StremthruScraper
 from comet.discovery.torrent_models import ScrapeRequest
-from comet.services.indexer_manager import (
-    MAX_INDEXER_RESPONSE_BYTES,
-    indexer_manager,
-)
+from comet.services.indexer_manager import indexer_manager
 
 REQUEST = ScrapeRequest(
     media_type="movie",
@@ -86,7 +84,7 @@ class _IndexerSession:
 
 class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
     async def test_indexer_privacy_metadata_reaches_scrape_results(self):
-        jackett = JackettScraper(None, None, "https://jackett.test")
+        jackett = JackettScraper(None, "https://jackett.test")
         jackett_torrents = await jackett.process_torrent(
             {
                 "Title": "Private Jackett",
@@ -103,7 +101,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(jackett_torrents[0]["isPrivate"])
 
-        prowlarr = ProwlarrScraper(None, None, "https://prowlarr.test")
+        prowlarr = ProwlarrScraper(None, "https://prowlarr.test")
         with patch.object(indexer_manager, "private_prowlarr_indexers", {"7"}):
             prowlarr_torrents = await prowlarr.process_torrent(
                 {
@@ -120,32 +118,28 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(prowlarr_torrents[0]["isPrivate"])
 
-    async def test_indexer_scrapers_use_the_bounded_response_contract(self):
+    async def test_indexer_scrapers_have_no_local_transport_policy(self):
         jackett_session = _IndexerSession(b'{"Results":[]}')
         prowlarr_session = _IndexerSession(b"[]")
 
         self.assertEqual(
             await JackettScraper(
-                None, jackett_session, "https://jackett.test"
+                jackett_session, "https://jackett.test"
             ).fetch_jackett_results("indexer", "query"),
             [],
         )
         with patch.object(indexer_manager, "active_prowlarr_config", ["1"]):
             self.assertEqual(
                 await ProwlarrScraper(
-                    None, prowlarr_session, "https://prowlarr.test"
+                    prowlarr_session, "https://prowlarr.test"
                 )._fetch_search_results("query"),
                 [],
             )
 
-        self.assertEqual(
-            jackett_session.kwargs["maximum_body_bytes"],
-            MAX_INDEXER_RESPONSE_BYTES,
-        )
-        self.assertEqual(
-            prowlarr_session.kwargs["maximum_body_bytes"],
-            MAX_INDEXER_RESPONSE_BYTES,
-        )
+        self.assertNotIn("maximum_body_bytes", jackett_session.kwargs)
+        self.assertNotIn("maximum_body_bytes", prowlarr_session.kwargs)
+        self.assertNotIn("timeout", jackett_session.kwargs)
+        self.assertNotIn("timeout", prowlarr_session.kwargs)
 
     def test_bitmagnet_ignores_an_incomplete_result(self):
         root = ET.fromstring(
@@ -156,9 +150,33 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             """
         )
         self.assertEqual(
-            BitmagnetScraper(None, None, "https://bitmagnet.test").parse_items(root),
+            BitmagnetScraper(None, "https://bitmagnet.test").parse_items(root),
             [],
         )
+
+    async def test_bitmagnet_paginates_until_the_source_is_exhausted(self):
+        class FullPage:
+            def __len__(self):
+                return 100
+
+            def __iter__(self):
+                return iter(())
+
+        scraper = BitmagnetScraper(None, "https://bitmagnet.test")
+
+        async def page(_imdb_id, _scrape_type, offset, *_scope):
+            return FullPage() if offset < 15_200 else []
+
+        scraper.scrape_page = AsyncMock(side_effect=page)
+        with patch(
+            "comet.discovery.adapters.torrent.bitmagnet.settings.BITMAGNET_MAX_CONCURRENT_PAGES",
+            2,
+        ):
+            self.assertEqual(await scraper.scrape(REQUEST), [])
+
+        offsets = [call.args[2] for call in scraper.scrape_page.await_args_list]
+        self.assertIn(15_100, offsets)
+        self.assertIn(15_200, offsets)
 
     async def test_dmm_storage_failures_propagate(self):
         with (
@@ -172,7 +190,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "database unavailable"),
         ):
-            await DMMScraper(None, None).scrape(REQUEST)
+            await DMMScraper(None).scrape(REQUEST)
 
     async def test_indexer_downloads_allow_only_the_configured_private_origin(self):
         jackett_result = {
@@ -182,7 +200,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             "Tracker": "indexer",
             "Link": "http://jackett.internal/download/1",
         }
-        jackett = JackettScraper(None, object(), "http://jackett.internal:9117")
+        jackett = JackettScraper(object(), "http://jackett.internal:9117")
         with patch(
             "comet.discovery.adapters.torrent.jackett.download_torrent",
             new=AsyncMock(return_value=(None, None, None)),
@@ -192,7 +210,6 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
                 [],
             )
         download.assert_awaited_once_with(
-            jackett.session,
             jackett_result["Link"],
             allowed_private_origins=frozenset({"http://jackett.internal:9117"}),
         )
@@ -204,7 +221,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             "indexer": "indexer",
             "downloadUrl": "http://prowlarr.internal/download/1",
         }
-        prowlarr = ProwlarrScraper(None, object(), "http://prowlarr.internal:9696")
+        prowlarr = ProwlarrScraper(object(), "http://prowlarr.internal:9696")
         with patch(
             "comet.discovery.adapters.torrent.prowlarr.download_torrent",
             new=AsyncMock(return_value=(None, None, None)),
@@ -214,7 +231,6 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
                 [],
             )
         download.assert_awaited_once_with(
-            prowlarr.session,
             prowlarr_result["downloadUrl"],
             allowed_private_origins=frozenset({"http://prowlarr.internal:9696"}),
         )
@@ -238,7 +254,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             "Italiano S01E02",
         }
 
-        jackett = JackettScraper(None, None, "https://jackett.test")
+        jackett = JackettScraper(None, "https://jackett.test")
         jackett.fetch_jackett_results = AsyncMock(return_value=[])
         with patch.object(indexer_manager, "active_jackett_config", ["indexer"]):
             await jackett.scrape(request)
@@ -247,7 +263,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             expected_queries,
         )
 
-        prowlarr = ProwlarrScraper(None, None, "https://prowlarr.test")
+        prowlarr = ProwlarrScraper(None, "https://prowlarr.test")
         prowlarr._fetch_search_results = AsyncMock(return_value=[])
         with patch.object(indexer_manager, "active_prowlarr_config", ["1"]):
             await prowlarr.scrape(request)
@@ -268,7 +284,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("bad torrent payload")
             return [_torrent(result["token"])]
 
-        scraper = JackettScraper(None, None, "https://jackett.test")
+        scraper = JackettScraper(None, "https://jackett.test")
         scraper.fetch_jackett_results = AsyncMock(return_value=results)
         scraper.process_torrent = AsyncMock(side_effect=process)
         with patch.object(indexer_manager, "active_jackett_config", ["indexer"]):
@@ -286,7 +302,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             del media_id, season
             return [_torrent(result["token"])]
 
-        scraper = ProwlarrScraper(None, None, "https://prowlarr.test")
+        scraper = ProwlarrScraper(None, "https://prowlarr.test")
         scraper._fetch_search_results = AsyncMock(return_value=results)
         scraper.process_torrent = AsyncMock(side_effect=process)
         with patch.object(indexer_manager, "active_prowlarr_config", ["1"]):
@@ -297,14 +313,14 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_prowlarr_partial_query_failure_preserves_cache_coverage(self):
-        request = REQUEST.model_copy(update={"search_titles": ("Working", "Failed")})
+        request = replace(REQUEST, search_titles=("Working", "Failed"))
 
         async def search(query):
             if query == "Failed":
                 raise RuntimeError("transport failed")
             return [{"infoUrl": "working"}]
 
-        scraper = ProwlarrScraper(None, None, "https://prowlarr.test")
+        scraper = ProwlarrScraper(None, "https://prowlarr.test")
         scraper._fetch_search_results = AsyncMock(side_effect=search)
         scraper.process_torrent = AsyncMock(return_value=[_torrent("working")])
         with (
@@ -342,10 +358,11 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
             active_results -= 1
             return [_torrent(result["token"])]
 
-        request = REQUEST.model_copy(
-            update={"search_titles": tuple(f"Title {index}" for index in range(8))}
+        request = replace(
+            REQUEST,
+            search_titles=tuple(f"Title {index}" for index in range(8)),
         )
-        scraper = JackettScraper(None, None, "https://jackett.test")
+        scraper = JackettScraper(None, "https://jackett.test")
         scraper.fetch_jackett_results = AsyncMock(side_effect=fetch)
         scraper.process_torrent = AsyncMock(side_effect=process)
         with patch.object(
@@ -358,36 +375,6 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(torrents), 128)
         self.assertEqual(peak_fetches, 16)
         self.assertEqual(peak_results, 16)
-
-    async def test_indexers_stop_emitting_batches_at_aggregate_result_cap(self):
-        oversized_response = [{}] * 10_000
-        request = ScrapeRequest(
-            media_type="series",
-            media_id="tt123:1:2",
-            media_only_id="tt123",
-            title="Canonical",
-            season=1,
-            episode=2,
-            search_titles=tuple(f"Title {index}" for index in range(8)),
-        )
-
-        jackett = JackettScraper(None, None, "https://jackett.test")
-        jackett.fetch_jackett_results = AsyncMock(return_value=oversized_response)
-        jackett.process_torrent = AsyncMock(return_value=[])
-        with patch.object(
-            indexer_manager,
-            "active_jackett_config",
-            [f"indexer-{index}" for index in range(64)],
-        ):
-            self.assertEqual(await jackett.scrape(request), [])
-        self.assertEqual(jackett.fetch_jackett_results.await_count, 16)
-
-        prowlarr = ProwlarrScraper(None, None, "https://prowlarr.test")
-        prowlarr._fetch_search_results = AsyncMock(return_value=oversized_response)
-        prowlarr.process_torrent = AsyncMock(return_value=[])
-        with patch.object(indexer_manager, "active_prowlarr_config", ["1"]):
-            self.assertEqual(await prowlarr.scrape(request), [])
-        self.assertEqual(prowlarr._fetch_search_results.await_count, 16)
 
     async def test_stremthru_preserves_opaque_titles(self):
         xml = """
@@ -412,7 +399,7 @@ class IndexerScraperTests(unittest.IsolatedAsyncioTestCase):
           </channel>
         </rss>
         """
-        scraper = StremthruScraper(None, _StremthruSession(xml), "https://test")
+        scraper = StremthruScraper(_StremthruSession(xml), "https://test")
 
         torrents = await scraper.scrape(REQUEST)
 

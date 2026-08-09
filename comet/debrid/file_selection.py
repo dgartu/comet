@@ -41,11 +41,46 @@ def _file_priority(file: Mapping[str, object]) -> tuple:
     return (
         not is_auxiliary_video(parsed if isinstance(parsed, ParsedData) else None),
         episode_specificity,
+        file.get("title_match") is True,
         size if type(size) is int and size >= 0 else -1,
         type(index) is int and index >= 0,
         -(index if type(index) is int and index >= 0 else 2**63),
         title.casefold() if isinstance(title, str) else "",
     )
+
+
+def select_playback_file(
+    files: Iterable[dict],
+    *,
+    preferred_index: object = None,
+    preferred_title: str | None = None,
+) -> dict | None:
+    """Select playback from already scope-filtered feature files."""
+    files = list(files)
+    if not files:
+        return None
+
+    normalized_title = (
+        preferred_title.rsplit("/", 1)[-1].casefold() if preferred_title else None
+    )
+    for require_index, require_title in ((True, True), (False, True), (True, False)):
+        if require_index and preferred_index is None:
+            continue
+        if require_title and normalized_title is None:
+            continue
+        for file in files:
+            index_matches = str(file.get("index")) == str(preferred_index)
+            title = file.get("title")
+            title_matches = (
+                isinstance(title, str)
+                and title.rsplit("/", 1)[-1].casefold() == normalized_title
+            )
+            if (not require_index or index_matches) and (
+                not require_title or title_matches
+            ):
+                return file
+
+    return max(files, key=_file_priority)
 
 
 def select_best_availability_files(
@@ -74,7 +109,20 @@ def select_best_availability_files(
 
         key = (info_hash, file.get("season"), file.get("episode"))
         current = selected.get(key)
-        if current is None or _file_priority(file) > _file_priority(current):
+        priority = _file_priority(file)
+        current_priority = _file_priority(current) if current is not None else None
+        same_file = current is not None and (
+            current.get("index"),
+            current.get("title"),
+        ) == (file.get("index"), file.get("title"))
+        richer_observation = same_file and getattr(
+            file.get("media_info"), "preference_key", (0, 0, 0)
+        ) > getattr(current.get("media_info"), "preference_key", (0, 0, 0))
+        if (
+            current is None
+            or priority > current_priority
+            or (priority == current_priority and richer_observation)
+        ):
             selected[key] = file
 
     result = list(selected.values())

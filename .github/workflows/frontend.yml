@@ -3,14 +3,14 @@ name: Frontend
 on:
   pull_request:
     paths:
-      - "comet/api/v1/**"
+      - "comet/**"
       - "frontend/**"
       - "scripts/generate_frontend_contracts.py"
       - ".github/workflows/frontend.yml"
   push:
     branches: ["main"]
     paths:
-      - "comet/api/v1/**"
+      - "comet/**"
       - "frontend/**"
       - "scripts/generate_frontend_contracts.py"
       - ".github/workflows/frontend.yml"

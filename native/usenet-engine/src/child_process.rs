@@ -6,7 +6,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Limits {
@@ -58,10 +58,7 @@ impl Sandbox {
 
 pub(crate) fn terminate_group(child: &mut Child, grace: Duration) -> io::Result<ExitStatus> {
     signal_group(child.id(), libc::SIGTERM);
-    let deadline = Instant::now() + grace;
-    while Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
+    thread::sleep(grace);
     // The direct child deliberately remains unreaped until the process-group
     // kill, preventing its process-group ID from being reused in this window.
     signal_group(child.id(), libc::SIGKILL);

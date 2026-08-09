@@ -102,16 +102,7 @@ except Exception as exc:
 
 def _route_name(scope: dict[str, Any]) -> str:
     name = getattr(scope.get("route"), "name", None)
-    if (
-        isinstance(name, str)
-        and name
-        and name.isascii()
-        and len(name) <= 64
-        and name.replace("_", "").isalnum()
-        and (name[0].isalpha())
-    ):
-        return name.lower()
-    return "unmatched"
+    return name.lower() if name else "unmatched"
 
 
 def _is_private_response(scope: dict[str, Any]) -> bool:

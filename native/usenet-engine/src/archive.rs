@@ -2,7 +2,7 @@ use crc32fast::hash;
 use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
-const MAX_HEADER_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_HEADER_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ARCHIVE_PATH_BYTES: usize = 2_048;
 const MAX_ARCHIVE_PATH_COMPONENTS: usize = 64;
 

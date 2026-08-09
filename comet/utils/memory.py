@@ -130,21 +130,6 @@ def trim_process_memory(
     return _trim_with_libc()
 
 
-async def periodic_memory_trim(interval_seconds: float | None) -> None:
-    interval = max(0.0, float(interval_seconds or 0))
-    if interval <= 0:
-        return
-
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            await asyncio.to_thread(trim_process_memory, aggressive=False)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
-
-
 class MemoryTrimmer:
     def __init__(self) -> None:
         self._interval = 0.0

@@ -14,8 +14,8 @@ class TorrentioScraper(TorrentDiscoveryAdapter):
     url_setting = "TORRENTIO_URL"
     impersonate = "chrome"
 
-    def __init__(self, manager, session, url: str):
-        super().__init__(manager, session, url)
+    def __init__(self, session, url: str):
+        super().__init__(session, url)
 
     @staticmethod
     def _parse_stream(torrent):

@@ -8,11 +8,7 @@ from comet.playback.base import (
     ProviderStatus,
     Readiness,
 )
-from comet.usenet.nntp_config import (
-    NntpServerConfig,
-    parse_instance_servers,
-    parse_personal_servers,
-)
+from comet.usenet.nntp_config import NntpServerConfig
 
 
 class NativeUsenetProvider:
@@ -31,11 +27,12 @@ class NativeUsenetProvider:
     def servers_for(config: dict) -> tuple[NntpServerConfig, ...]:
         """Resolve exactly one request-authorized native source without persistence."""
         source = config.get("source")
-        if source == "instance_pool":
-            return parse_instance_servers(settings.USENET_NATIVE_SERVERS)
-        if source == "personal_servers":
-            return parse_personal_servers(config.get("servers"))
-        raise ValueError("native NNTP server source is unavailable")
+        servers = (
+            settings.USENET_NATIVE_SERVERS
+            if source == "instance_pool"
+            else config["servers"]
+        )
+        return tuple(NntpServerConfig(**server) for server in servers)
 
     async def validate_config(self, config: dict) -> ProviderStatus:
         if self._access_error_code is not None:
@@ -45,28 +42,19 @@ class NativeUsenetProvider:
                 code=self._access_error_code,
                 auth_failed=True,
             )
-        source = config.get("source")
-        if source not in {"instance_pool", "personal_servers"}:
-            return ProviderStatus(
-                Readiness.TERMINAL_FAILURE,
-                Actionability.NONE,
-                code="source_required",
-            )
         if not settings.USENET_ENGINE_ENABLED:
             return ProviderStatus(
                 Readiness.TERMINAL_FAILURE,
                 Actionability.NONE,
                 code="engine_unavailable",
             )
-        if source == "instance_pool":
-            try:
-                self.servers_for(config)
-            except ValueError:
-                return ProviderStatus(
-                    Readiness.TERMINAL_FAILURE,
-                    Actionability.NONE,
-                    code="servers_unavailable",
-                )
+        source = config["source"]
+        if source == "instance_pool" and not settings.USENET_NATIVE_SERVERS:
+            return ProviderStatus(
+                Readiness.TERMINAL_FAILURE,
+                Actionability.NONE,
+                code="servers_unavailable",
+            )
         if (
             source == "personal_servers"
             and not settings.USENET_NATIVE_ALLOW_USER_SERVERS
@@ -76,16 +64,6 @@ class NativeUsenetProvider:
                 Actionability.NONE,
                 code="personal_servers_disabled",
             )
-        if source == "personal_servers":
-            try:
-                self.servers_for(config)
-            except ValueError:
-                return ProviderStatus(
-                    Readiness.TERMINAL_FAILURE,
-                    Actionability.NONE,
-                    code="personal_servers_required",
-                    auth_failed=True,
-                )
         return ProviderStatus(
             Readiness.REQUIRES_PREPARE, Actionability.REMOTE_PREPARE, None
         )

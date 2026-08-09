@@ -7,20 +7,21 @@ from fastapi import Path
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from comet.cometnet.crypto import NodeIdentity
+from comet.cometnet.identifiers import POOL_ID_PATTERN
+from comet.utils.text import has_ascii_control
 
-POOL_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{1,63}$"
-INVITE_CODE_PATTERN = r"^[A-Za-z0-9_-]{16,128}$"
+INVITE_CODE_PATTERN = r"^[A-Za-z0-9_-]{22}$"
 PoolIdPath = Annotated[
     str,
-    Path(min_length=2, max_length=64, pattern=POOL_ID_PATTERN),
+    Path(pattern=POOL_ID_PATTERN),
 ]
 InviteCodePath = Annotated[
     str,
-    Path(min_length=16, max_length=128, pattern=INVITE_CODE_PATTERN),
+    Path(pattern=INVITE_CODE_PATTERN),
 ]
 MemberKeyPath = Annotated[
     str,
-    Path(min_length=1, max_length=512, pattern=r"^[0-9a-f]+$"),
+    Path(pattern=r"^[0-9a-f]{176}$"),
 ]
 
 
@@ -29,38 +30,29 @@ class StrictRequest(BaseModel):
 
 
 class CreatePoolRequest(StrictRequest):
-    pool_id: str = Field(min_length=2, max_length=64, pattern=POOL_ID_PATTERN)
-    display_name: str = Field(min_length=1, max_length=128)
-    description: str = Field(default="", max_length=1_024)
+    pool_id: str = Field(pattern=POOL_ID_PATTERN)
+    display_name: str
+    description: str = ""
     join_mode: Literal["invite"] = "invite"
-
-    @field_validator("display_name", "description")
-    @classmethod
-    def validate_text(cls, value: str) -> str:
-        if any(ord(character) < 32 or ord(character) == 127 for character in value):
-            raise ValueError("pool text contains control characters")
-        return value
 
 
 class CreateInviteRequest(StrictRequest):
-    expires_in: int | None = Field(default=None, ge=60, le=31 * 24 * 60 * 60)
-    max_uses: int | None = Field(default=None, ge=1, le=10_000)
+    expires_in: int | None = Field(default=None, gt=0)
+    max_uses: int | None = Field(default=None, ge=1)
 
 
 class JoinPoolRequest(StrictRequest):
     invite_code: str = Field(
-        min_length=16,
-        max_length=128,
         pattern=INVITE_CODE_PATTERN,
     )
-    node_url: str | None = Field(default=None, min_length=1, max_length=2_048)
+    node_url: str | None = None
 
     @field_validator("node_url")
     @classmethod
     def validate_node_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if any(ord(character) <= 32 or ord(character) == 127 for character in value):
+        if has_ascii_control(value) or any(character.isspace() for character in value):
             raise ValueError("node URL contains invalid characters")
         try:
             parsed = urlsplit(value)
@@ -80,7 +72,7 @@ class JoinPoolRequest(StrictRequest):
 
 
 class AddMemberRequest(StrictRequest):
-    member_key: str = Field(min_length=1, max_length=512, pattern=r"^[0-9a-f]+$")
+    member_key: str
     role: Literal["admin", "member"] = "member"
 
     @field_validator("member_key")

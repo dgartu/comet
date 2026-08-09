@@ -383,6 +383,15 @@ class PrometheusEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.body, b"metric 1\n")
         set_stats.assert_called_once_with(None)
 
+    async def test_disabled_usenet_clears_the_last_engine_snapshot(self):
+        with (
+            patch.object(metric_snapshot.settings, "USENET_ENABLED", False),
+            patch.object(metrics, "set_usenet_engine_stats") as set_stats,
+        ):
+            await metric_snapshot.refresh_usenet_metrics()
+
+        set_stats.assert_called_once_with(None)
+
     async def test_unauthorized_scrape_never_touches_the_native_socket(self):
         with (
             patch.object(metrics, "auth_token", "secret"),

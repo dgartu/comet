@@ -59,10 +59,7 @@ class BandwidthMonitor:
     def __init__(self):
         self._connections: dict[str, ConnectionMetrics] = {}
         self._lock = threading.RLock()
-        self._persisted_total_bytes = 0
-        self._total_bytes_session = 0
         self._pending_bytes = 0
-        self._peak_concurrent = 0
         self._sync_task: asyncio.Task | None = None
         self._initialized = False
         self._lifecycle_lock = asyncio.Lock()
@@ -73,10 +70,6 @@ class BandwidthMonitor:
         async with self._lifecycle_lock:
             if self._initialized:
                 return
-            total = await database.fetch_val(
-                "SELECT total_bytes FROM bandwidth_stats WHERE id = 1"
-            )
-            self._persisted_total_bytes = int(total or 0)
             await database.execute(
                 """
                 DELETE FROM active_connections
@@ -113,10 +106,6 @@ class BandwidthMonitor:
                 start_time=started_at,
                 last_update=started_at,
             )
-            self._peak_concurrent = max(
-                self._peak_concurrent,
-                len(self._connections),
-            )
         metrics.proxy_connection_started()
 
     def bind_stream_task(self, connection_id: str) -> None:
@@ -132,7 +121,6 @@ class BandwidthMonitor:
             if connection is None:
                 return
             connection.add_bytes(bytes_chunk, time.time())
-            self._total_bytes_session += bytes_chunk
             self._pending_bytes += bytes_chunk
 
     async def end_connection(
@@ -186,39 +174,6 @@ class BandwidthMonitor:
             connection.duration,
         )
         return connection
-
-    def get_all_active_connections(self) -> dict[str, ConnectionMetrics]:
-        with self._lock:
-            now = time.time()
-            monotonic_now = time.monotonic()
-            for connection in self._connections.values():
-                connection.sample(now, monotonic_now)
-            return self._connections.copy()
-
-    def get_global_stats(self) -> dict[str, int | float]:
-        with self._lock:
-            return {
-                "total_bytes_alltime": (
-                    self._persisted_total_bytes + self._pending_bytes
-                ),
-                "total_bytes_session": self._total_bytes_session,
-                "total_current_speed": sum(
-                    connection.current_speed
-                    for connection in self._connections.values()
-                ),
-                "active_connections": len(self._connections),
-                "peak_concurrent": self._peak_concurrent,
-            }
-
-    @staticmethod
-    def format_speed(bytes_per_second: float) -> str:
-        if bytes_per_second < 1024:
-            return f"{bytes_per_second:.0f} B/s"
-        if bytes_per_second < 1024**2:
-            return f"{bytes_per_second / 1024:.1f} KB/s"
-        if bytes_per_second < 1024**3:
-            return f"{bytes_per_second / 1024**2:.1f} MB/s"
-        return f"{bytes_per_second / 1024**3:.2f} GB/s"
 
     async def _sync_connections(self, now: float) -> None:
         monotonic_now = time.monotonic()
@@ -304,8 +259,6 @@ class BandwidthMonitor:
             with self._lock:
                 self._pending_bytes += bytes_delta
             raise
-        with self._lock:
-            self._persisted_total_bytes += bytes_delta
 
     async def _sync_loop(self) -> None:
         total_sync_due = 0.0
@@ -392,8 +345,6 @@ class BandwidthMonitor:
             self._initialized = False
             with self._lock:
                 self._connections.clear()
-                self._total_bytes_session = 0
-                self._peak_concurrent = 0
 
 
 bandwidth_monitor = BandwidthMonitor()

@@ -72,17 +72,10 @@ impl ReaderLeases {
             }
         };
         increment(&self.readers, self.maximum)?;
-        let generation = match self.generation_clock.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |generation| generation.checked_add(1),
-        ) {
-            Ok(generation) => generation + 1,
-            Err(_) => {
-                self.readers.fetch_sub(1, Ordering::AcqRel);
-                return Err(ReaderLeaseError::Capacity);
-            }
-        };
+        let generation = self
+            .generation_clock
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         self.persistent.insert(
             lease_id.clone(),
             Arc::new(PersistentReader {
@@ -154,11 +147,8 @@ impl ReaderGeneration {
         let state = self
             .reader
             .prefetch_state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                state.checked_add(2)
-            })
-            .expect("reader prefetch revision overflow")
-            + 2;
+            .fetch_add(2, Ordering::AcqRel)
+            .wrapping_add(2);
         if state & 1 != 0
             || self
                 .reader

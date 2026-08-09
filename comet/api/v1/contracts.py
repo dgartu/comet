@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import orjson
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from comet.core.config_codec import MAX_CONFIG_JSON_BYTES
 from comet.core.models import ConfigModel
 from comet.core.settings_catalog import SettingCatalogEntry
 
@@ -38,7 +39,7 @@ class ApiError(StrictModel):
 
 
 class LoginRequest(StrictModel):
-    password: str = Field(min_length=1, max_length=512)
+    password: str = Field(min_length=1)
 
 
 class SessionData(StrictModel):
@@ -82,10 +83,12 @@ class ConfigValidationRequest(StrictModel):
     def validate_document_size(cls, value: Any) -> Any:
         try:
             encoded = orjson.dumps(value)
-        except (TypeError, orjson.JSONEncodeError):
+        except TypeError:
             raise ValueError("configuration must contain JSON values") from None
-        if len(encoded) > 24 * 1024:
-            raise ValueError("configuration exceeds the 24 KiB JSON limit")
+        if len(encoded) > MAX_CONFIG_JSON_BYTES:
+            raise ValueError(
+                f"configuration exceeds the {MAX_CONFIG_JSON_BYTES // 1024} KiB JSON limit"
+            )
         return value
 
 
@@ -167,44 +170,6 @@ class SettingsSnapshotData(StrictModel):
 class SettingsMutationRequest(StrictModel):
     updates: dict[str, SettingValue] = Field(default_factory=dict)
     reset: list[str] = Field(default_factory=list)
-
-    @field_validator("updates")
-    @classmethod
-    def validate_updates(cls, value: dict[str, Any]) -> dict[str, Any]:
-        if len(value) > 128:
-            raise ValueError("at most 128 settings may be updated at once")
-        try:
-            encoded = orjson.dumps(value)
-        except (TypeError, orjson.JSONEncodeError):
-            raise ValueError("setting updates must contain JSON values") from None
-        if len(encoded) > 256 * 1024:
-            raise ValueError("setting updates are too large")
-        return value
-
-    @field_validator("reset")
-    @classmethod
-    def validate_reset(cls, value: list[str]) -> list[str]:
-        if len(value) > 128 or len(set(value)) != len(value):
-            raise ValueError("reset keys must be unique and bounded")
-        return value
-
-    @model_validator(mode="after")
-    def validate_disjoint_changes(self):
-        requested = {*self.updates, *self.reset}
-        if any(
-            not key
-            or key != key.strip()
-            or len(key.encode("utf-8")) > 128
-            or not key.replace("_", "").isalnum()
-            for key in requested
-        ):
-            raise ValueError("setting keys must be bounded identifiers")
-        overlap = set(self.updates).intersection(self.reset)
-        if overlap:
-            raise ValueError("a setting cannot be updated and reset")
-        if not self.updates and not self.reset:
-            raise ValueError("at least one setting change is required")
-        return self
 
 
 class SettingsMutationData(StrictModel):

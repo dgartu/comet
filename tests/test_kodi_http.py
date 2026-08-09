@@ -41,12 +41,8 @@ class _Session:
         self.response = response
         self.calls = []
 
-    def get(self, url, **kwargs):
-        self.calls.append(("GET", url, kwargs))
-        return self.response
-
-    def post(self, url, **kwargs):
-        self.calls.append(("POST", url, kwargs))
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
         return self.response
 
 
@@ -131,7 +127,7 @@ class KodiHttpTests(unittest.TestCase):
                 http_json.validate_http_url(url)
 
         self.assertEqual(http_json.normalize_api_prefix("/s/token/"), "s/token")
-        for prefix in ("https://attacker.test", "../escape", "s//token", "\n"):
+        for prefix in ("https://attacker.test", "../escape", "s//token"):
             with (
                 self.subTest(prefix=prefix),
                 self.assertRaises(http_json.JsonHttpError),

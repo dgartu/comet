@@ -5,15 +5,9 @@ from datetime import UTC, datetime
 
 import aiohttp
 
-from comet.core.constants import indexer_timeout
 from comet.core.models import normalize_indexer_name, settings
 from comet.core.provider_json import is_success_status
 from comet.observability import log
-from comet.utils.http_client import read_bounded_body
-
-MAX_INDEXER_RESPONSE_BYTES = 2 * 1024 * 1024
-_MAX_ACTIVE_INDEXERS = 64
-_MAX_INDEXER_ID_BYTES = 128
 
 
 class InvalidIndexerResponse(ValueError):
@@ -24,13 +18,12 @@ class IndexerRefreshError(RuntimeError):
     pass
 
 
-def _bounded_indexer_id(value: object) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    try:
-        return len(value.encode("utf-8")) <= _MAX_INDEXER_ID_BYTES
-    except UnicodeEncodeError:
-        return False
+def _usable_indexer_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and not any(character.isspace() for character in value)
+    )
 
 
 def _indexer_name(value: object) -> str | None:
@@ -53,23 +46,16 @@ def decode_indexer_json(document: bytes):
             document.decode("utf-8"),
             parse_constant=_reject_json_constant,
         )
-    except (UnicodeDecodeError, ValueError, RecursionError):
+    except (ValueError, RecursionError):
         raise InvalidIndexerResponse("invalid indexer JSON") from None
 
 
 async def read_indexer_json(response):
-    try:
-        document = await read_bounded_body(response, MAX_INDEXER_RESPONSE_BYTES)
-    except ValueError:
-        raise InvalidIndexerResponse("invalid indexer JSON") from None
-    return decode_indexer_json(document)
+    return decode_indexer_json(await response.read())
 
 
 async def read_indexer_xml(response):
-    try:
-        document = await read_bounded_body(response, MAX_INDEXER_RESPONSE_BYTES)
-    except ValueError:
-        raise InvalidIndexerResponse("invalid indexer XML") from None
+    document = await response.read()
     if b"<!entity" in document.lower():
         raise InvalidIndexerResponse("invalid indexer XML")
     try:
@@ -87,7 +73,7 @@ def _active_jackett_ids(root, configured_ids: list[str]) -> list[str]:
     seen = set()
     for indexer in root.findall("indexer"):
         indexer_id = indexer.get("id")
-        if not _bounded_indexer_id(indexer_id) or indexer_id.casefold() in seen:
+        if not _usable_indexer_id(indexer_id) or indexer_id.casefold() in seen:
             continue
         if configured:
             title = indexer.find("title")
@@ -96,8 +82,6 @@ def _active_jackett_ids(root, configured_ids: list[str]) -> list[str]:
                 continue
         seen.add(indexer_id.casefold())
         active_ids.append(indexer_id)
-        if len(active_ids) == _MAX_ACTIVE_INDEXERS:
-            break
     return active_ids
 
 
@@ -170,8 +154,6 @@ def _active_prowlarr_ids(
                 continue
         seen.add(indexer_id)
         active_ids.append(indexer_id_text)
-        if len(active_ids) == _MAX_ACTIVE_INDEXERS:
-            break
     return active_ids
 
 
@@ -231,7 +213,7 @@ class IndexerManager:
                 "Accept-Encoding": "identity",
             },
             allow_redirects=False,
-            timeout=indexer_timeout(),
+            timeout=aiohttp.ClientTimeout(total=settings.INDEXER_MANAGER_TIMEOUT),
         ) as response:
             if not is_success_status(response.status):
                 return response.status, None
@@ -261,7 +243,7 @@ class IndexerManager:
                     "Accept-Encoding": "identity",
                 },
                 allow_redirects=False,
-                timeout=indexer_timeout(),
+                timeout=aiohttp.ClientTimeout(total=settings.INDEXER_MANAGER_TIMEOUT),
             ) as response:
                 if not is_success_status(response.status):
                     raise IndexerRefreshError(f"Jackett HTTP {response.status}")
@@ -287,12 +269,24 @@ class IndexerManager:
             session = await self.get_session()
             headers = {"X-Api-Key": settings.PROWLARR_API_KEY}
 
-            responses = await asyncio.gather(
-                self._fetch_prowlarr_json(session, "/api/v1/indexer", headers),
-                self._fetch_prowlarr_json(session, "/api/v1/indexerstatus", headers),
+            requests = (
+                asyncio.create_task(
+                    self._fetch_prowlarr_json(session, "/api/v1/indexer", headers)
+                ),
+                asyncio.create_task(
+                    self._fetch_prowlarr_json(session, "/api/v1/indexerstatus", headers)
+                ),
             )
-
-            (indexers_status, indexers), (statuses_status, statuses) = responses
+            try:
+                (
+                    (indexers_status, indexers),
+                    (statuses_status, statuses),
+                ) = await asyncio.gather(*requests)
+            except BaseException:
+                for request in requests:
+                    request.cancel()
+                await asyncio.gather(*requests, return_exceptions=True)
+                raise
 
             if not (
                 is_success_status(indexers_status)

@@ -13,8 +13,8 @@ from yarl import URL
 
 from comet.core.models import settings
 from comet.core.provider_json import is_success_status
-from comet.usenet.limits import MAX_NZB_DOCUMENT_BYTES
 from comet.utils.http_client import http_client_manager
+from comet.utils.text import has_ascii_control
 
 _HEADER_NAME_CHARACTERS = frozenset(
     "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -33,6 +33,7 @@ _FORBIDDEN_REQUEST_HEADERS = frozenset(
         "upgrade",
     }
 )
+_MAX_REDIRECTS = 3
 
 
 class OutboundUrlError(ValueError):
@@ -40,11 +41,7 @@ class OutboundUrlError(ValueError):
 
     def __init__(self, message: str, *, http_status: int | None = None):
         super().__init__(message)
-        self.http_status = (
-            http_status
-            if type(http_status) is int and 100 <= http_status <= 599
-            else None
-        )
+        self.http_status = http_status
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,21 +56,7 @@ class ValidatedUrl:
 
 def http_url_with_basic_auth(url: str, username: str, password: str) -> str:
     """Encode HTTP Basic credentials into a client-consumable media URL."""
-    try:
-        parsed = urlsplit(url)
-        port = parsed.port
-    except ValueError:
-        raise ValueError("HTTP media URL is invalid") from None
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or port == 0
-        or not isinstance(username, str)
-        or not isinstance(password, str)
-    ):
-        raise ValueError("HTTP media URL is invalid")
+    parsed = urlsplit(url)
     userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}@"
     return urlunsplit(
         (
@@ -158,10 +141,7 @@ def _validated_headers(
             or any(character not in _HEADER_NAME_CHARACTERS for character in name)
             or not isinstance(header_value, str)
             or len(header_value) > 8 * 1024
-            or any(
-                ord(character) < 32 or ord(character) == 127
-                for character in header_value
-            )
+            or has_ascii_control(header_value)
         ):
             raise OutboundUrlError("Outbound HTTP headers are invalid")
         normalized = name.lower()
@@ -185,10 +165,7 @@ async def validate_http_url(
     """Validate and pin one HTTP(S) target under an exact-origin policy."""
     if not isinstance(value, str) or not value or len(value) > 4096:
         raise OutboundUrlError("NZB URL is invalid")
-    if any(
-        character.isspace() or ord(character) < 32 or ord(character) == 127
-        for character in value
-    ):
+    if has_ascii_control(value) or any(character.isspace() for character in value):
         raise OutboundUrlError("NZB URL is invalid")
     try:
         parsed = urlsplit(value)
@@ -234,11 +211,6 @@ async def validate_http_url(
     )
 
 
-async def validate_public_http_url(value: object) -> ValidatedUrl:
-    """Validate and pin a public HTTP(S) target before one connection."""
-    return await validate_http_url(value)
-
-
 async def fetch_http_bytes(
     url: object,
     *,
@@ -247,28 +219,13 @@ async def fetch_http_bytes(
     origin_headers: dict[str, str] | None = None,
     credential_origin: str | None = None,
     allowed_private_origins: frozenset[str] = frozenset(),
-    redirects: int = 3,
+    timeout: float | None = 20,
 ) -> bytes:
     """Fetch bounded bytes with DNS pinning and credential stripping per hop."""
-    if (
-        isinstance(max_bytes, bool)
-        or not isinstance(max_bytes, int)
-        or not 1 <= max_bytes <= MAX_NZB_DOCUMENT_BYTES
-        or isinstance(redirects, bool)
-        or not isinstance(redirects, int)
-        or not 0 <= redirects <= 10
-        or origin_headers is not None
-        and (
-            not isinstance(credential_origin, str)
-            or not credential_origin
-            or len(credential_origin) > 4096
-        )
-    ):
-        raise OutboundUrlError("Outbound HTTP request policy is invalid")
     common_headers = _validated_headers(headers, allow_credentials=False)
     scoped_headers = _validated_headers(origin_headers, allow_credentials=True)
     try:
-        async with asyncio.timeout(20):
+        async with asyncio.timeout(timeout):
             return await _fetch_http_bytes(
                 url,
                 max_bytes=max_bytes,
@@ -276,7 +233,6 @@ async def fetch_http_bytes(
                 origin_headers=scoped_headers,
                 credential_origin=credential_origin,
                 allowed_private_origins=allowed_private_origins,
-                redirects=redirects,
             )
     except TimeoutError as exc:
         raise OutboundUrlError("NZB URL could not be fetched") from exc
@@ -290,20 +246,20 @@ async def _fetch_http_bytes(
     origin_headers: dict[str, str] | None,
     credential_origin: str | None,
     allowed_private_origins: frozenset[str],
-    redirects: int,
 ) -> bytes:
     current = url
-    timeout = aiohttp.ClientTimeout(connect=5, sock_read=10)
-    for _ in range(redirects + 1):
+    for _ in range(_MAX_REDIRECTS + 1):
         target = await validate_http_url(
             current,
             allowed_private_origins=allowed_private_origins,
         )
         try:
-            async with _outbound_session(target, timeout) as session:
-                async with session.get(
+            async with (
+                _outbound_session(target) as session,
+                session.get(
                     target.url,
                     allow_redirects=False,
+                    auto_decompress=False,
                     headers={
                         "Accept-Encoding": "identity",
                         **(headers or {}),
@@ -313,35 +269,36 @@ async def _fetch_http_bytes(
                             else {}
                         ),
                     },
-                ) as response:
-                    if response.status in {301, 302, 303, 307, 308}:
-                        location = response.headers.get("Location")
-                        if not location:
-                            raise OutboundUrlError("NZB URL redirect is invalid")
-                        current = str(response.url.join(URL(location)))
-                        continue
-                    if not is_success_status(response.status):
-                        raise OutboundUrlError(
-                            "NZB URL could not be fetched",
-                            http_status=response.status,
-                        )
-                    body = BytesIO()
-                    body_size = 0
-                    async for chunk in response.content.iter_chunked(64 * 1024):
-                        body_size += len(chunk)
-                        if body_size > max_bytes:
-                            raise OutboundUrlError("NZB URL body is too large")
-                        body.write(chunk)
-                    if body_size == 0:
-                        raise OutboundUrlError("NZB URL body is empty")
-                    return body.getvalue()
+                ) as response,
+            ):
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise OutboundUrlError("NZB URL redirect is invalid")
+                    current = str(response.url.join(URL(location)))
+                    continue
+                if not is_success_status(response.status):
+                    raise OutboundUrlError(
+                        "NZB URL could not be fetched",
+                        http_status=response.status,
+                    )
+                body = BytesIO()
+                body_size = 0
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    body_size += len(chunk)
+                    if body_size > max_bytes:
+                        raise OutboundUrlError("NZB URL body is too large")
+                    body.write(chunk)
+                if body_size == 0:
+                    raise OutboundUrlError("NZB URL body is empty")
+                return body.getvalue()
         except aiohttp.ClientError as exc:
             raise OutboundUrlError("NZB URL could not be fetched") from exc
     raise OutboundUrlError("NZB URL redirected too many times")
 
 
 @asynccontextmanager
-async def _outbound_session(target: ValidatedUrl, timeout: aiohttp.ClientTimeout):
+async def _outbound_session(target: ValidatedUrl):
     if settings.USER_PROVIDED_PROXY_URL is not None:
         yield await http_client_manager.get_user_session()
         return
@@ -352,26 +309,7 @@ async def _outbound_session(target: ValidatedUrl, timeout: aiohttp.ClientTimeout
     )
     async with aiohttp.ClientSession(
         connector=connector,
-        timeout=timeout,
+        timeout=aiohttp.ClientTimeout(total=None),
         auto_decompress=False,
     ) as session:
         yield session
-
-
-async def fetch_public_nzb(
-    url: object,
-    *,
-    max_bytes: int,
-    redirects: int = 3,
-) -> bytes:
-    """Fetch one public NZB while validating and pinning every redirect hop."""
-    return await fetch_http_bytes(
-        url,
-        max_bytes=max_bytes,
-        headers={
-            "Accept": (
-                "application/x-nzb, application/xml, text/xml, application/gzip, */*"
-            )
-        },
-        redirects=redirects,
-    )

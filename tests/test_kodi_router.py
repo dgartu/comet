@@ -72,8 +72,6 @@ class KodiRouterTests(unittest.TestCase):
             ("1234abcd", valid["configure_url"], 300, "api"),
         )
         for response in (
-            None,
-            [],
             {**valid, "code": None},
             {**valid, "code": "1234ABCd"},
             {**valid, "code": "1234abc"},
@@ -100,8 +98,6 @@ class KodiRouterTests(unittest.TestCase):
             ("config", "api"),
         )
         for response in (
-            None,
-            [],
             {},
             {"secret_string": []},
             {"secret_string": "x", "stremio_api_prefix": None},
@@ -261,14 +257,14 @@ class KodiRouterTests(unittest.TestCase):
         )
 
     def test_catalog_specs_reject_invalid_root_shapes(self):
-        for manifest in (None, [], {"catalogs": None}, {"catalogs": {}}):
+        for manifest in (None, {"catalogs": None}, {"catalogs": {}}):
             with self.subTest(manifest=manifest):
                 self.assertEqual(router._catalog_specs(manifest, "movie"), [])
 
     def test_provider_meta_requires_current_object_shape(self):
         original = router.fetch_data
         try:
-            for response in (None, [], {"meta": []}, {"meta": None}):
+            for response in (None, {"meta": []}, {"meta": None}):
                 with self.subTest(response=response):
                     router.fetch_data = lambda url, value=response: value
                     self.assertIsNone(router._fetch_provider_meta("movie", "tt123"))

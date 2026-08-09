@@ -89,10 +89,50 @@ class _UnavailableFreshDebridService:
 
     async def get_and_cache_availability(self, *args, **kwargs):
         del args, kwargs
-        raise DebridLinkGenerationError("first", "provider unavailable")
+        raise DebridLinkGenerationError("provider unavailable")
 
 
 class MultiServiceDebridTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_fanout_cancels_and_joins_siblings_after_failure(self):
+        first_started = asyncio.Event()
+        first_cancelled = asyncio.Event()
+
+        class PartiallyBrokenService:
+            def __init__(self, service, api_key, ip):
+                del api_key, ip
+                self.service = service
+
+            async def check_existing_availability(self, *args, **kwargs):
+                del args, kwargs
+                if self.service == "first":
+                    first_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        first_cancelled.set()
+                await first_started.wait()
+                raise RuntimeError("second failed")
+
+        with (
+            patch(
+                "comet.services.media_search.DebridService",
+                new=PartiallyBrokenService,
+            ),
+            self.assertRaisesRegex(RuntimeError, "second failed"),
+        ):
+            await check_multi_service_availability(
+                [
+                    {"service": "first", "apiKey": "one"},
+                    {"service": "second", "apiKey": "two"},
+                ],
+                {"a" * 40: {"title": "Original.mkv"}},
+                None,
+                None,
+                MediaScope.MOVIE,
+            )
+
+        self.assertTrue(first_cancelled.is_set())
+
     def test_partial_cache_refresh_selects_only_new_hashes_at_zero_ratio(self):
         old_hash = "a" * 40
         new_hash = "b" * 40

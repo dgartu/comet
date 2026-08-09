@@ -352,7 +352,7 @@ async def _serve_torrent_debrid(
             download_url,
             mediaflow_proxy.utils.http_utils.get_proxy_headers(request),
             media_id=prepared.resolution.release.title,
-            ip=get_client_ip_any(request)[0],
+            ip=get_client_ip_any(request),
             source_type="torrent",
             service=prepared.preparation.provider_kind,
         )
@@ -425,9 +425,7 @@ def _preparation_state_response(
     """Expose retries only while a provider transition remains unfinished."""
     if state in {"pending", "reprepare"}:
         return _retryable_playback_response(retry_after)
-    if state == "failed":
-        return _usenet_failure_response(prepared.preparation.target_ref["failure_code"])
-    raise ValueError("invalid playback preparation result")
+    return _usenet_failure_response(prepared.preparation.target_ref["failure_code"])
 
 
 async def _resolved_remote_download_url(prepared, *, add_background_task=None) -> str:
@@ -634,6 +632,7 @@ async def _run_remote_preparation(
         task = create_detached_task(
             drive(),
             name="usenet-remote-preparation",
+            capture_settings=True,
         )
         _REMOTE_PREPARATION_TASKS[preparation_id] = task
         task.add_done_callback(
@@ -1420,7 +1419,7 @@ async def playback_v2(
                 start,
                 end,
                 source_kind=native_target.source_kind,
-                client_ip=get_client_ip_any(request)[0],
+                client_ip=get_client_ip_any(request),
                 content_id=prepared.resolution.release.media_id,
                 title=prepared.resolution.release.title,
                 member_path=native_target.member_path,

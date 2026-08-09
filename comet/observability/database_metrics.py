@@ -260,7 +260,9 @@ async def _collect_database_metrics(
                         if row["average_size"] is None
                         else float(row["average_size"])
                     ),
-                    total_size=int(row["total_size"]),
+                    total_size=(
+                        None if row["total_size"] is None else int(row["total_size"])
+                    ),
                 )
                 for row in debrid_rows
             ),

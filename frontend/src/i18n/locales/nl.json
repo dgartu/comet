@@ -143,6 +143,7 @@
     "preview": {
       "audio": "DDP 5.1 · Atmos",
       "languages": "🇬🇧 / 🇫🇷",
+      "subtitles": "💬 🇬🇧 / 🇫🇷",
       "quality": "BluRay",
       "releaseGroup": "YTS",
       "seeders": "1.234 seeders",
@@ -846,7 +847,6 @@
     },
     "detail": {
       "timestamp": "Tijdstip",
-      "context": "Context",
       "process": "Proces",
       "errorCode": "Foutcode",
       "safeDetails": "Veilige gestructureerde details",

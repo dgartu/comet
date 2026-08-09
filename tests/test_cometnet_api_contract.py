@@ -44,7 +44,7 @@ class CometNetStandaloneLifespanTests(unittest.IsolatedAsyncioTestCase):
         candidate = settings.active_snapshot().model_copy(
             update={"COMETNET_LISTEN_PORT": 9876}
         )
-        application = SettingsApplication(2, (), ("COMETNET_LISTEN_PORT",), ())
+        application = SettingsApplication((), ("COMETNET_LISTEN_PORT",), ())
         prepared = SimpleNamespace(
             current=settings.active_snapshot(),
             candidate=candidate,
@@ -85,7 +85,6 @@ class CometNetStandaloneLifespanTests(unittest.IsolatedAsyncioTestCase):
             candidate=candidate,
             changed_keys=("COMETNET_LISTEN_PORT",),
             application=SettingsApplication(
-                2,
                 (),
                 ("COMETNET_LISTEN_PORT",),
                 (),

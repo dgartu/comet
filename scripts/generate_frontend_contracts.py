@@ -30,15 +30,17 @@ def _typescript(schema: dict[str, Any]) -> str:
             json.dumps(value, ensure_ascii=False) for value in schema["enum"]
         )
     if "anyOf" in schema:
-        return " | ".join(_typescript(item) for item in schema["anyOf"])
+        return " | ".join(dict.fromkeys(_typescript(item) for item in schema["anyOf"]))
     if "oneOf" in schema:
-        return " | ".join(_typescript(item) for item in schema["oneOf"])
+        return " | ".join(dict.fromkeys(_typescript(item) for item in schema["oneOf"]))
     if "allOf" in schema:
-        return " & ".join(_typescript(item) for item in schema["allOf"])
+        return " & ".join(dict.fromkeys(_typescript(item) for item in schema["allOf"]))
 
     schema_type = schema.get("type")
     if isinstance(schema_type, list):
-        return " | ".join(_typescript({**schema, "type": item}) for item in schema_type)
+        return " | ".join(
+            dict.fromkeys(_typescript({**schema, "type": item}) for item in schema_type)
+        )
     if schema_type == "null":
         return "null"
     if schema_type == "boolean":
@@ -118,7 +120,11 @@ def _parameters_type(operation: dict[str, Any]) -> str:
 
 def generate() -> str:
     from comet.api.app import fastapi_app
-    from comet.core.config_codec import CONFIGURATION_DICTIONARY_V1
+    from comet.core.config_codec import (
+        CONFIGURATION_DICTIONARY_V1,
+        MAX_CONFIG_JSON_BYTES,
+        MAX_CONFIG_SEGMENT_BYTES,
+    )
 
     document = fastapi_app.openapi()
     paths = {
@@ -143,6 +149,8 @@ def generate() -> str:
         "export const CONFIGURATION_DICTIONARY_V1 = "
         + json.dumps(CONFIGURATION_DICTIONARY_V1.decode("ascii"))
         + ";",
+        f"export const MAX_CONFIG_JSON_BYTES = {MAX_CONFIG_JSON_BYTES};",
+        f"export const MAX_CONFIG_SEGMENT_BYTES = {MAX_CONFIG_SEGMENT_BYTES};",
         "",
     ]
     for name in sorted(referenced):

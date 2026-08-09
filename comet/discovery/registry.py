@@ -14,7 +14,7 @@ from comet.core.provider_governor import ProviderGovernor
 from comet.core.sources import REAL_NZB_PROVIDER_KINDS
 from comet.discovery.adapters.animetosho import (
     AnimeToshoAdapter,
-    animetosho_configuration,
+    AnimeToshoConfiguration,
 )
 from comet.discovery.adapters.easynews import (
     EasynewsSearchAccount,
@@ -58,16 +58,8 @@ def build_discovery_adapters(
         return {}
     user_session = session if user_session is None else user_session
 
-    accounts = config.get("accounts")
-    if accounts is None:
-        accounts = {}
-    elif not isinstance(accounts, Mapping):
-        raise ValueError("discovery accounts are invalid")
-    providers = config.get("playbackProviders")
-    if providers is None:
-        providers = []
-    elif not isinstance(providers, list):
-        raise ValueError("playback providers are invalid")
+    accounts = config.get("accounts") or {}
+    providers = config.get("playbackProviders") or []
     governor = (
         ProviderGovernor(database)
         if database is not None and account_partition is not None
@@ -78,20 +70,15 @@ def build_discovery_adapters(
     for source in effective_discovery_sources(config):
         if not source.get("enabled"):
             continue
-        source_id = source.get("configurationId")
-        if not isinstance(source_id, str) or not source_id:
-            raise ValueError("discovery source is invalid")
-        source_kind = source.get("kind")
+        source_id = source["configurationId"]
+        source_kind = source["kind"]
         governor_scope = (
             _governor_scope(account_partition, source_id)
             if governor is not None
             else None
         )
         if source_kind == "animetosho":
-            configuration = animetosho_configuration(
-                source_id,
-                source.get("options"),
-            )
+            configuration = AnimeToshoConfiguration(source_id)
             adapters[source_id] = AnimeToshoAdapter(
                 session,
                 configuration,
@@ -136,7 +123,7 @@ def build_discovery_adapters(
         if source_kind == "easynews":
             account_id = source.get("accountId")
             credentials = _easynews_credentials(source.get("options"))
-            if credentials is None and isinstance(account_id, str):
+            if credentials is None and account_id is not None:
                 credentials = _easynews_credentials(accounts.get(account_id))
             matching_provider_id = next(
                 (
@@ -145,7 +132,6 @@ def build_discovery_adapters(
                     if provider.get("enabled")
                     and provider.get("kind") == "easynews"
                     and provider.get("accountId") == account_id
-                    and isinstance(provider.get("configurationId"), str)
                 ),
                 None,
             )
@@ -154,7 +140,6 @@ def build_discovery_adapters(
                 for provider in providers
                 if provider.get("enabled")
                 and provider.get("kind") in REAL_NZB_PROVIDER_KINDS
-                and isinstance(provider.get("configurationId"), str)
             )
             if credentials is not None and (
                 matching_provider_id is not None or generated_provider_kinds

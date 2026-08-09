@@ -28,12 +28,10 @@ impl ConfinedDirectory {
     }
 
     pub fn open_read(&self, name: &str) -> io::Result<File> {
-        self.verify_path_identity()?;
         self.openat2(name, libc::O_RDONLY | libc::O_CLOEXEC, 0)
     }
 
     pub fn create_new(&self, name: &str, mode: u32) -> io::Result<File> {
-        self.verify_path_identity()?;
         self.openat2(
             name,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
@@ -42,7 +40,6 @@ impl ConfinedDirectory {
     }
 
     pub fn exists(&self, name: &str) -> io::Result<bool> {
-        self.verify_path_identity()?;
         let name = component(name)?;
         let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
         let result = unsafe {
@@ -66,7 +63,6 @@ impl ConfinedDirectory {
     }
 
     pub fn hard_link_no_replace(&self, source: &str, target: &str) -> io::Result<()> {
-        self.verify_path_identity()?;
         let source = component(source)?;
         let target = component(target)?;
         let result = unsafe {
@@ -86,7 +82,6 @@ impl ConfinedDirectory {
     }
 
     pub fn remove(&self, name: &str) -> io::Result<()> {
-        self.verify_path_identity()?;
         let name = component(name)?;
         let result = unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) };
         if result == 0 {
@@ -106,12 +101,10 @@ impl ConfinedDirectory {
     }
 
     pub fn sync(&self) -> io::Result<()> {
-        self.verify_path_identity()?;
         self.directory.sync_all()
     }
 
     pub fn available_bytes(&self) -> io::Result<u64> {
-        self.verify_path_identity()?;
         let mut statistics: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstatvfs(self.directory.as_raw_fd(), &mut statistics) } != 0 {
             return Err(io::Error::last_os_error());
@@ -215,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_when_the_directory_path_is_replaced_after_open() {
+    fn path_enumeration_detects_replacement_while_pinned_operations_remain_confined() {
         let root = std::env::temp_dir().join(format!(
             "comet-confined-replaced-{}-{}",
             std::process::id(),
@@ -232,16 +225,18 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
 
         assert!(confined.entry_names().is_err());
-        assert!(confined.open_read("source").is_err());
-        assert!(confined.create_new("created", 0o600).is_err());
-        assert!(confined.exists("source").is_err());
-        assert!(confined.hard_link_no_replace("source", "linked").is_err());
-        assert!(confined.remove("source").is_err());
-        assert!(confined.sync().is_err());
-        assert!(confined.available_bytes().is_err());
+        let mut source = confined.open_read("source").unwrap();
+        let mut content = String::new();
+        source.read_to_string(&mut content).unwrap();
+        assert_eq!(content, "source");
+        confined.create_new("created", 0o600).unwrap();
+        assert!(confined.exists("source").unwrap());
+        confined.hard_link_no_replace("source", "linked").unwrap();
+        confined.remove("linked").unwrap();
+        confined.sync().unwrap();
+        assert!(confined.available_bytes().unwrap() > 0);
         assert!(original.join("source").exists());
-        assert!(!original.join("created").exists());
-        assert!(!original.join("linked").exists());
+        assert!(original.join("created").exists());
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(original);

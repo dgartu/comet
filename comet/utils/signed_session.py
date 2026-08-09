@@ -1,5 +1,4 @@
 import base64
-import binascii
 import hashlib
 import hmac
 import re
@@ -54,7 +53,7 @@ def verify_signed_session(token: str | None, secret: bytes):
         ).decode("ascii")
         expires_at_text, nonce, signature = decoded.split(":", 2)
         expires_at = int(expires_at_text)
-    except (UnicodeEncodeError, UnicodeDecodeError, ValueError, binascii.Error):
+    except ValueError:
         return False
 
     if (

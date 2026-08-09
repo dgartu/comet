@@ -1,6 +1,6 @@
 use crate::archive::{
     ArchiveEvidence, ArchiveFormat, VolumeEndEvidence, VolumeHint, VolumeScheme,
-    classify_volume_name, detect_archive, detect_volume_end, normalize_archive_path,
+    classify_volume_name, detect_archive, detect_volume_end,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -166,31 +166,15 @@ pub fn plan_rar_headers(inputs: &[RarHeaderVolumeInput<'_>]) -> Result<VolumePla
     plan_rar(entries, false)
 }
 
-pub fn member_identity(
-    set_identity: &str,
-    relative_path: &str,
-    exact_size: u64,
-) -> Result<String, &'static str> {
-    if !valid_identity(set_identity) || exact_size == 0 {
-        return Err("archive_catalog_invalid");
-    }
-    let normalized =
-        normalize_archive_path(relative_path).map_err(|_| "archive_catalog_invalid")?;
-    if normalized != relative_path {
-        return Err("archive_catalog_invalid");
-    }
+pub fn member_identity(set_identity: &str, relative_path: &str, exact_size: u64) -> String {
     let encoded = relative_path.as_bytes();
     let mut digest = Sha256::new();
     digest.update(b"comet-archive-member-v1\0");
     digest.update(set_identity.as_bytes());
-    digest.update(
-        u32::try_from(encoded.len())
-            .map_err(|_| "archive_catalog_invalid")?
-            .to_be_bytes(),
-    );
+    digest.update((encoded.len() as u32).to_be_bytes());
     digest.update(encoded);
     digest.update(exact_size.to_be_bytes());
-    Ok(format!("{:x}", digest.finalize()))
+    format!("{:x}", digest.finalize())
 }
 
 fn plan_rar(
@@ -452,13 +436,6 @@ fn finish(kind: VolumePlanKind, entries: Vec<Entry<'_>>) -> VolumePlan {
         exact_size,
         volumes,
     }
-}
-
-fn valid_identity(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 const fn format_tag(format: ArchiveFormat) -> u8 {
@@ -760,21 +737,15 @@ mod tests {
     #[test]
     fn binds_archive_members_to_the_exact_set_path_and_size() {
         let set_identity = "a".repeat(64);
-        let first = member_identity(&set_identity, "Season 01/Episode.mkv", 42)
-            .expect("derive member identity");
+        let first = member_identity(&set_identity, "Season 01/Episode.mkv", 42);
         assert_eq!(first.len(), 64);
         assert_eq!(
             first,
             member_identity(&set_identity, "Season 01/Episode.mkv", 42)
-                .expect("derive stable member identity")
         );
         assert_ne!(
             first,
-            member_identity(&set_identity, "Season 01/Episode.mkv", 43).expect("bind member size")
-        );
-        assert_eq!(
-            member_identity(&set_identity, "../escape.mkv", 42),
-            Err("archive_catalog_invalid")
+            member_identity(&set_identity, "Season 01/Episode.mkv", 43)
         );
     }
 

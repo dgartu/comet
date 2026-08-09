@@ -29,8 +29,6 @@ def normalize_archive_relative_path(value: object) -> str | None:
         not value
         or encoded_length > MAX_ARCHIVE_PATH_BYTES
         or value.startswith("/")
-        or "\x00" in value
-        or any(ord(character) < 32 for character in value)
         or unicodedata.normalize("NFC", value) != value
         or any(
             unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value

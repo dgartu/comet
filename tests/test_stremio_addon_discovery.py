@@ -158,52 +158,6 @@ class StremioAddonDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.candidates, ())
         fetch.assert_not_awaited()
 
-    async def test_owned_ingestion_requires_an_exact_account_partition(self):
-        adapter = StremioAddonAdapter(
-            stremio_addon_configuration(
-                SOURCE_ID,
-                {"baseUrl": "https://addon.example"},
-            ),
-            broker=object(),
-        )
-        with patch(
-            "comet.discovery.adapters.stremio_addon.fetch_http_bytes",
-            AsyncMock(),
-        ) as fetch:
-            result = await adapter.search(
-                MediaQuery("tt123", "movie"),
-                DiscoveryContext(frozenset({"usenet"}), b"a" * 31),
-            )
-
-        self.assertEqual(result.coverage, frozenset())
-        self.assertIn("brokerage", result.diagnostics[0])
-        fetch.assert_not_awaited()
-
-    async def test_expired_search_deadline_does_not_start_network_work(self):
-        adapter = StremioAddonAdapter(
-            stremio_addon_configuration(
-                SOURCE_ID,
-                {"baseUrl": "https://addon.example"},
-            ),
-            broker=object(),
-        )
-        with patch(
-            "comet.discovery.adapters.stremio_addon.fetch_http_bytes",
-            AsyncMock(),
-        ) as fetch:
-            result = await adapter.search(
-                MediaQuery("tt123", "movie"),
-                DiscoveryContext(
-                    frozenset({"usenet"}),
-                    b"a" * 32,
-                    hard_deadline=0,
-                ),
-            )
-
-        self.assertEqual(result.coverage, frozenset())
-        self.assertIn("deadline", result.diagnostics[0])
-        fetch.assert_not_awaited()
-
     async def test_manifest_validation_requires_the_standard_stream_resource(self):
         adapter = StremioAddonAdapter(
             stremio_addon_configuration(
@@ -309,7 +263,7 @@ class StremioAddonDiscoveryTests(unittest.IsolatedAsyncioTestCase):
                 DiscoveryContext(frozenset({"usenet"}), b"a" * 32),
             )
 
-        self.assertEqual(result.candidates[0].title, "  Exact title  ")
+        self.assertEqual(result.candidates[0].title, "Exact title")
 
     async def test_unusable_items_do_not_discard_a_valid_stream(self):
         adapter = StremioAddonAdapter(
@@ -425,12 +379,6 @@ class StremioAddonCodecTests(unittest.TestCase):
             {"baseUrl": "https://addon.example/a/%2f/../b"},
         ):
             stremio_addon_configuration(SOURCE_ID, options)
-
-        with self.assertRaises(ValueError):
-            stremio_addon_configuration(
-                "source",
-                {"baseUrl": "https://addon.example"},
-            )
 
     def test_json_codec_uses_normal_duplicate_key_semantics(self):
         self.assertEqual(

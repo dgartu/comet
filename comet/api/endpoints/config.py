@@ -3,7 +3,6 @@ import asyncio
 import orjson
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import ValidationError
 
 from comet.api.frontend import frontend_index_response
 from comet.api.v1.security import CONFIGURE_SESSION_COOKIE, configure_session_active
@@ -41,13 +40,13 @@ def _apply_private_no_cache(response):
     response.headers["Vary"] = "Cookie, Accept, Accept-Encoding"
 
 
-async def _read_bounded_request(request: Request, limit: int) -> bytes | None:
+async def _read_bounded_request(request: Request, limit: int) -> bytearray | None:
     document = bytearray()
     async for chunk in request.stream():
         if len(document) + len(chunk) > limit:
             return None
         document.extend(chunk)
-    return bytes(document)
+    return document
 
 
 @router.post(
@@ -90,13 +89,11 @@ async def test_configure_capabilities(request: Request):
         return response
     try:
         payload = orjson.loads(document)
-        if not isinstance(payload, dict):
-            raise ValueError
         config = ConfigModel.model_validate(payload)
         if config.schemaVersion != 2:
             raise ValueError
         normalized = normalize_validated_config(config.model_dump(mode="python"))
-    except (orjson.JSONDecodeError, ValidationError, ValueError):
+    except ValueError:
         response = JSONResponse(
             {"version": 1, "ok": False, "code": "configuration_invalid"},
             status_code=400,

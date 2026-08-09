@@ -133,6 +133,7 @@ class ReleaseCandidate:
     published_at_ms: int | None = None
     source: str = ""
     parsed: object | None = None
+    media_info: object | None = None
     transport_stats: dict[str, object] = field(default_factory=dict)
     identities: tuple[str, ...] = ()
     is_private: bool = False

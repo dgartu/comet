@@ -1,6 +1,5 @@
 import unicodedata
 
-MAX_INDEXER_TITLES = 8
 MAX_INDEXER_TITLE_BYTES = 512
 
 LANGUAGE_EMOJIS = {
@@ -305,22 +304,18 @@ def _strip_latin_diacritics(value: str) -> str:
 
 def select_indexer_titles(
     title: str,
-    aliases: object,
+    aliases: dict[str, list[str]],
     languages: list[str],
     *,
     include_canonical: bool = True,
     include_original: bool = True,
 ) -> tuple[str, ...]:
-    """Return the bounded, ordered set of titles requested by the operator."""
+    """Return the ordered set of titles requested by the operator."""
 
     selected = []
     seen = set()
 
-    def append(candidate: object):
-        if len(selected) >= MAX_INDEXER_TITLES or not isinstance(candidate, str):
-            return
-        if any(ord(character) < 32 or ord(character) == 127 for character in candidate):
-            return
+    def append(candidate: str):
         if not (candidate := " ".join(candidate.split())):
             return
         candidate = _strip_latin_diacritics(candidate)
@@ -339,16 +334,9 @@ def select_indexer_titles(
     if include_canonical:
         append(title)
 
-    if not isinstance(aliases, dict):
-        if not selected:
-            append(title)
-        return tuple(selected)
-
     if include_original:
         original_count = len(selected)
         for scope, scope_titles in aliases.items():
-            if not isinstance(scope, str) or not isinstance(scope_titles, list):
-                continue
             normalized_scope = scope.lower()
             if normalized_scope != "original" and not normalized_scope.startswith(
                 "original:"
@@ -363,8 +351,6 @@ def select_indexer_titles(
 
     aliases_by_language: dict[str, list[str]] = {}
     for scope, scope_titles in aliases.items():
-        if not isinstance(scope, str) or not isinstance(scope_titles, list):
-            continue
         language = alias_language(scope.lower())
         if language is not None:
             aliases_by_language.setdefault(language, []).extend(scope_titles)

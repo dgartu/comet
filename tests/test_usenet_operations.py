@@ -108,3 +108,48 @@ class UsenetOperationMonitorTests(unittest.IsolatedAsyncioTestCase):
             {"id": operation_id},
         )
         self.assertEqual(outcome, "cancelled")
+
+    async def test_sync_heartbeats_active_work_without_progress(self):
+        operation_id = await self.monitor.start(
+            client_ip="192.0.2.1",
+            content_id="tt123",
+            title="Example",
+            member_path="Example.mkv",
+            source_kind="session",
+            total_bytes=100,
+        )
+        self.monitor._operations[operation_id].updated_at = 1
+
+        await self.monitor._sync_operations()
+
+        updated_at = await self.database.fetch_val(
+            "SELECT updated_at FROM usenet_active_operations WHERE id = :id",
+            {"id": operation_id},
+        )
+        self.assertGreater(updated_at, 1)
+
+    async def test_shutdown_cancels_and_joins_bound_native_work(self):
+        operation_id = await self.monitor.start(
+            client_ip="192.0.2.1",
+            content_id="tt123",
+            title="Example",
+            member_path="Example.mkv",
+            source_kind="session",
+            total_bytes=100,
+        )
+        started = asyncio.Event()
+
+        async def request():
+            started.set()
+            await asyncio.Event().wait()
+
+        running = asyncio.create_task(
+            self.monitor.run_cancellable(operation_id, request())
+        )
+        await started.wait()
+
+        await self.monitor.shutdown()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+        self.assertEqual(self.monitor._operations, {})

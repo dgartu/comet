@@ -179,6 +179,29 @@ def test_engine_descriptor_temporary_is_removed_after_failed_health(tmp_path):
         supervisor.close()
 
 
+def test_engine_descriptor_temporary_is_removed_after_failed_write(tmp_path):
+    runtime = tmp_path / "runtime"
+    supervisor = EngineSupervisor(
+        str(runtime),
+        str(tmp_path / "local-data"),
+        "/engine",
+    )
+    supervisor.prepare_runtime_dir()
+
+    async def scenario():
+        with (
+            patch("comet.usenet.supervisor.os.fsync", side_effect=OSError("disk")),
+            pytest.raises(OSError, match="disk"),
+        ):
+            await supervisor.publish_descriptor()
+
+    try:
+        asyncio.run(scenario())
+        assert not tuple(runtime.glob(".engine-*.json"))
+    finally:
+        supervisor.close()
+
+
 def test_engine_descriptor_temporary_cannot_replace_an_existing_entry(tmp_path):
     runtime = tmp_path / "runtime"
     supervisor = EngineSupervisor(
@@ -294,7 +317,6 @@ def test_engine_environment_binds_parent_death_without_forwarding_credentials():
             "/data",
             "/engine",
             log_profile="verbose",
-            log_format="json",
             no_color=True,
         )
         assert supervisor.next_engine_generation() == 1

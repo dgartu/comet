@@ -78,7 +78,7 @@ class RenderedReleaseRepository:
                   AND NOT EXISTS (
                       SELECT 1
                       FROM provider_preparations AS provider
-                      WHERE provider.candidate_id = locator.candidate_id
+                      WHERE provider.locator_id = locator.locator_id
                   )
                   AND NOT EXISTS (
                       SELECT 1
@@ -93,8 +93,8 @@ class RenderedReleaseRepository:
               AND NOT EXISTS (
                   SELECT 1
                   FROM provider_preparations AS provider
-                  WHERE provider.candidate_id =
-                        rendered_release_locators.candidate_id
+                  WHERE provider.locator_id =
+                        rendered_release_locators.locator_id
               )
               AND NOT EXISTS (
                   SELECT 1
@@ -386,7 +386,6 @@ class RenderedReleaseRepository:
               AND artifact.locator_kind = 'nzb_artifact'
               AND artifact.external_locator_id LIKE :external_prefix
             ORDER BY artifact.updated_at DESC, artifact.locator_id ASC
-            LIMIT 16
             """,
             {
                 "candidate_id": candidate_id,
@@ -511,6 +510,7 @@ class RenderedReleaseRepository:
                 :locator_json, :policy_json, :now, :now, :now
             ) ON CONFLICT (candidate_id, external_locator_id) DO UPDATE SET
                 locator_json = EXCLUDED.locator_json,
+                policy_json = EXCLUDED.policy_json,
                 updated_at = EXCLUDED.updated_at,
                 last_rendered_at = EXCLUDED.last_rendered_at
             RETURNING locator_id, locator_kind, locator_json, policy_json

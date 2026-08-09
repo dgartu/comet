@@ -1660,7 +1660,7 @@ test("overview and analytics expose useful live and inventory signals", async ({
   await expect(page.getByText("realdebrid")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Torrent cache" })).toBeVisible();
   const liveChart = page.locator(".metric-chart .recharts-wrapper");
-  await expect(liveChart).toBeVisible({ timeout: 7_000 });
+  await expect(liveChart).toBeVisible();
   await liveChart.hover({ position: { x: 160, y: 140 } });
   await expect(page.locator(".metric-chart .recharts-active-dot")).toBeVisible();
   const tooltip = page.locator(".metric-chart__tooltip");
@@ -1687,24 +1687,32 @@ test("overview and analytics expose useful live and inventory signals", async ({
 });
 
 test("metric surfaces render from the first snapshot without unrelated waits", async ({ page }) => {
+  let releaseUnrelatedResponses = () => {};
+  const unrelatedResponses = new Promise<void>((resolve) => {
+    releaseUnrelatedResponses = resolve;
+  });
   await page.route(/\/api\/v1\/admin\/(system\/snapshot|metrics\/database)$/, async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    await unrelatedResponses;
     await route.fallback();
   });
   const currentMetrics = page.waitForResponse("**/api/v1/admin/metrics/current");
 
-  await page.goto("/admin/overview");
-  await currentMetrics;
-  const requestValue = page
-    .locator(".metric-card")
-    .filter({ hasText: "HTTP requests" })
-    .first()
-    .locator(".metric-card__value");
-  await expect(requestValue).not.toHaveText("—", { timeout: 700 });
+  try {
+    await page.goto("/admin/overview");
+    await currentMetrics;
+    const requestValue = page
+      .locator(".metric-card")
+      .filter({ hasText: "HTTP requests" })
+      .first()
+      .locator(".metric-card__value");
+    await expect(requestValue).not.toHaveText("—");
 
-  await page.goto("/admin/analytics");
-  await expect(page.getByRole("heading", { name: "Analytics", level: 1 })).toBeVisible();
-  await expect(page.locator(".metric-chart .recharts-wrapper")).toBeVisible({ timeout: 700 });
+    await page.goto("/admin/analytics");
+    await expect(page.getByRole("heading", { name: "Analytics", level: 1 })).toBeVisible();
+    await expect(page.locator(".metric-chart .recharts-wrapper")).toBeVisible();
+  } finally {
+    releaseUnrelatedResponses();
+  }
 });
 
 test("system workspace exposes safe deployment diagnostics and bounded maintenance", async ({
@@ -1782,6 +1790,14 @@ test("logs combine history and live events", async ({ page }) => {
 test("logs paginate only from the log section scroll boundary", async ({ page }) => {
   await page.unroute("**/api/v1/admin/logs**");
   const requestedCursors: Array<string | null> = [];
+  let releaseSecondPage = () => {};
+  let markSecondPageStarted = () => {};
+  const secondPageGate = new Promise<void>((resolve) => {
+    releaseSecondPage = resolve;
+  });
+  const secondPageStarted = new Promise<void>((resolve) => {
+    markSecondPageStarted = resolve;
+  });
   const pageOfEvents = (highestId: number) =>
     Array.from({ length: 20 }, (_, index) => ({
       ...operationalEvent,
@@ -1799,7 +1815,10 @@ test("logs paginate only from the log section scroll boundary", async ({ page })
     const cursor = url.searchParams.get("cursor");
     requestedCursors.push(cursor);
     const highestId = cursor === null ? 100 : Number(cursor);
-    await new Promise((resolve) => setTimeout(resolve, cursor === null ? 0 : 100));
+    if (cursor === "80") {
+      markSecondPageStarted();
+      await secondPageGate;
+    }
     await route.fulfill({
       body: JSON.stringify(
         envelope({
@@ -1825,18 +1844,16 @@ test("logs paginate only from the log section scroll boundary", async ({ page })
   );
   expect(requestedCursors).toEqual([null]);
 
-  const secondPage = page.waitForRequest(
-    (request) => new URL(request.url()).searchParams.get("cursor") === "80",
-  );
   await list.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
     for (let index = 0; index < 5; index += 1) {
       element.dispatchEvent(new Event("scroll", { bubbles: true }));
     }
   });
-  await secondPage;
-  await expect(list.locator(".event-row")).toHaveCount(40);
+  await secondPageStarted;
   expect(requestedCursors).toEqual([null, "80"]);
+  releaseSecondPage();
+  await expect(list.locator(".event-row")).toHaveCount(40);
 
   const thirdPage = page.waitForRequest(
     (request) => new URL(request.url()).searchParams.get("cursor") === "60",

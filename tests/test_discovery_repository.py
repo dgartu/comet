@@ -125,33 +125,6 @@ class ReleaseDiscoveryRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     replace(candidate, **{field: value})
 
-    def manual_candidate(
-        self,
-        *,
-        artifact_sha256: str,
-    ) -> ReleaseCandidate:
-        candidate_id = f"manual:{uuid.uuid4()}"
-        return ReleaseCandidate(
-            candidate_id=candidate_id,
-            media_id=candidate_id,
-            scope=ReleaseScope.MOVIE,
-            transport=TransportKind.USENET,
-            title="Imported NZB",
-            locators=(
-                NzbArtifactRef(
-                    locator_id=f"manual-nzb:{artifact_sha256}",
-                    kind=LocatorKind.NZB_ARTIFACT,
-                    policy=LocatorPolicy(
-                        frozenset({"stremio_nntp"}),
-                        owner_configuration_partition=self.owner_partition,
-                    ),
-                    artifact_sha256=artifact_sha256,
-                    manifest_identity="nm1:" + "d" * 64,
-                ),
-            ),
-            source="Manual import",
-        )
-
     async def persist(
         self,
         query: MediaQuery,
@@ -252,6 +225,7 @@ class ReleaseDiscoveryRepositoryTests(unittest.IsolatedAsyncioTestCase):
             "download_url": "https://cdn.example/release?token=opaque",
             "authorization_hint": "Bearer\nopaque",
             "": "empty keys are valid JSON",
+            "source_ids": list(range(256)),
         }
         candidate = replace(
             self.candidate(query.media_id),
@@ -608,73 +582,4 @@ class ReleaseDiscoveryRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 public_visibility=True,
                 next_refresh_at=2,
                 now=1,
-            )
-
-    async def test_manual_origins_are_durable_and_owner_authorized(self):
-        uploaded = self.manual_candidate(artifact_sha256="c" * 64)
-        imported = self.manual_candidate(artifact_sha256="e" * 64)
-
-        uploaded_ids = await self.repository.persist_manual(
-            uploaded,
-            origin_kind="manual_upload",
-            owner_configuration_partition=self.owner_partition,
-            now=1,
-        )
-        imported_ids = await self.repository.persist_manual(
-            imported,
-            origin_kind="manual_url",
-            owner_configuration_partition=self.owner_partition,
-            now=2,
-        )
-        repeated_ids = await self.repository.persist_manual(
-            uploaded,
-            origin_kind="manual_url",
-            owner_configuration_partition=self.owner_partition,
-            now=3,
-        )
-        rows = await self.database.fetch_all(
-            """
-            SELECT
-                candidate.release_key, locator.origin_kind,
-                locator.discovery_configuration_id
-            FROM release_candidates candidate
-            JOIN release_locators locator
-              ON locator.candidate_id = candidate.candidate_id
-            WHERE candidate.release_key IN (:uploaded, :imported)
-            ORDER BY candidate.release_key
-            """,
-            {
-                "uploaded": uploaded.candidate_id,
-                "imported": imported.candidate_id,
-            },
-            force_primary=True,
-        )
-
-        self.assertEqual(uuid.UUID(uploaded_ids.candidate_id).version, 7)
-        self.assertEqual(uuid.UUID(imported_ids.candidate_id).version, 7)
-        self.assertEqual(repeated_ids, uploaded_ids)
-        self.assertEqual(
-            {row["release_key"]: row["origin_kind"] for row in rows},
-            {
-                uploaded.candidate_id: "manual_upload",
-                imported.candidate_id: "manual_url",
-            },
-        )
-        self.assertTrue(all(row["discovery_configuration_id"] is None for row in rows))
-        self.assertEqual(
-            await self.repository.manual_artifact_origin(
-                uploaded.candidate_id,
-                "c" * 64,
-                owner_configuration_partition=self.owner_partition,
-            ),
-            "manual_upload",
-        )
-        with self.assertRaisesRegex(
-            ValueError,
-            "manual artifact candidate is unavailable",
-        ):
-            await self.repository.manual_artifact_origin(
-                uploaded.candidate_id,
-                "c" * 64,
-                owner_configuration_partition=b"z" * 32,
             )

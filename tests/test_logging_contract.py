@@ -26,7 +26,6 @@ from comet.observability.logging import (
     configure_stdlib_bridge,
     ingest_native_event,
     log,
-    recent_logs,
 )
 
 
@@ -407,13 +406,6 @@ class LoggingContractTests(unittest.TestCase):
         self.assertNotIn("outcome=", rendered)
         self.assertNotIn("succeeded=", rendered)
         self.assertNotIn("[search.completed]", rendered)
-        dashboard_record = recent_logs()["logs"][-1]
-        self.assertEqual(
-            dashboard_record["details"],
-            "candidates=0 duration=12.2ms",
-        )
-        self.assertNotIn("candidate_count", dashboard_record)
-        self.assertNotIn("event", dashboard_record)
 
     def test_validation_rejects_dynamic_shapes_controls_and_non_finite_values(self):
         self.configure("debug")

@@ -36,8 +36,8 @@ async def validate_message_security(
     Returns True if valid.
     """
     # 1. Verify sender_id matches the authenticated connection.
-    if type(sender_id) is not str or not sender_id or message.sender_id != sender_id:
-        if reputation and sender_id:
+    if message.sender_id != sender_id:
+        if reputation:
             reputation.get_or_create(sender_id).add_invalid_contribution()
         return False
 

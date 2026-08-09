@@ -29,7 +29,7 @@ def _metadata_result(metadata: dict) -> MetadataFetchResult:
 
 
 class UsenetOnlyMediaSearchTests(unittest.IsolatedAsyncioTestCase):
-    def test_discovery_aliases_trust_normalized_metadata_with_one_resource_cap(self):
+    def test_discovery_aliases_use_normalized_metadata_without_revalidation(self):
         long_title = "A" * 300
         aliases = {"lang:fr": [long_title, *(str(index) for index in range(70))]}
 
@@ -459,7 +459,6 @@ class UsenetOnlyMediaSearchTests(unittest.IsolatedAsyncioTestCase):
                 CacheState.EMPTY,
                 ScrapeDecision.SCRAPE_FOREGROUND,
                 False,
-                None,
             )
         )
         with (

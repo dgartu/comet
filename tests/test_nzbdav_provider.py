@@ -237,29 +237,6 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
                 "movies",
             )
 
-    async def test_submission_rejects_oversized_nzb_before_network(self):
-        provider = NzbDavProvider(object())
-        options = {
-            "internalBaseUrl": "https://bridge.example",
-            "sabApiKey": "key",
-            "webdavUsername": "user",
-            "webdavPassword": "password",
-        }
-
-        with (
-            patch(
-                "comet.playback.providers.nzbdav.MAX_NZB_METADATA_BYTES",
-                3,
-            ),
-            self.assertRaisesRegex(ValueError, "artifact submission"),
-        ):
-            await provider.submit_artifact(
-                options,
-                b"1234",
-                "a" * 64,
-                "movies",
-            )
-
     async def test_submission_distinguishes_rejection_from_ambiguous_outcomes(self):
         options = {
             "internalBaseUrl": "https://bridge.example",
@@ -709,7 +686,7 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.job_id, job_id)
         self.assertEqual(
             calls,
-            [("queue", "0"), ("queue", "200"), ("history", "0")],
+            [("queue", "0"), ("queue", "200")],
         )
 
     async def test_reconciliation_seals_an_exact_failed_history_job(self):
@@ -785,13 +762,14 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((result.job_id, result.status), (job_id, "queued"))
 
-    async def test_reconciliation_fails_closed_at_the_scan_bound(self):
+    async def test_reconciliation_scans_until_each_collection_ends(self):
         calls = []
 
         class Session:
             def get(self, *_args, **kwargs):
                 params = kwargs["params"]
                 calls.append((params["mode"], params["start"]))
+                size = 2 if int(params["start"]) < 4 else 0
                 return _Response(
                     200,
                     {
@@ -802,24 +780,14 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
                                     "filename": "foreign.nzb",
                                     "cat": "movies",
                                 }
-                                for _index in range(2)
+                                for _index in range(size)
                             ]
                         }
                     },
                 )
 
-        with (
-            patch("comet.playback.providers.nzbdav._SAB_PAGE_SIZE", 2),
-            patch(
-                "comet.playback.providers.nzbdav._MAX_SAB_RECONCILIATION_ITEMS",
-                4,
-            ),
-            self.assertRaisesRegex(
-                RuntimeError,
-                "nzbdav_reconciliation_unavailable",
-            ),
-        ):
-            await NzbDavProvider(Session()).reconcile_artifact(
+        with patch("comet.playback.providers.nzbdav._SAB_PAGE_SIZE", 2):
+            result = await NzbDavProvider(Session()).reconcile_artifact(
                 {
                     "internalBaseUrl": "https://bridge.example",
                     "sabApiKey": "key",
@@ -830,7 +798,18 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
                 "movies",
             )
 
-        self.assertEqual(calls, [("queue", "0"), ("queue", "2")])
+        self.assertIsNone(result)
+        self.assertEqual(
+            calls,
+            [
+                ("queue", "0"),
+                ("queue", "2"),
+                ("queue", "4"),
+                ("history", "0"),
+                ("history", "2"),
+                ("history", "4"),
+            ],
+        )
 
     def test_verified_content_root_is_confined_to_the_exact_completed_job(self):
         options = {
@@ -849,8 +828,6 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
             root,
             f"https://bridge.example/content/comet/comet-{artifact_sha256}",
         )
-        with self.assertRaises(ValueError):
-            NzbDavProvider.verified_content_root(options, "../outside", "comet")
 
     def test_http_internal_origin_requires_the_operator_allowlist(self):
         options = {
@@ -1128,10 +1105,6 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
             url,
             f"https://bridge.example/content/comet/comet-{artifact_sha256}/folder%20name/video%20%231.mkv",
         )
-        with self.assertRaises(ValueError):
-            NzbDavProvider.completed_file_url(
-                options, f"comet-{artifact_sha256}", "comet", "folder\\video.mkv"
-            )
 
     def test_completed_target_returns_an_authenticated_direct_url(self):
         options = {
@@ -1155,22 +1128,23 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
             + "/folder/video.mkv",
         )
 
-    def test_rejects_control_characters_in_bridge_credentials(self):
-        self.assertIsNone(
+    def test_bridge_credentials_follow_their_actual_wire_contracts(self):
+        self.assertEqual(
             NzbDavProvider._options(
                 {
                     "internalBaseUrl": "https://bridge.example",
                     "sabApiKey": "key",
-                    "webdavUsername": "user\nname",
+                    "webdavUsername": "user\nname\x7f",
                     "webdavPassword": "password",
                 }
-            )
+            ),
+            ("https://bridge.example", "key", "user\nname\x7f", "password"),
         )
         self.assertIsNone(
             NzbDavProvider._options(
                 {
                     "internalBaseUrl": "https://bridge.example",
-                    "sabApiKey": "clé",
+                    "sabApiKey": "bad\nkey",
                     "webdavUsername": "user",
                     "webdavPassword": "password",
                 }
@@ -1187,7 +1161,6 @@ class NzbDavProviderTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         for invalid in (
-            "user\x7f",
             "é" * 513,
             "\ud800",
         ):

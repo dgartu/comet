@@ -43,8 +43,8 @@ def _debridio_config() -> str:
 class DebridioScraper(TorrentDiscoveryAdapter):
     impersonate = "chrome"
 
-    def __init__(self, manager, session):
-        super().__init__(manager, session)
+    def __init__(self, session):
+        super().__init__(session)
 
     @staticmethod
     def _parse_stream(torrent):

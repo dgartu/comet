@@ -21,7 +21,7 @@ async def cometnet_websocket(websocket: WebSocket):
     """
     service = get_cometnet_service()
 
-    if not service or not service._running:
+    if not service or not service.running:
         await websocket.close(code=1013, reason="CometNet not enabled")
         return
 
@@ -30,8 +30,6 @@ async def cometnet_websocket(websocket: WebSocket):
     try:
         await service.handle_websocket_connection(websocket)
     except WebSocketDisconnect:
-        pass
-    except Exception:
         pass
 
 
@@ -51,7 +49,7 @@ async def cometnet_health():
             status_code=200,
         )
 
-    if not service._running:
+    if not service.running:
         return JSONResponse(
             content={"status": "stopped", "message": "CometNet not running"},
             status_code=503,

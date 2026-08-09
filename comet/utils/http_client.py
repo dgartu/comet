@@ -25,22 +25,33 @@ class HttpClientManager:
         self._user_session: aiohttp.ClientSession | None = None
         self._lock = asyncio.Lock()
         self._bound = contextvars.ContextVar("comet_http_session", default=None)
+        self._bound_user = contextvars.ContextVar(
+            "comet_user_http_session", default=None
+        )
         self._leases: dict[aiohttp.ClientSession, int] = {}
         self._retired: set[aiohttp.ClientSession] = set()
 
     async def init(self) -> aiohttp.ClientSession:
         from comet.core.models import settings
 
-        if self._session and not self._session.closed:
+        if self._usable(self._session):
             return self._session
 
+        stale = None
         async with self._lock:
-            return self._ensure_session(settings)
+            if self._usable(self._session):
+                return self._session
+            stale, self._session = self._session, self.build(settings)
+            session = self._session
+        if stale is not None and not stale.closed:
+            await stale.close()
+        return session
 
-    def _ensure_session(self, config) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = self.build(config)
-        return self._session
+    @staticmethod
+    def _usable(session: aiohttp.ClientSession | None) -> bool:
+        return (
+            session is not None and not session.closed and not session._loop.is_closed()
+        )
 
     @staticmethod
     def build(config) -> aiohttp.ClientSession:
@@ -80,56 +91,100 @@ class HttpClientManager:
     async def replace(self, session: aiohttp.ClientSession) -> None:
         async with self._lock:
             previous, self._session = self._session, session
-            if previous is not None and self._leases.get(previous, 0) > 0:
-                self._retired.add(previous)
-                previous = None
+            previous = self._retire_leased(previous, session)
         if previous is not None and not previous.closed:
             await previous.close()
 
     async def replace_user(self, session: aiohttp.ClientSession | None) -> None:
         async with self._lock:
             previous, self._user_session = self._user_session, session
+            previous = self._retire_leased(previous, session)
         if previous is not None and not previous.closed:
             await previous.close()
 
+    def _retire_leased(self, previous, replacement):
+        if previous is None or previous is replacement:
+            return None
+        if self._leases.get(previous, 0) > 0:
+            self._retired.add(previous)
+            return None
+        return previous
+
     async def get_session(self) -> aiohttp.ClientSession:
-        return self._bound.get() or await self.init()
+        bound = self._bound.get()
+        return bound if self._usable(bound) else await self.init()
 
     async def get_user_session(self) -> aiohttp.ClientSession:
         from comet.core.models import settings
 
+        bound = self._bound_user.get()
+        if self._usable(bound):
+            return bound
         if settings.USER_PROVIDED_PROXY_URL is None:
             return await self.get_session()
-        if self._user_session is not None and not self._user_session.closed:
-            return self._user_session
+        stale = None
         async with self._lock:
-            if self._user_session is None or self._user_session.closed:
-                self._user_session = self.build_user(settings)
-            return self._user_session
+            if self._usable(self._user_session):
+                return self._user_session
+            stale, self._user_session = (
+                self._user_session,
+                self.build_user(settings),
+            )
+            session = self._user_session
+        if stale is not None and not stale.closed:
+            await stale.close()
+        return session
 
     @asynccontextmanager
     async def bind(self):
         from comet.core.models import settings
 
+        stale = set()
         async with self._lock:
-            session = self._ensure_session(settings)
-            self._leases[session] = self._leases.get(session, 0) + 1
+            if not self._usable(self._session):
+                if self._session is not None:
+                    stale.add(self._session)
+                self._session = self.build(settings)
+            session = self._session
+            if settings.USER_PROVIDED_PROXY_URL is None:
+                user_session = session
+            else:
+                if not self._usable(self._user_session):
+                    if self._user_session is not None:
+                        stale.add(self._user_session)
+                    self._user_session = self.build_user(settings)
+                user_session = self._user_session
+            sessions = {session, user_session}
+            for leased in sessions:
+                self._leases[leased] = self._leases.get(leased, 0) + 1
+        await asyncio.gather(
+            *(previous.close() for previous in stale if not previous.closed),
+            return_exceptions=True,
+        )
         token = self._bound.set(session)
+        user_token = self._bound_user.set(
+            None if user_session is session else user_session
+        )
         try:
             yield session
         finally:
+            self._bound_user.reset(user_token)
             self._bound.reset(token)
-            close = False
+            to_close = []
             async with self._lock:
-                leases = self._leases[session] - 1
-                if leases:
-                    self._leases[session] = leases
-                else:
-                    self._leases.pop(session)
-                    close = session in self._retired
-                    self._retired.discard(session)
-            if close and not session.closed:
-                await session.close()
+                for leased in sessions:
+                    leases = self._leases[leased] - 1
+                    if leases:
+                        self._leases[leased] = leases
+                    else:
+                        self._leases.pop(leased)
+                        if leased in self._retired:
+                            self._retired.remove(leased)
+                            to_close.append(leased)
+            await asyncio.gather(
+                *(leased.close() for leased in to_close if not leased.closed),
+                return_exceptions=True,
+            )
 
     async def close(self) -> None:
         async with self._lock:

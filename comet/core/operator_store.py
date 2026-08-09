@@ -27,7 +27,7 @@ class SettingsMutationResult:
 def _json_value(value: Any) -> str:
     try:
         return orjson.dumps(value).decode("utf-8")
-    except (TypeError, orjson.JSONEncodeError):
+    except TypeError:
         raise ValueError("operator setting value is not JSON serializable") from None
 
 
@@ -54,7 +54,7 @@ class OperatorSettingsStore:
         return overrides
 
     async def current_revision(self) -> int:
-        revision = await self._database.fetch_val(
+        return await self._database.fetch_val(
             """
             SELECT current_revision
             FROM operator_settings_state
@@ -62,11 +62,10 @@ class OperatorSettingsStore:
             """,
             force_primary=True,
         )
-        return revision
 
     async def _locked_revision(self) -> int:
         suffix = " FOR UPDATE" if self._is_postgres else ""
-        revision = await self._database.fetch_val(
+        return await self._database.fetch_val(
             f"""
             SELECT current_revision
             FROM operator_settings_state
@@ -74,7 +73,6 @@ class OperatorSettingsStore:
             """,
             force_primary=True,
         )
-        return revision
 
     async def record_access(
         self,
@@ -112,7 +110,7 @@ class OperatorSettingsStore:
         from comet.core.models import AppSettings
         from comet.observability.logging import LoggingSettings
 
-        reset = set(reset_keys)
+        reset = reset_keys
         overlap = set(updates).intersection(reset)
         if overlap:
             raise ValueError(f"setting cannot be updated and reset: {min(overlap)}")
@@ -158,7 +156,10 @@ class OperatorSettingsStore:
                     (key in reset and key in current)
                     or (
                         key in normalized_updates
-                        and current.get(key, object()) != normalized_updates[key]
+                        and (
+                            key not in current
+                            or current[key] != normalized_updates[key]
+                        )
                     )
                 )
             )

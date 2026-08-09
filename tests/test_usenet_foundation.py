@@ -197,9 +197,8 @@ def test_legacy_config_keeps_ignoring_unknown_fields_for_compatibility():
     [
         (("discoverySources", 0, "displayName"), "   "),
         (("discoverySources", 0, "kind"), "generic_nzb_bridge"),
-        (("playbackProviders", 0, "configurationId"), "native"),
     ],
-    ids=("empty-display-name", "unknown-source-kind", "non-uuid-provider-id"),
+    ids=("empty-display-name", "unknown-source-kind"),
 )
 def test_v2_config_rejects_noncanonical_fields(path, value):
     config = _v2_config()
@@ -209,6 +208,18 @@ def test_v2_config_rejects_noncanonical_fields(path, value):
     target[path[-1]] = value
 
     assert _parse_and_validate_config(_encoded(config)) is None
+
+
+def test_v2_configuration_ids_are_opaque():
+    config = _v2_config()
+    config["playbackProviders"][0]["configurationId"] = "native"
+    config["discoverySources"][0]["configurationId"] = "search"
+
+    parsed = _parse_and_validate_config(_encoded(config))
+
+    assert parsed is not None
+    assert parsed["playbackProviders"][0]["configurationId"] == "native"
+    assert parsed["discoverySources"][0]["configurationId"] == "search"
 
 
 def test_native_gate_compares_non_ascii_tokens():
@@ -500,8 +511,8 @@ def test_usenet_private_origins_use_canonical_effective_ports():
         ("USENET_SPOOL_MAX_BYTES", 1024),
         ("USENET_ARCHIVE_JOBS", 0),
         ("USENET_REPAIR_JOBS", 0),
-        ("USENET_START_TIMEOUT_SECONDS", 4),
-        ("USENET_DRAIN_TIMEOUT_SECONDS", 301),
+        ("USENET_START_TIMEOUT_SECONDS", 0),
+        ("USENET_DRAIN_TIMEOUT_SECONDS", 0),
     ],
 )
 def test_usenet_resource_settings_reject_unsafe_bounds(field, value):
@@ -509,11 +520,25 @@ def test_usenet_resource_settings_reject_unsafe_bounds(field, value):
         AppSettings(**{field: value})
 
 
-def test_usenet_worker_concurrency_has_no_arbitrary_upper_cap():
-    settings = AppSettings(USENET_ARCHIVE_JOBS=65, USENET_REPAIR_JOBS=65)
+def test_usenet_resource_settings_have_no_arbitrary_upper_caps():
+    settings = AppSettings(
+        USENET_REPLICA_COUNT=65,
+        USENET_NATIVE_MAX_STREAMS=65,
+        USENET_DISK_CACHE_BYTES=2 * 1024**4,
+        USENET_ARCHIVE_JOBS=65,
+        USENET_REPAIR_JOBS=65,
+        USENET_START_TIMEOUT_SECONDS=121,
+        USENET_DRAIN_TIMEOUT_SECONDS=301,
+        DATABASE_TYPE="postgresql",
+    )
 
+    assert settings.USENET_REPLICA_COUNT == 65
+    assert settings.USENET_NATIVE_MAX_STREAMS == 65
+    assert settings.USENET_DISK_CACHE_BYTES == 2 * 1024**4
     assert settings.USENET_ARCHIVE_JOBS == 65
     assert settings.USENET_REPAIR_JOBS == 65
+    assert settings.USENET_START_TIMEOUT_SECONDS == 121
+    assert settings.USENET_DRAIN_TIMEOUT_SECONDS == 301
 
 
 def test_native_provider_requires_an_offered_engine_and_source():

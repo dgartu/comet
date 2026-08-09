@@ -89,6 +89,46 @@ class OperatorCommandTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_acknowledged_command_expiration_is_not_overwritten_late(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_start():
+            started.set()
+            await release.wait()
+            return True
+
+        with (
+            patch.dict(commands._HANDLERS, {"scraper.start": slow_start}),
+            patch.object(commands, "_COMMAND_TIMEOUT_SECONDS", 0.05),
+            patch.object(commands, "_POLL_INTERVAL_SECONDS", 0.005),
+        ):
+            dispatcher = asyncio.create_task(commands.run_command_dispatcher())
+            try:
+                dispatched = asyncio.create_task(
+                    commands.dispatch_scraper_command("scraper.start")
+                )
+                await started.wait()
+                self.assertEqual(await dispatched, [])
+                release.set()
+                await asyncio.sleep(0.15)
+            finally:
+                release.set()
+                dispatcher.cancel()
+                await asyncio.gather(dispatcher, return_exceptions=True)
+
+        row = await self.database.fetch_one(
+            "SELECT status, outcome, error_code FROM operator_commands"
+        )
+        self.assertEqual(
+            dict(row),
+            {
+                "status": "finished",
+                "outcome": "expired",
+                "error_code": "command_timeout",
+            },
+        )
+
     async def test_usenet_command_targets_one_live_owner(self):
         identity = commands.RuntimeIdentity.current()
         called = asyncio.Event()

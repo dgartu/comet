@@ -121,6 +121,27 @@ class StreamingLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         execute.assert_awaited_once()
 
+    async def test_database_cleanup_cancellation_retries_delete_then_propagates(self):
+        execute = AsyncMock(side_effect=[asyncio.CancelledError, None])
+        with (
+            patch(
+                "comet.services.streaming.manager.bandwidth_monitor.end_connection",
+                new=AsyncMock(),
+            ),
+            patch(
+                "comet.services.streaming.manager.database.execute",
+                new=execute,
+            ),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await on_stream_end(
+                "connection",
+                "127.0.0.1",
+                outcome="completed",
+            )
+
+        self.assertEqual(execute.await_count, 2)
+
     async def test_connection_limit_database_failure_is_not_a_false_quota_hit(self):
         with (
             patch(

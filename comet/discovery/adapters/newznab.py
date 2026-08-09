@@ -12,9 +12,10 @@ from xml.etree import ElementTree
 import aiohttp
 from curl_cffi.requests import RequestsError
 
-from comet.core.provider_json import is_success_status
+from comet.core.provider_json import MAX_PROVIDER_JSON_BYTES, is_success_status
 from comet.core.sources import (
     MAX_REMOTE_GUID_LENGTH,
+    MAX_SIGNED_BIGINT,
     REAL_NZB_PROVIDER_KINDS,
     LocatorKind,
     LocatorPolicy,
@@ -25,8 +26,8 @@ from comet.core.sources import (
 from comet.discovery.models import DiscoveryBatch, DiscoveryContext, MediaQuery
 from comet.playback.base import Actionability, ProviderStatus, Readiness
 from comet.usenet.easynews import bounded_retry_after
+from comet.usenet.limits import MAX_NZB_DOCUMENT_BYTES
 from comet.usenet.outbound import (
-    OutboundUrlError,
     configured_http_origin,
     validate_http_url,
 )
@@ -34,8 +35,8 @@ from comet.utils.network_manager import (
     DiscoveryResponseTooLarge,
     network_manager,
 )
+from comet.utils.text import has_ascii_control
 
-_MAX_SIGNED_64 = (1 << 63) - 1
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _USER_AGENT_MODES = frozenset({"stealth", "browser", "custom"})
 
@@ -73,14 +74,12 @@ class NewznabAccount:
 
     def __post_init__(self):
         _endpoint(self.endpoint)
-        _text(self.api_key, "Newznab API key", 1_024)
-        _text(self.configuration_id, "Newznab configuration ID", 64)
-        _text(self.label, "Newznab label", 64)
+        _text(self.api_key, "Newznab API key")
         if self.user_agent_mode not in _USER_AGENT_MODES:
             raise ValueError("Newznab User-Agent mode is invalid")
         if self.user_agent_mode != "stealth":
-            _text(self.query_user_agent, "Newznab query user agent", 512)
-            _text(self.grab_user_agent, "Newznab grab user agent", 512)
+            _text(self.query_user_agent, "Newznab query user agent")
+            _text(self.grab_user_agent, "Newznab grab user agent")
         _integer(self.max_results, "Newznab result limit", 1, 1_000)
         _integer(self.page_size, "Newznab page size", 1, 100)
         _integer(self.requests_per_second, "Newznab RPS", 1, 100)
@@ -164,24 +163,12 @@ class NewznabAdapter:
     ) -> DiscoveryBatch:
         if "usenet" not in context.branches:
             return DiscoveryBatch()
-        loop = asyncio.get_running_loop()
-        if context.cancelled() or (
-            context.hard_deadline is not None and loop.time() >= context.hard_deadline
-        ):
-            return DiscoveryBatch()
         caps = await self._caps_for_search()
         base_params = _query_params(query, caps)
         candidates = []
         offset = 0
         total = None
-        complete = True
         while offset < self._account.max_results:
-            if context.cancelled() or (
-                context.hard_deadline is not None
-                and loop.time() >= context.hard_deadline
-            ):
-                complete = False
-                break
             limit = min(
                 self._account.page_size,
                 self._account.max_results - offset,
@@ -192,7 +179,7 @@ class NewznabAdapter:
                     "offset": str(offset),
                     "limit": str(limit),
                 },
-                maximum=2 * 1024 * 1024,
+                maximum=MAX_PROVIDER_JSON_BYTES,
             )
             page, page_total, consumed = _parse_results(
                 payload,
@@ -201,7 +188,7 @@ class NewznabAdapter:
                 context,
                 maximum_items=limit,
             )
-            candidates.extend(page[: self._account.max_results - len(candidates)])
+            candidates.extend(page)
             total = page_total if page_total is not None else total
             if consumed == 0:
                 break
@@ -210,17 +197,12 @@ class NewznabAdapter:
                 break
             if total is None and consumed < limit:
                 break
-        return DiscoveryBatch(
-            tuple(candidates),
-            coverage=frozenset({"usenet"}) if complete else frozenset(),
-        )
+        return DiscoveryBatch(tuple(candidates), coverage=frozenset({"usenet"}))
 
     async def grab(self, remote_guid: str) -> bytes:
-        if not _opaque_identifier(remote_guid):
-            raise ValueError("Newznab replay identifier is invalid")
         payload = await self._request(
             {"t": "get", "id": remote_guid},
-            maximum=150 * 1024 * 1024,
+            maximum=MAX_NZB_DOCUMENT_BYTES,
             operation="grab",
             user_agent=self._account.grab_user_agent,
         )
@@ -311,7 +293,7 @@ class NewznabAdapter:
                                 urljoin(url, location),
                                 allowed_private_origins=allowed_private_origins,
                             )
-                        except (OutboundUrlError, TypeError, ValueError) as exc:
+                        except (TypeError, ValueError) as exc:
                             raise NewznabError("provider_redirect_invalid") from exc
                         url = target.url
                         request_params = None
@@ -337,13 +319,11 @@ class NewznabAdapter:
 
 
 def newznab_account_from_options(
-    options: object,
+    options: dict,
     configuration_id: str,
     *,
     label: str = "Newznab",
 ) -> NewznabAccount:
-    if not isinstance(options, dict):
-        raise ValueError("Newznab options must be an object")
     return NewznabAccount(
         endpoint=options.get("endpoint"),
         api_key=options.get("apiKey"),
@@ -448,7 +428,7 @@ def _parse_caps(payload: bytes) -> NewznabCaps:
         and (
             identifier := _bounded_decimal(
                 element.attrib.get("id"),
-                maximum=_MAX_SIGNED_64,
+                maximum=MAX_SIGNED_BIGINT,
             )
         )
         is not None
@@ -556,7 +536,7 @@ def parse_newznab_feed(
             and (
                 parsed_total := _bounded_decimal(
                     element.attrib.get("total"),
-                    maximum=_MAX_SIGNED_64,
+                    maximum=MAX_SIGNED_BIGINT,
                 )
             )
             is not None
@@ -611,8 +591,6 @@ def map_newznab_nzb_item(
             fields.get("link"),
             permalink=fields.get("guid"),
         )
-    elif not _opaque_identifier(remote_id):
-        raise ValueError("Newznab replay identifier is invalid")
     title = fields.get("title")
     if remote_id is None or not title or len(title) > 1_024:
         return None
@@ -647,12 +625,12 @@ def map_newznab_nzb_item(
 def newznab_item_size(item: NewznabFeedItem) -> int | None:
     size = _bounded_decimal(
         item.attributes.get("size"),
-        maximum=_MAX_SIGNED_64,
+        maximum=MAX_SIGNED_BIGINT,
     )
     if size is not None and size > 0:
         return size
     for value in item.enclosures:
-        size = _bounded_decimal(value.length, maximum=_MAX_SIGNED_64)
+        size = _bounded_decimal(value.length, maximum=MAX_SIGNED_BIGINT)
         if size is not None and size > 0:
             return size
     return None
@@ -703,7 +681,7 @@ def _remote_identifier(
 
 
 def _http_url(value: object):
-    if not isinstance(value, str) or len(value) > MAX_REMOTE_GUID_LENGTH:
+    if not isinstance(value, str):
         return None
     try:
         parsed = urlsplit(value)
@@ -717,7 +695,7 @@ def _opaque_identifier(value: object) -> bool:
         isinstance(value, str)
         and 1 <= len(value) <= MAX_REMOTE_GUID_LENGTH
         and not value.lstrip().lower().startswith(("http://", "https://"))
-        and not any(ord(character) < 32 for character in value)
+        and not has_ascii_control(value)
     )
 
 
@@ -748,7 +726,7 @@ def _published_at_ms(value: str | None) -> int | None:
 
 
 def _endpoint(value: object) -> str:
-    if not isinstance(value, str) or not 1 <= len(value) <= 2_048:
+    if not isinstance(value, str) or not value:
         raise ValueError("Newznab endpoint is invalid")
     try:
         parsed = urlsplit(value)
@@ -774,12 +752,8 @@ def _origin_headers(endpoint: str) -> dict[str, str]:
     return {"Origin": origin, "Referer": f"{origin}/"}
 
 
-def _text(value: object, field: str, maximum: int) -> str:
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= maximum
-        or any(ord(character) < 32 for character in value)
-    ):
+def _text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value or has_ascii_control(value):
         raise ValueError(f"{field} is invalid")
     return value
 

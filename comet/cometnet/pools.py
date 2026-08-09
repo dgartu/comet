@@ -17,11 +17,11 @@ import math
 import secrets
 import shutil
 import time
-import urllib.parse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from enum import Enum
 from pathlib import Path
+from urllib.parse import urlencode
 
 import aiofiles
 import msgpack
@@ -29,37 +29,25 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    computed_field,
     field_validator,
     model_validator,
 )
 
 from comet.cometnet.crypto import NodeIdentity
+from comet.cometnet.identifiers import canonical_pool_id
 from comet.cometnet.utils import canonicalize_data, run_in_executor
 from comet.core.models import settings
 from comet.utils.atomic_file import write_text_atomic
 
 
-def _validate_pool_id(value: object) -> str:
-    if type(value) is not str or value != value.strip().lower():
-        raise ValueError("pool_id must use its canonical lowercase form")
-    if len(value) < 2 or len(value) > 64:
-        raise ValueError("pool_id must be 2-64 characters")
-    if not value.replace("-", "").replace("_", "").isalnum():
-        raise ValueError("pool_id must be alphanumeric with - or _")
-    return value
-
-
 def _decode_pool_id_list(data: object, label: str) -> set[str]:
     if type(data) is not list:
         raise ValueError(f"{label} root must be a list")
-    return {_validate_pool_id(value) for value in data}
+    return {canonical_pool_id(value) for value in data}
 
 
-def _encode_pool_id_set(values: object, label: str) -> list[str]:
-    if type(values) is not set:
-        raise ValueError(f"{label} must be a set")
-    return sorted(_validate_pool_id(value) for value in values)
+def _encode_pool_id_set(values: set[str]) -> list[str]:
+    return sorted(values)
 
 
 def _decode_pool_peers(data: object) -> dict[str, set[str]]:
@@ -68,7 +56,7 @@ def _decode_pool_peers(data: object) -> dict[str, set[str]]:
 
     result: dict[str, set[str]] = {}
     for raw_pool_id, raw_peers in data.items():
-        pool_id = _validate_pool_id(raw_pool_id)
+        pool_id = canonical_pool_id(raw_pool_id)
         if type(raw_peers) is not list or any(
             type(peer) is not str or not peer for peer in raw_peers
         ):
@@ -77,19 +65,8 @@ def _decode_pool_peers(data: object) -> dict[str, set[str]]:
     return result
 
 
-def _encode_pool_peers(data: object) -> dict[str, list[str]]:
-    if type(data) is not dict:
-        raise ValueError("pool peers must be an object")
-
-    result: dict[str, list[str]] = {}
-    for raw_pool_id, raw_peers in sorted(data.items()):
-        pool_id = _validate_pool_id(raw_pool_id)
-        if type(raw_peers) is not set or any(
-            type(peer) is not str or not peer for peer in raw_peers
-        ):
-            raise ValueError("pool peer values must be sets of non-empty strings")
-        result[pool_id] = sorted(raw_peers)
-    return result
+def _encode_pool_peers(data: dict[str, set[str]]) -> dict[str, list[str]]:
+    return {pool_id: sorted(peers) for pool_id, peers in sorted(data.items())}
 
 
 class MemberRole(str, Enum):
@@ -128,13 +105,6 @@ class PoolMember(BaseModel):
             raise ValueError("member public keys must be non-empty strings")
         return value
 
-    @field_validator("alias", mode="before")
-    @classmethod
-    def validate_alias(cls, value):
-        if value is not None and type(value) is not str:
-            raise ValueError("member alias must be a string or null")
-        return value
-
     @field_validator("added_at", "last_seen", mode="before")
     @classmethod
     def validate_timestamps(cls, value):
@@ -148,12 +118,6 @@ class PoolMember(BaseModel):
         if type(value) is not int or value < 0:
             raise ValueError("contribution_count must be a non-negative integer")
         return value
-
-    @computed_field
-    @property
-    def node_id(self) -> str:
-        """Derive node_id from public_key (SHA256 hash). Matches peer IDs in transport."""
-        return NodeIdentity.node_id_from_public_key(self.public_key)
 
 
 class PoolManifest(BaseModel):
@@ -193,20 +157,13 @@ class PoolManifest(BaseModel):
     @classmethod
     def validate_pool_id(cls, value):
         """Validate pool ID format."""
-        return _validate_pool_id(value)
+        return canonical_pool_id(value)
 
     @field_validator("creator_key", "display_name", mode="before")
     @classmethod
     def validate_required_strings(cls, value):
         if type(value) is not str or not value:
             raise ValueError("manifest identity fields must be non-empty strings")
-        return value
-
-    @field_validator("description", mode="before")
-    @classmethod
-    def validate_description(cls, value):
-        if type(value) is not str:
-            raise ValueError("manifest description must be a string")
         return value
 
     @field_validator("created_at", "updated_at", mode="before")
@@ -221,26 +178,6 @@ class PoolManifest(BaseModel):
     def validate_version(cls, value):
         if type(value) is not int or value < 1:
             raise ValueError("manifest version must be a positive integer")
-        return value
-
-    @field_validator("members", mode="before")
-    @classmethod
-    def validate_members_container(cls, value):
-        if type(value) is not list:
-            raise ValueError("manifest members must be a list")
-        return value
-
-    @field_validator("signatures", mode="before")
-    @classmethod
-    def validate_signatures(cls, value):
-        if type(value) is not dict or any(
-            type(key) is not str
-            or not key
-            or type(signature) is not str
-            or not signature
-            for key, signature in value.items()
-        ):
-            raise ValueError("manifest signatures must map non-empty strings")
         return value
 
     @model_validator(mode="after")
@@ -258,12 +195,6 @@ class PoolManifest(BaseModel):
         if self.updated_at < self.created_at:
             raise ValueError("updated_at cannot precede created_at")
         return self
-
-    def get_admins(self) -> list[PoolMember]:
-        """Get all admin members (including creator)."""
-        return [
-            m for m in self.members if m.role in (MemberRole.ADMIN, MemberRole.CREATOR)
-        ]
 
     def get_member(self, public_key: str) -> PoolMember | None:
         """Get a member by public key."""
@@ -287,87 +218,29 @@ class PoolManifest(BaseModel):
 
         Standardization Rules:
         - Timestamps: Converted to integers (floor) to prevent float precision drift.
-        - Computed Fields: 'node_id' is EXCLUDED (must be re-computed by receiver).
         - Local Stats: 'contribution_count' and 'last_seen' are EXCLUDED (not part of consensus).
         - Metadata: 'alias' is EXCLUDED (not part of consensus).
         """
-        data = self.model_dump(exclude={"signatures"})
-
-        if "members" in data and isinstance(data["members"], list):
-            for m in data["members"]:
-                if "node_id" in m:
-                    del m["node_id"]
-
-                if "contribution_count" in m:
-                    del m["contribution_count"]
-                if "last_seen" in m:
-                    del m["last_seen"]
-
-                if "alias" in m:
-                    del m["alias"]
-
-                if "added_at" in m:
-                    m["added_at"] = int(m["added_at"])
-
-        if "created_at" in data:
-            data["created_at"] = int(data["created_at"])
-        if "updated_at" in data:
-            data["updated_at"] = int(data["updated_at"])
+        data = self.model_dump(
+            exclude={
+                "signatures": True,
+                "members": {"__all__": {"alias", "contribution_count", "last_seen"}},
+            }
+        )
+        for member in data["members"]:
+            member["added_at"] = int(member["added_at"])
+        data["created_at"] = int(data["created_at"])
+        data["updated_at"] = int(data["updated_at"])
 
         # Sort members by public key for deterministic ordering
-        if "members" in data and isinstance(data["members"], list):
-            data["members"] = sorted(
-                data["members"], key=lambda m: m.get("public_key", "")
-            )
+        data["members"].sort(key=lambda member: member["public_key"])
 
         # Ensure consistent ordering for deterministic serialization
         return msgpack.packb(canonicalize_data(data))
 
-    def to_bytes(self) -> bytes:
-        """Serialize the manifest to MsgPack bytes."""
-        return msgpack.packb(self.to_persisted_dict())
-
     def to_persisted_dict(self) -> dict:
-        """Serialize consensus and local fields without derived node IDs."""
-        return self.model_dump(exclude={"members": {"__all__": {"node_id"}}})
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "PoolManifest":
-        """Deserialize from MsgPack bytes."""
-        return cls.model_validate(msgpack.unpackb(data, raw=False))
-
-
-def _decode_persisted_manifest(data: object) -> tuple[PoolManifest, bool]:
-    """Validate a manifest, removing only verified legacy derived node IDs."""
-    migrated = False
-    normalized = data
-
-    if type(data) is dict and type(data.get("members")) is list:
-        members = []
-        for member in data["members"]:
-            if type(member) is not dict or "node_id" not in member:
-                members.append(member)
-                continue
-
-            public_key = member.get("public_key")
-            node_id = member["node_id"]
-            if (
-                type(public_key) is not str
-                or type(node_id) is not str
-                or node_id != NodeIdentity.node_id_from_public_key(public_key)
-            ):
-                raise ValueError("persisted member node_id does not match public_key")
-
-            normalized_member = dict(member)
-            del normalized_member["node_id"]
-            members.append(normalized_member)
-            migrated = True
-
-        if migrated:
-            normalized = dict(data)
-            normalized["members"] = members
-
-    return PoolManifest.model_validate(normalized), migrated
+        """Serialize consensus and local fields."""
+        return self.model_dump()
 
 
 class PoolInvite(BaseModel):
@@ -388,7 +261,7 @@ class PoolInvite(BaseModel):
     @field_validator("pool_id")
     @classmethod
     def validate_pool_id(cls, value: str) -> str:
-        return _validate_pool_id(value)
+        return canonical_pool_id(value)
 
     @field_validator("invite_code", "created_by")
     @classmethod
@@ -449,48 +322,7 @@ class PoolInvite(BaseModel):
         }
         if self.node_url:
             params["node"] = self.node_url
-        return f"cometnet://join?{urllib.parse.urlencode(params)}"
-
-    @classmethod
-    def parse_link(cls, link: str) -> dict[str, str] | None:
-        """
-        Parse an invite link into its components.
-
-        Returns dict with 'pool', 'code', and optionally 'node' keys.
-        """
-        if type(link) is not str:
-            return None
-        try:
-            parsed = urllib.parse.urlsplit(link)
-            params = urllib.parse.parse_qs(
-                parsed.query,
-                keep_blank_values=True,
-                strict_parsing=True,
-            )
-        except ValueError:
-            return None
-        if (
-            parsed.scheme != "cometnet"
-            or parsed.netloc != "join"
-            or parsed.path
-            or parsed.fragment
-            or set(params) not in ({"pool", "code"}, {"pool", "code", "node"})
-            or any(len(values) != 1 or not values[0] for values in params.values())
-        ):
-            return None
-
-        pool_id = params["pool"][0]
-        if (
-            pool_id != pool_id.strip().lower()
-            or not 2 <= len(pool_id) <= 64
-            or not pool_id.replace("-", "").replace("_", "").isalnum()
-        ):
-            return None
-
-        result = {"pool": pool_id, "code": params["code"][0]}
-        if "node" in params:
-            result["node"] = params["node"][0]
-        return result
+        return f"cometnet://join?{urlencode(params)}"
 
 
 class PoolStore:
@@ -547,11 +379,7 @@ class PoolStore:
         await self._load_pool_peers()
 
     async def save(self) -> None:
-        """Save all data to disk."""
-        async with self._auxiliary_lock:
-            await self._save_memberships()
-            await self._save_subscriptions()
-            await self._save_pool_peers()
+        """Flush contribution counters not persisted by their hot path."""
         await self.flush_dirty_manifests()
 
     # ==================== Manifest Operations ====================
@@ -572,16 +400,13 @@ class PoolStore:
         self,
         manifest: PoolManifest,
         identity=None,
-    ) -> bool:
+    ) -> None:
         """
         Store or update a pool manifest.
 
         Args:
             manifest: The pool manifest to store
             identity: Optional NodeIdentity for signing (if we're admin)
-
-        Returns:
-            True if stored successfully
         """
         # If we have an identity and we're an admin, sign the manifest
         if identity and manifest.is_admin(identity.public_key_hex):
@@ -600,7 +425,7 @@ class PoolStore:
         # Publish only a fully persisted snapshot. Keeping a detached copy also
         # prevents callers from mutating trusted state without another store.
         self._manifests[manifest.pool_id] = persisted_manifest
-        return True
+        self._dirty_manifests.discard(manifest.pool_id)
 
     async def accept_remote_manifest(
         self,
@@ -613,6 +438,19 @@ class PoolStore:
                 return False, current
             if not await self.validate_manifest(manifest, current):
                 return False, current
+
+            # Contribution counters are local observations, not consensus data.
+            for member in manifest.members:
+                local_member = (
+                    current.get_member(member.public_key) if current else None
+                )
+                if local_member:
+                    member.contribution_count = local_member.contribution_count
+                    member.last_seen = local_member.last_seen
+                else:
+                    member.contribution_count = 0
+                    member.last_seen = 0.0
+
             await self.store_manifest(manifest)
             return True, current
 
@@ -622,7 +460,6 @@ class PoolStore:
         display_name: str,
         identity,  # NodeIdentity
         description: str = "",
-        join_mode: JoinMode = JoinMode.INVITE,
     ) -> PoolManifest:
         """Serialize creation of a new local pool."""
         async with self._mutation_lock:
@@ -631,7 +468,6 @@ class PoolStore:
                 display_name,
                 identity,
                 description,
-                join_mode,
             )
 
     async def _create_pool(
@@ -640,7 +476,6 @@ class PoolStore:
         display_name: str,
         identity,
         description: str,
-        join_mode: JoinMode,
     ) -> PoolManifest:
         """
         Create a new pool with this node as the admin.
@@ -650,7 +485,6 @@ class PoolStore:
             display_name: Human-readable name
             identity: NodeIdentity of the creator
             description: Optional description
-            join_mode: How nodes can join
         Returns:
             The created PoolManifest
         """
@@ -831,12 +665,6 @@ class PoolStore:
         if member.role == MemberRole.CREATOR:
             raise ValueError("Cannot remove the pool creator")
 
-        # Don't allow removing the last admin
-        if member.role == MemberRole.ADMIN:
-            admin_count = len(manifest.get_admins())
-            if admin_count <= 1:
-                raise ValueError("Cannot remove the last admin")
-
         manifest.members = [m for m in manifest.members if m.public_key != member_key]
         manifest.version += 1
         manifest.updated_at = time.time()
@@ -852,9 +680,6 @@ class PoolStore:
         identity,
     ) -> bool:
         """Serialize an administrator role change."""
-        if role not in (MemberRole.ADMIN, MemberRole.MEMBER):
-            raise ValueError("Member role must be admin or member")
-
         async with self._mutation_lock:
             manifest = self.get_manifest(pool_id)
             if not manifest:
@@ -907,15 +732,6 @@ class PoolStore:
         if member.role == MemberRole.CREATOR:
             raise ValueError("Creator cannot leave the pool. Delete the pool instead.")
 
-        # If leaving admin is the last admin (besides creator), prevent it
-        if member.role == MemberRole.ADMIN:
-            admin_count = len(manifest.get_admins())
-            # get_admins includes creator, so we check if there are other admins
-            if admin_count <= 1:
-                raise ValueError(
-                    "Cannot leave as the last admin. Promote another member first."
-                )
-
         await self.remove_membership(pool_id)
         await self.unsubscribe(pool_id)
         await self.remove_pool_peer(pool_id)
@@ -929,10 +745,6 @@ class PoolStore:
         return True
 
     # ==================== Subscription Operations ====================
-
-    def is_subscribed(self, pool_id: str) -> bool:
-        """Check if we subscribe to a pool."""
-        return pool_id in self._subscriptions
 
     def get_subscriptions(self) -> set[str]:
         """Get all pools we subscribe to."""
@@ -995,27 +807,27 @@ class PoolStore:
         node_url: str | None = None,  # URL of this node for remote joining
     ) -> PoolInvite:
         """Create an invitation to join a pool."""
-        manifest = self.get_manifest(pool_id)
-        if not manifest:
-            raise ValueError(f"Pool {pool_id} not found")
+        async with self._mutation_lock:
+            manifest = self.get_manifest(pool_id)
+            if not manifest:
+                raise ValueError(f"Pool {pool_id} not found")
 
-        if not manifest.is_admin(identity.public_key_hex):
-            raise PermissionError("Only admins can create invites")
+            if not manifest.is_admin(identity.public_key_hex):
+                raise PermissionError("Only admins can create invites")
 
-        invite = PoolInvite(
-            pool_id=pool_id,
-            created_by=identity.public_key_hex,
-            expires_at=time.time() + expires_in if expires_in is not None else None,
-            max_uses=max_uses,
-            node_url=node_url or "",
-        )
+            invite = PoolInvite(
+                pool_id=pool_id,
+                created_by=identity.public_key_hex,
+                expires_at=time.time() + expires_in if expires_in is not None else None,
+                max_uses=max_uses,
+                node_url=node_url or "",
+            )
 
-        # Sign the invite
-        invite.signature = await identity.sign_hex_async(invite.to_signable_bytes())
+            invite.signature = await identity.sign_hex_async(invite.to_signable_bytes())
 
-        # Persist before publishing it to callers.
-        await self._save_invite(invite)
-        return invite
+            # Persist before publishing it to callers.
+            await self._save_invite(invite)
+            return invite
 
     def get_invites(self, pool_id: str) -> list[PoolInvite]:
         """Get all invites for a pool."""
@@ -1026,17 +838,18 @@ class PoolStore:
 
     async def delete_invite(self, pool_id: str, invite_code: str) -> bool:
         """Delete an invite."""
-        if pool_id in self._invites and invite_code in self._invites[pool_id]:
-            # Delete from disk first
-            pool_inv_dir = self.invites_dir / pool_id
-            invite_file = pool_inv_dir / f"{invite_code}.json"
-            if invite_file.exists():
-                await run_in_executor(invite_file.unlink)
+        async with self._mutation_lock:
+            if pool_id in self._invites and invite_code in self._invites[pool_id]:
+                # Delete from disk first
+                pool_inv_dir = self.invites_dir / pool_id
+                invite_file = pool_inv_dir / f"{invite_code}.json"
+                if invite_file.exists():
+                    await run_in_executor(invite_file.unlink)
 
-            # Delete from memory
-            del self._invites[pool_id][invite_code]
-            return True
-        return False
+                # Delete from memory
+                del self._invites[pool_id][invite_code]
+                return True
+            return False
 
     def get_invite(self, pool_id: str, invite_code: str) -> PoolInvite | None:
         """Get an invite by pool ID and code."""
@@ -1083,7 +896,7 @@ class PoolStore:
         alias: str | None = None,
         signing_identity=None,
     ) -> tuple[PoolManifest, PoolInvite, bool] | None:
-        """Atomically validate/consume an invite and publish its member manifest."""
+        """Serialize invite consumption and member-manifest publication."""
         async with self._mutation_lock:
             invite = self.get_invite(pool_id, invite_code)
             if not invite or not invite.is_valid():
@@ -1125,18 +938,10 @@ class PoolStore:
                 async with aiofiles.open(manifest_file, "r") as f:
                     content = await f.read()
                     data = json.loads(content)
-                manifest, migrated = _decode_persisted_manifest(data)
+                manifest = PoolManifest.model_validate(data)
                 if manifest.pool_id != manifest_file.stem:
                     raise ValueError("manifest pool_id must match its filename")
                 self._manifests[manifest.pool_id] = manifest
-                if migrated:
-                    try:
-                        await write_text_atomic(
-                            manifest_file,
-                            json.dumps(manifest.to_persisted_dict(), indent=2),
-                        )
-                    except Exception:
-                        pass
             except Exception:
                 pass
 
@@ -1154,17 +959,13 @@ class PoolStore:
             except Exception:
                 pass
 
-    async def _save_memberships(self) -> None:
-        """Save memberships to disk."""
-        await self._write_memberships(self._memberships)
-
     async def _replace_memberships(self, memberships: set[str]) -> None:
         await self._write_memberships(memberships)
         self._memberships = memberships
 
     async def _write_memberships(self, memberships: set[str]) -> None:
         memberships_file = self.pools_dir / "memberships.json"
-        payload = _encode_pool_id_set(memberships, "memberships")
+        payload = _encode_pool_id_set(memberships)
         await write_text_atomic(memberships_file, json.dumps(payload))
 
     async def _load_subscriptions(self) -> None:
@@ -1186,17 +987,13 @@ class PoolStore:
             except Exception:
                 pass
 
-    async def _save_subscriptions(self) -> None:
-        """Save subscriptions to disk."""
-        await self._write_subscriptions(self._subscriptions)
-
     async def _replace_subscriptions(self, subscriptions: set[str]) -> None:
         await self._write_subscriptions(subscriptions)
         self._subscriptions = subscriptions
 
     async def _write_subscriptions(self, subscriptions: set[str]) -> None:
         subscriptions_file = self.pools_dir / "subscriptions.json"
-        payload = _encode_pool_id_set(subscriptions, "subscriptions")
+        payload = _encode_pool_id_set(subscriptions)
         await write_text_atomic(subscriptions_file, json.dumps(payload))
 
     async def _load_invites(self) -> None:
@@ -1210,7 +1007,7 @@ class PoolStore:
             if not pool_dir.is_dir():
                 continue
             try:
-                pool_id = _validate_pool_id(pool_dir.name)
+                pool_id = canonical_pool_id(pool_dir.name)
             except ValueError:
                 continue
 
@@ -1260,10 +1057,6 @@ class PoolStore:
             except Exception:
                 pass
 
-    async def _save_pool_peers(self) -> None:
-        """Save known pool peers to disk."""
-        await self._write_pool_peers(self._pool_peers)
-
     async def _replace_pool_peers(self, pool_peers: dict[str, set[str]]) -> None:
         await self._write_pool_peers(pool_peers)
         self._pool_peers = pool_peers
@@ -1287,7 +1080,11 @@ class PoolStore:
                 existing_pool_id: set(peers)
                 for existing_pool_id, peers in self._pool_peers.items()
             }
-            pool_peers.setdefault(pool_id, set()).add(peer_address)
+            peers = pool_peers.setdefault(pool_id, set())
+            peers.add(peer_address)
+            while len(peers) > max(settings.COMETNET_MAX_PEERS, 0):
+                older_peers = peers - {peer_address}
+                peers.remove(min(older_peers) if older_peers else peer_address)
             await self._replace_pool_peers(pool_peers)
 
     async def remove_pool_peer(self, pool_id: str) -> None:
@@ -1299,10 +1096,6 @@ class PoolStore:
                 if existing_pool_id != pool_id
             }
             await self._replace_pool_peers(pool_peers)
-
-    def get_pool_peers(self, pool_id: str) -> set[str]:
-        """Get known peer addresses for a pool."""
-        return self._pool_peers.get(pool_id, set()).copy()
 
     def get_all_pool_peers(self) -> dict[str, set[str]]:
         """Get all known pool peers for all pools we're a member of."""
@@ -1375,7 +1168,6 @@ class PoolStore:
                 # Keep the ID dirty until persistence succeeds. Any write error
                 # remains visible to periodic/shutdown callers and can be retried.
                 await self.store_manifest(manifest)
-                self._dirty_manifests.discard(pool_id)
 
     # ==================== Validation ====================
 
@@ -1402,25 +1194,14 @@ class PoolStore:
         ):
             return False
 
-        try:
-            signable_data = manifest.to_signable_bytes()
-
-            for admin_key, signature in manifest.signatures.items():
-                if signature_authority.is_admin(
-                    admin_key
-                ) and await NodeIdentity.verify_hex_async(
-                    signable_data, signature, admin_key
-                ):
-                    return True
-        except Exception:
-            pass
-
-        if manifest.signatures:
-            try:
-                admin_key = next(iter(manifest.signatures.keys()))
-                manifest.get_member(admin_key)
-            except Exception:
-                pass
+        signable_data = manifest.to_signable_bytes()
+        for admin_key, signature in manifest.signatures.items():
+            if signature_authority.is_admin(
+                admin_key
+            ) and await NodeIdentity.verify_hex_async(
+                signable_data, signature, admin_key
+            ):
+                return True
 
         return False
 
@@ -1432,7 +1213,7 @@ class PoolStore:
             "pools_known": len(self._manifests),
             "memberships": len(self._memberships),
             "subscriptions": len(self._subscriptions),
-            "pool_ids": list(self._manifests.keys()),
-            "member_of": list(self._memberships),
-            "subscribed_to": list(self._subscriptions),
+            "pool_ids": sorted(self._manifests),
+            "member_of": sorted(self._memberships),
+            "subscribed_to": sorted(self._subscriptions),
         }

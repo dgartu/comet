@@ -9,8 +9,7 @@ from dataclasses import dataclass, replace
 from typing import TypeVar
 
 from comet.core.capabilities import CapabilityPlan
-from comet.core.models import settings
-from comet.core.scrape import ScrapeContext
+from comet.core.scrape import ScrapeContext, scraper_timeout
 from comet.core.sources import ReleaseCandidate, TransportKind
 from comet.discovery.base import DiscoveryAdapter
 from comet.discovery.capabilities import DiscoveryBranchFingerprint
@@ -83,13 +82,9 @@ _local_singleflight = _LocalSingleFlight()
 
 
 def _source_timeout(adapter: DiscoveryAdapter, work_class: ScrapeContext) -> float:
-    timeout = getattr(adapter, "discovery_timeout", None)
-    if timeout is not None:
-        return timeout
-    return (
-        settings.LIVE_SCRAPE_TIMEOUT
-        if work_class is ScrapeContext.LIVE
-        else settings.BACKGROUND_SCRAPE_TIMEOUT
+    return scraper_timeout(
+        getattr(adapter, "discovery_name", type(adapter).__name__),
+        work_class,
     )
 
 
@@ -175,7 +170,7 @@ class SearchCoordinator:
             scheduled.append(
                 _ScheduledSearch(
                     source.configuration_id,
-                    provider_name[:128],
+                    provider_name,
                     branches,
                     source_started,
                     cancellation,
@@ -187,11 +182,6 @@ class SearchCoordinator:
                             query,
                             account_partition,
                             branch_fingerprints,
-                            use_cache=(
-                                self._database is not None
-                                and account_partition is not None
-                                and branch_fingerprints is not None
-                            ),
                             hard_deadline=source_deadline,
                             cancellation=cancellation,
                             trace_id=trace_id,
@@ -289,13 +279,12 @@ class SearchCoordinator:
         account_partition: bytes | None,
         fingerprints: (Mapping[tuple[str, str], DiscoveryBranchFingerprint] | None),
         *,
-        use_cache: bool,
         hard_deadline: float,
         cancellation: asyncio.Event,
         trace_id: str | None,
         work_class: ScrapeContext,
     ) -> DiscoveryBatch:
-        if not use_cache:
+        if self._database is None or account_partition is None or fingerprints is None:
             response = await _run_before_deadline(
                 adapter.search(
                     query,
@@ -303,7 +292,6 @@ class SearchCoordinator:
                         branches,
                         source_configuration_id,
                         account_partition,
-                        hard_deadline,
                         cancellation,
                         trace_id,
                         work_class,
@@ -316,11 +304,7 @@ class SearchCoordinator:
         branch_pairs = tuple(
             (
                 branch,
-                _branch_identity(
-                    fingerprints,
-                    source_configuration_id,
-                    branch,
-                ),
+                fingerprints[(source_configuration_id, branch)],
             )
             for branch in branches
         )
@@ -505,12 +489,9 @@ class SearchCoordinator:
                 )
 
             cancellation = asyncio.Event()
-            provider_name = (
-                getattr(adapter, "discovery_name", None)
-                or type(adapter)
-                .__name__.removesuffix("Scraper")
-                .removesuffix("Adapter")
-            )[:128]
+            provider_name = getattr(adapter, "discovery_name", None) or type(
+                adapter
+            ).__name__.removesuffix("Scraper").removesuffix("Adapter")
 
             async def refresh():
                 refresh_started = loop.time()
@@ -533,7 +514,6 @@ class SearchCoordinator:
                                     if identity.public_visibility
                                     else account_partition
                                 ),
-                                hard_deadline,
                                 cancellation,
                                 trace_id,
                                 work_class,
@@ -621,26 +601,10 @@ class SearchCoordinator:
         return replace(response, candidates=candidates)
 
 
-def _branch_identity(
-    fingerprints: Mapping[tuple[str, str], DiscoveryBranchFingerprint],
-    configuration_id: str,
-    branch: str,
-) -> DiscoveryBranchFingerprint:
-    value = fingerprints.get((configuration_id, branch))
-    if (
-        value is None
-        or value.source_configuration_id != configuration_id
-        or value.branch_family != branch
-    ):
-        raise ValueError("discovery branch fingerprint is missing or invalid")
-    return value
-
-
 def _context(
     branches: tuple[str, ...],
     configuration_id: str,
     account_partition: bytes | None,
-    hard_deadline: float,
     cancellation: asyncio.Event,
     trace_id: str | None,
     work_class: ScrapeContext,
@@ -649,7 +613,6 @@ def _context(
         branches=frozenset(branches),
         account_partition=account_partition,
         configuration_id=configuration_id,
-        hard_deadline=hard_deadline,
         cancellation=cancellation,
         trace_id=trace_id,
         work_class=work_class,

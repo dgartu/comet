@@ -62,15 +62,15 @@ class UvicornEntrypointTests(unittest.TestCase):
         ):
             run_with_uvicorn(1)
 
-    def test_resolved_worker_count_has_one_bounded_domain(self):
+    def test_resolved_worker_count_accepts_explicit_positive_values(self):
         with patch.dict(
             "comet.web.os.environ",
-            {"COMET_RESOLVED_FASTAPI_WORKERS": "64"},
+            {"COMET_RESOLVED_FASTAPI_WORKERS": "65"},
             clear=True,
         ):
-            self.assertEqual(resolved_workers(), 64)
+            self.assertEqual(resolved_workers(), 65)
 
-        for value in ("65", "not-an-integer"):
+        for value in ("-1", "not-an-integer"):
             with (
                 self.subTest(value=value),
                 patch.dict(
@@ -81,6 +81,16 @@ class UvicornEntrypointTests(unittest.TestCase):
                 self.assertRaises(RuntimeError),
             ):
                 resolved_workers()
+
+        with (
+            patch.dict(
+                "comet.web.os.environ",
+                {"COMET_RESOLVED_FASTAPI_WORKERS": "0"},
+                clear=True,
+            ),
+            patch("comet.web.os.cpu_count", return_value=32),
+        ):
+            self.assertEqual(resolved_workers(), 65)
 
     def test_gunicorn_configuration_is_applied_exactly(self):
         with (

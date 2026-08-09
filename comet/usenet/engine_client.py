@@ -1,7 +1,6 @@
 """Client for the replica-local Usenet engine Unix socket."""
 
 import asyncio
-import hashlib
 from pathlib import Path
 
 import orjson
@@ -27,16 +26,15 @@ from comet.usenet.identity import archive_member_identity as _archive_member_ide
 from comet.usenet.identity import is_sha256_hex
 from comet.usenet.limits import (
     MAX_ARCHIVE_VOLUMES,
+    MAX_NNTP_ARTICLE_BYTES,
     MAX_NZB_FILES,
-    MAX_NZB_METADATA_BYTES,
     MAX_NZB_SEGMENTS,
     MAX_PAR2_VOLUMES,
     MAX_USENET_LOGICAL_BYTES,
 )
+from comet.utils.text import has_ascii_control
 
-MAX_ENGINE_ARTICLE_BYTES = 16 * 1024 * 1024
 MAX_ENGINE_STRUCTURAL_END_BYTES = 2 * 1024 * 1024
-MAX_ARCHIVE_PASSPHRASE_BYTES = 4 * 1024
 _ASSET_KINDS = frozenset(
     {
         "video",
@@ -108,7 +106,8 @@ def _validate_message_id(message_id: object) -> None:
         not isinstance(message_id, str)
         or not message_id
         or len(message_id) > 998
-        or any(character.isspace() or ord(character) < 32 for character in message_id)
+        or has_ascii_control(message_id)
+        or any(character.isspace() for character in message_id)
     ):
         raise ValueError("NNTP message identifier is invalid")
     bracketed = message_id.startswith("<")
@@ -135,21 +134,6 @@ def _valid_logical_size(value: object) -> bool:
         and isinstance(value, int)
         and 1 <= value <= MAX_USENET_LOGICAL_BYTES
     )
-
-
-def _validate_archive_passphrase(passphrase: str | None) -> None:
-    if passphrase is None:
-        return
-    if not isinstance(passphrase, str) or not passphrase:
-        raise ValueError("archive passphrase is invalid")
-    try:
-        encoded = passphrase.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError("archive passphrase is invalid") from exc
-    if len(encoded) > MAX_ARCHIVE_PASSPHRASE_BYTES or any(
-        character.isascii() and not character.isprintable() for character in passphrase
-    ):
-        raise ValueError("archive passphrase is invalid")
 
 
 def _prepare_archive_volume_request(
@@ -348,15 +332,6 @@ def _validate_session_identity(identity: object) -> None:
         raise ValueError("session identity must be 128-bit base64url")
 
 
-def _validate_provider_set_identity(identity: object) -> None:
-    try:
-        _validate_session_identity(identity)
-    except ValueError as exc:
-        raise ValueError(
-            "native provider-set identity must be 128-bit base64url"
-        ) from exc
-
-
 def _normalize_nntp_postings(
     postings: object,
     *,
@@ -377,7 +352,7 @@ def _normalize_nntp_postings(
             or (previous_number == 0 and posting[0] != 1)
             or isinstance(posting[1], bool)
             or not isinstance(posting[1], int)
-            or not 1 <= posting[1] <= MAX_ENGINE_ARTICLE_BYTES
+            or not 1 <= posting[1] <= MAX_NNTP_ARTICLE_BYTES
         ):
             raise ValueError(error)
         _validate_message_id(posting[2])
@@ -401,9 +376,11 @@ class EngineClient(EngineTransport):
             descriptor = super()._load_descriptor()
         except EngineUnavailable:
             self._provider_set_ids.clear()
+            self._reported_degraded_sessions.clear()
             raise
         if previous is None or previous.runtime_id != descriptor.runtime_id:
             self._provider_set_ids.clear()
+            self._reported_degraded_sessions.clear()
         return descriptor
 
     async def health(self) -> dict:
@@ -490,16 +467,6 @@ class EngineClient(EngineTransport):
 
     async def parse_nzb(self, artifact_sha256: str, document: bytes) -> dict:
         """Parse a brokered NZB document without authorizing native media work."""
-        if not is_sha256_hex(artifact_sha256):
-            raise ValueError("artifact_sha256 must be lowercase SHA-256")
-        if (
-            not isinstance(document, bytes)
-            or not document
-            or len(document) > MAX_NZB_METADATA_BYTES
-        ):
-            raise ValueError("NZB document exceeds the parser input limit")
-        if hashlib.sha256(document).hexdigest() != artifact_sha256:
-            raise ValueError("NZB document does not match its artifact identity")
         status, _headers, body = await self.request(
             "POST", f"/v1/artifacts/{artifact_sha256}/parse", document
         )
@@ -621,7 +588,6 @@ class EngineClient(EngineTransport):
         passphrase: str | None = None,
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         """Catalog seekable archive members directly over sparse NNTP sessions."""
-        _validate_archive_passphrase(passphrase)
         payload, _request, identities, expected = _prepare_session_archive_request(
             volumes, passphrase=passphrase
         )
@@ -639,7 +605,6 @@ class EngineClient(EngineTransport):
         passphrase: str | None = None,
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         """Resolve bounded nested layers under one native cumulative budget."""
-        _validate_archive_passphrase(passphrase)
         _payload, request, identities, expected = _prepare_archive_volume_request(
             volumes
         )
@@ -754,7 +719,6 @@ class EngineClient(EngineTransport):
         passphrase: str | None = None,
     ) -> tuple[str, int, str]:
         """Materialize one nested member under one cumulative native budget."""
-        _validate_archive_passphrase(passphrase)
         if (
             not _valid_logical_size(expected_output_size)
             or not isinstance(selected_paths, tuple)
@@ -1381,7 +1345,6 @@ class EngineClient(EngineTransport):
         passphrase: str | None = None,
     ) -> tuple[dict[str, object], str, int, str]:
         """Open one seekable archive member over sparse NNTP sessions."""
-        _validate_archive_passphrase(passphrase)
         _payload, request, identities, expected = _prepare_session_archive_request(
             volumes, passphrase=passphrase
         )
@@ -1743,8 +1706,6 @@ class EngineClient(EngineTransport):
             provider_set_generation=provider_set_generation,
             inspection_artifact_sha256=artifact_sha256,
         )
-        if not isinstance(result, dict):
-            raise EngineUnavailable("Usenet engine returned invalid inspection data")
         return result
 
     async def inspect_materialization(
@@ -1857,43 +1818,12 @@ class EngineClient(EngineTransport):
         selection_hint: tuple[str, int] | None = None,
     ) -> list[dict[str, object]]:
         """Rehydrate Rust's canonical manifest into a typed native asset catalog."""
-        _validate_materialization_identity(artifact_sha256)
-        if (
-            not isinstance(manifest_identity, str)
-            or len(manifest_identity) != 68
-            or not manifest_identity.startswith("nm1:")
-            or any(
-                character not in "0123456789abcdef"
-                for character in manifest_identity[4:]
-            )
-            or not isinstance(manifest, list)
-            or not 1 <= len(manifest) <= MAX_NZB_FILES
-            or not isinstance(metadata, dict)
-            or any(
-                not isinstance(key, str)
-                or not isinstance(value, str)
-                or not key
-                or not value
-                for key, value in metadata.items()
-            )
-        ):
-            raise ValueError("native asset catalog request is invalid")
         request = {
             "manifest_identity": manifest_identity,
             "metadata": metadata,
             "manifest": manifest,
         }
         if selection_hint is not None:
-            if (
-                not isinstance(selection_hint, tuple)
-                or len(selection_hint) != 2
-                or not isinstance(selection_hint[0], str)
-                or normalize_archive_relative_path(selection_hint[0])
-                != selection_hint[0]
-                or len(selection_hint[0].encode()) > 512
-                or not _valid_logical_size(selection_hint[1])
-            ):
-                raise ValueError("native asset selection hint is invalid")
             request["selection_hint"] = {
                 "relative_path": selection_hint[0],
                 "exact_size": selection_hint[1],
@@ -2188,11 +2118,6 @@ class EngineClient(EngineTransport):
                 raise EngineUnavailable(
                     "Usenet engine returned invalid provider-set data"
                 )
-            try:
-                _validate_provider_set_identity(provider_set_id)
-            except ValueError as exc:
-                raise EngineUnavailable(
-                    "Usenet engine returned invalid provider-set data"
-                ) from exc
             self._provider_set_ids[generation] = provider_set_id
-            return provider_set_id
+        self._provider_set_locks.pop(generation, None)
+        return provider_set_id

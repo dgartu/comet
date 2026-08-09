@@ -1,12 +1,11 @@
+from dataclasses import dataclass
 from typing import TypedDict
 
-from pydantic import BaseModel
-
 from comet.core.scrape import ScrapeContext
-from comet.utils.languages import MAX_INDEXER_TITLES
 
 
-class ScrapeRequest(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ScrapeRequest:
     media_type: str  # "movie" or "series"
     media_id: str  # Full ID (e.g., "tt1234567:1:1" or "kitsu:123")
     media_only_id: str  # Base ID (e.g., "tt1234567")
@@ -20,7 +19,7 @@ class ScrapeRequest(BaseModel):
 
     @property
     def query_titles(self) -> tuple[str, ...]:
-        return (self.search_titles or (self.title,))[:MAX_INDEXER_TITLES]
+        return self.search_titles or (self.title,)
 
     def scoped_query_titles(self) -> tuple[str, ...]:
         if self.media_type != "series" or self.season is None:

@@ -4,16 +4,17 @@ import math
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Literal
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WindowPermit:
     used: int
     limit: int
     reset_at_ms: int
 
 
-@dataclass
+@dataclass(slots=True)
 class ProviderLease:
     lease_id: str
     scope_key: str
@@ -62,28 +63,17 @@ class ProviderGovernor:
         *,
         limit: int,
         window_seconds: float,
-        priority: str = "interactive",
+        priority: Literal["interactive", "background"] = "interactive",
         interactive_reserve: int = 0,
         now: float | None = None,
     ) -> WindowPermit | None:
-        scope = _scope(scope_key)
-        operation = _operation(operation)
-        limit = _positive_integer(limit, "provider window limit", maximum=1_000_000)
-        reserve = _nonnegative_integer(
-            interactive_reserve,
-            "provider interactive reserve",
-            maximum=limit,
-        )
-        if priority not in {"interactive", "background"}:
-            raise ValueError("provider priority is invalid")
-        duration_ms = _duration_ms(
-            window_seconds,
-            "provider window duration",
-            maximum_seconds=31 * 24 * 60 * 60,
-        )
+        scope = scope_key.hex()
+        duration_ms = _duration_ms(window_seconds)
         now_ms = _now_ms(now)
         window_start_ms = now_ms - (now_ms % duration_ms)
-        admission_limit = limit if priority == "interactive" else limit - reserve
+        admission_limit = (
+            limit if priority == "interactive" else limit - interactive_reserve
+        )
         if admission_limit <= 0:
             return None
         row = await self._database.fetch_one(
@@ -142,14 +132,8 @@ class ProviderGovernor:
         window_seconds: float,
         now: float | None = None,
     ) -> bool:
-        scope = _scope(scope_key)
-        operation = _operation(operation)
-        limit = _positive_integer(limit, "provider window limit", maximum=1_000_000)
-        duration_ms = _duration_ms(
-            window_seconds,
-            "provider window duration",
-            maximum_seconds=31 * 24 * 60 * 60,
-        )
+        scope = scope_key.hex()
+        duration_ms = _duration_ms(window_seconds)
         now_ms = _now_ms(now)
         window_start_ms = now_ms - (now_ms % duration_ms)
         row = await self._database.fetch_one(
@@ -186,23 +170,8 @@ class ProviderGovernor:
         lease_seconds: float,
         now: float | None = None,
     ) -> ProviderLease | None:
-        scope = _scope(scope_key)
-        operation = _operation(operation)
-        limit = _positive_integer(
-            limit,
-            "provider concurrency limit",
-            maximum=256,
-        )
-        owner_request_id = _bounded_text(
-            owner_request_id,
-            "provider request identifier",
-            128,
-        )
-        lease_duration_ms = _duration_ms(
-            lease_seconds,
-            "provider lease duration",
-            maximum_seconds=60 * 60,
-        )
+        scope = scope_key.hex()
+        lease_duration_ms = _duration_ms(lease_seconds)
         now_ms = _now_ms(now)
         expires_at_ms = now_ms + lease_duration_ms
         for slot in range(limit):
@@ -252,11 +221,6 @@ class ProviderGovernor:
         batch_size: int = 1_000,
     ) -> tuple[int, int]:
         now_ms = _now_ms(now)
-        batch_size = _positive_integer(
-            batch_size,
-            "provider governor GC batch",
-            maximum=10_000,
-        )
         leases = await self._database.fetch_all(
             """
             DELETE FROM provider_governor_leases
@@ -300,70 +264,10 @@ class ProviderGovernor:
         return len(leases), len(windows)
 
 
-def _scope(value: bytes) -> str:
-    if not isinstance(value, bytes) or len(value) != 32:
-        raise ValueError("provider governor scope must contain 32 bytes")
-    return value.hex()
-
-
-def _operation(value: str) -> str:
-    value = _bounded_text(value, "provider operation", 64)
-    if not all(
-        character.isascii() and (character.isalnum() or character in {"_", "-", ":"})
-        for character in value
-    ):
-        raise ValueError("provider operation is invalid")
-    return value
-
-
-def _bounded_text(value: str, field: str, maximum: int) -> str:
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= maximum
-        or any(ord(character) < 32 for character in value)
-    ):
-        raise ValueError(f"{field} is invalid")
-    return value
-
-
-def _positive_integer(value: int, field: str, *, maximum: int) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 1 <= value <= maximum
-    ):
-        raise ValueError(f"{field} is invalid")
-    return value
-
-
-def _nonnegative_integer(value: int, field: str, *, maximum: int) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 0 <= value <= maximum
-    ):
-        raise ValueError(f"{field} is invalid")
-    return value
-
-
-def _duration_ms(value: float, field: str, *, maximum_seconds: float) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or not 0 < value <= maximum_seconds
-    ):
-        raise ValueError(f"{field} is invalid")
+def _duration_ms(value: float) -> int:
     return math.ceil(value * 1_000)
 
 
 def _now_ms(value: float | None) -> int:
     timestamp = time.time() if value is None else value
-    if (
-        isinstance(timestamp, bool)
-        or not isinstance(timestamp, (int, float))
-        or not math.isfinite(timestamp)
-        or timestamp < 0
-    ):
-        raise ValueError("provider governor timestamp is invalid")
     return int(timestamp * 1_000)

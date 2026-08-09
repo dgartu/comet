@@ -1,7 +1,6 @@
 import asyncio
 import math
 import socket
-from typing import ClassVar
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
@@ -17,7 +16,6 @@ from comet.utils.proxy import (
     socks_proxy_connector,
 )
 
-_MAX_DISCOVERY_RESPONSE_BYTES = 8 * 1024 * 1024
 _MAX_RETRY_DELAY_SECONDS = 60.0
 _DEFAULT_PROXY = object()
 
@@ -80,7 +78,7 @@ class ResponseWrapper:
         response,
         backend: str,
         body: bytes | None = None,
-        maximum_body_bytes: int = _MAX_DISCOVERY_RESPONSE_BYTES,
+        maximum_body_bytes: int | None = None,
     ):
         self._response = response
         self.backend = backend
@@ -106,7 +104,9 @@ class ResponseWrapper:
             chunk = await self._response.content.read(64 * 1024)
             if not chunk:
                 break
-            if len(chunk) > self._maximum_body_bytes - len(body):
+            if self._maximum_body_bytes is not None and len(
+                chunk
+            ) > self._maximum_body_bytes - len(body):
                 raise DiscoveryResponseTooLarge("discovery response is too large")
             body.extend(chunk)
         self._body = bytes(body)
@@ -134,7 +134,10 @@ def _retry_delay(retry_after, base_delay: float, attempt: int) -> float | None:
     except (TypeError, ValueError):
         requested = None
     if requested is None or not math.isfinite(requested):
-        requested = bounded_base * (2**attempt)
+        try:
+            requested = math.ldexp(bounded_base, attempt)
+        except OverflowError:
+            requested = math.inf
     elif requested > _MAX_RETRY_DELAY_SECONDS:
         return None
     return min(max(requested, bounded_base), _MAX_RETRY_DELAY_SECONDS)
@@ -155,9 +158,7 @@ class _RequestContextManager:
         self.url = url
         self.kwargs = kwargs
         self.kwargs["allow_redirects"] = False
-        self.maximum_body_bytes = self.kwargs.pop(
-            "maximum_body_bytes", _MAX_DISCOVERY_RESPONSE_BYTES
-        )
+        self.maximum_body_bytes = self.kwargs.pop("maximum_body_bytes", None)
         self.aiohttp_cm = None
         self.response = None
 
@@ -203,7 +204,9 @@ class _RequestContextManager:
                 body = bytearray()
 
                 def receive(chunk, body=body):
-                    if len(chunk) > self.maximum_body_bytes - len(body):
+                    if self.maximum_body_bytes is not None and len(
+                        chunk
+                    ) > self.maximum_body_bytes - len(body):
                         raise DiscoveryResponseTooLarge(
                             "discovery response is too large"
                         )
@@ -291,16 +294,10 @@ class AsyncClientWrapper:
         self,
         impersonate: str | None = None,
         proxy_url: str | None | object = _DEFAULT_PROXY,
-        headers: dict | None = None,
-        timeout: float | None = None,
         discard_cookies: bool = False,
         proxy_ethos: str | None = None,
     ):
         self.impersonate = impersonate
-        self.timeout = (
-            settings.HTTP_CLIENT_TIMEOUT_TOTAL if timeout is None else timeout
-        )
-        self.headers = {} if headers is None else headers
         self.discard_cookies = discard_cookies
         self.proxy_url = (
             settings.GLOBAL_PROXY_URL if proxy_url is _DEFAULT_PROXY else proxy_url
@@ -335,7 +332,7 @@ class AsyncClientWrapper:
     async def _get_aiohttp_session(self):
         if self._aiohttp_session is None or self._aiohttp_session.closed:
             self._aiohttp_session = aiohttp.ClientSession(
-                headers=self.headers, timeout=aiohttp.ClientTimeout(total=self.timeout)
+                timeout=aiohttp.ClientTimeout(total=None),
             )
         return self._aiohttp_session
 
@@ -345,8 +342,7 @@ class AsyncClientWrapper:
             connector = socks_proxy_connector(proxy_url)
             session = aiohttp.ClientSession(
                 connector=connector,
-                headers=self.headers,
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                timeout=aiohttp.ClientTimeout(total=None),
             )
             self._socks_sessions[proxy_url] = session
         return session
@@ -354,23 +350,23 @@ class AsyncClientWrapper:
     async def _get_curl_session(self):
         if self._curl_session is None:
             self._curl_session = CurlSession(
-                headers=self.headers,
                 impersonate=self.impersonate,
-                timeout=self.timeout,
+                timeout=None,
                 discard_cookies=self.discard_cookies,
             )
         return self._curl_session
 
     async def close(self):
+        sessions = []
         if self._aiohttp_session is not None:
-            await self._aiohttp_session.close()
+            sessions.append(self._aiohttp_session)
             self._aiohttp_session = None
-        for session in self._socks_sessions.values():
-            await session.close()
+        sessions.extend(self._socks_sessions.values())
         self._socks_sessions.clear()
         if self._curl_session is not None:
-            await self._curl_session.close()
+            sessions.append(self._curl_session)
             self._curl_session = None
+        await asyncio.gather(*(session.close() for session in sessions))
 
     def request(self, method: str, url: str, **kwargs):
         return _RequestContextManager(self, method, url, **kwargs)
@@ -380,19 +376,13 @@ class AsyncClientWrapper:
 
 
 class NetworkManager:
-    _instance: ClassVar = None
-    _clients: ClassVar[dict[str, AsyncClientWrapper]] = {}
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    def __init__(self):
+        self._clients: dict[str, AsyncClientWrapper] = {}
 
     def get_client(
         self,
         scraper_name: str,
         impersonate: str | None = None,
-        headers: dict | None = None,
         *,
         discard_cookies: bool = False,
         proxy_ethos: str | None = None,
@@ -415,7 +405,6 @@ class NetworkManager:
             self._clients[key] = AsyncClientWrapper(
                 impersonate=impersonate,
                 proxy_url=proxy_url,
-                headers=headers,
                 discard_cookies=discard_cookies,
                 proxy_ethos=proxy_ethos,
             )

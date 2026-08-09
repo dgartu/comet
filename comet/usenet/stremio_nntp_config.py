@@ -30,7 +30,6 @@ def serialize_server(config: dict) -> str:
     if (
         not isinstance(host, str)
         or not host
-        or any(character.isspace() or ord(character) < 33 for character in host)
         or not valid_nntp_credential(username)
         or not valid_nntp_credential(password)
         or isinstance(port, bool)
@@ -76,7 +75,7 @@ def validate_serialized_servers(value: object) -> tuple[str, ...]:
             username = unquote(parsed.username or "", errors="strict")
             password = unquote(parsed.password or "", errors="strict")
             connections_text = parsed.path.removeprefix("/")
-        except (UnicodeDecodeError, UnicodeEncodeError, ValueError):
+        except ValueError:
             raise ValueError("Stremio NNTP server URI is invalid") from None
         if (
             not 1 <= len(encoded) <= 4_096

@@ -377,14 +377,14 @@ fn normalize_materialization_request(
 ) -> Result<(SessionSource, Vec<session::SessionPosting>), &'static str> {
     if request.postings.is_empty()
         || request.postings.len() > nzb::MAX_SEGMENTS
-        || request.postings.iter().any(|posting| {
-            posting.bytes == 0 || posting.bytes > session::MAX_DECLARED_POSTING_BYTES
-        })
+        || request
+            .postings
+            .iter()
+            .any(|posting| posting.bytes == 0 || posting.bytes > limits::MAX_DECLARED_POSTING_BYTES)
         || request
             .group
             .as_deref()
             .is_some_and(|group| !nntp::valid_group(group))
-        || !provider::valid_identity(&request.provider_set_id)
     {
         return Err("invalid_materialization");
     }
@@ -417,9 +417,7 @@ fn normalize_materialization_request(
                 });
             continue;
         }
-        if posting.number
-            != u64::try_from(postings.len() + 1).map_err(|_| "invalid_materialization")?
-        {
+        if posting.number != (postings.len() + 1) as u64 {
             return Err("invalid_materialization");
         }
         postings.push(session::SessionPosting {
@@ -471,18 +469,23 @@ fn missing_slice_count(
     unavailable: impl IntoIterator<Item = bool>,
     slice_size: u64,
 ) -> Result<usize, &'static str> {
-    let mut slices = BTreeSet::new();
+    let mut missing = 0_u64;
+    let mut last_missing_slice = None;
     let mut offset = 0u64;
     for (posting, unavailable) in postings.iter().zip(unavailable) {
-        let end = offset
-            .checked_add(posting.declared_encoded_bytes)
-            .ok_or("repair_scope_exceeds_budget")?;
+        let end = offset + posting.declared_encoded_bytes;
         if unavailable {
-            slices.extend(offset / slice_size..=(end - 1) / slice_size);
+            let first = offset / slice_size;
+            let last = (end - 1) / slice_size;
+            let first_unseen = last_missing_slice.map_or(first, |seen| first.max(seen + 1));
+            if first_unseen <= last {
+                missing += last - first_unseen + 1;
+                last_missing_slice = Some(last);
+            }
         }
         offset = end;
     }
-    Ok(slices.len())
+    usize::try_from(missing).map_err(|_| "repair_scope_exceeds_budget")
 }
 
 struct RequestBodyBudget {
@@ -663,9 +666,6 @@ impl EngineState {
         par2_binary: Option<&Path>,
         libarchive_library: Option<&Path>,
     ) -> Result<Self, &'static str> {
-        if !(16 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&budgets.memory_cache_bytes) {
-            return Err("invalid_segment_cache_budget");
-        }
         let resources = resources::NativeResources::new(
             local_data,
             budgets.maximum_spool_bytes,
@@ -675,11 +675,10 @@ impl EngineState {
         )?;
         let nntp_pools = Arc::new(nntp::PoolRegistry::new_with_decoded_budget(
             budgets.maximum_nntp_connections,
-            u64::try_from(budgets.memory_cache_bytes)
-                .map_err(|_| "invalid_segment_cache_budget")?
+            (budgets.memory_cache_bytes as u64)
                 // Preserve one background article plus both sides of an
                 // interactive provider hedge at the minimum cache setting.
-                .max(session::MAX_DECLARED_POSTING_BYTES * 3),
+                .max(limits::MAX_DECLARED_POSTING_BYTES * 3),
         )?);
         let par2_tool = par2_binary
             .map(|binary| {
@@ -702,9 +701,7 @@ impl EngineState {
         Ok(Self {
             archive_runtime,
             par2_tool,
-            segment_cache: Mutex::new(cache::VerifiedSegmentCache::new(
-                budgets.memory_cache_bytes,
-            )?),
+            segment_cache: Mutex::new(cache::VerifiedSegmentCache::new(budgets.memory_cache_bytes)),
             disk_cache: if budgets.disk_cache_bytes == 0 {
                 None
             } else {
@@ -738,10 +735,8 @@ impl EngineState {
             active_requests: AtomicUsize::new(0),
             active_materializations: AtomicUsize::new(0),
             request_queue_busy_rejections: AtomicU64::new(0),
-            prefetch_window_bytes: u64::try_from(
-                budgets.memory_cache_bytes / MAX_CONCURRENT_PREFETCH_SESSIONS,
-            )
-            .map_err(|_| "invalid_segment_cache_budget")?,
+            prefetch_window_bytes: (budgets.memory_cache_bytes / MAX_CONCURRENT_PREFETCH_SESSIONS)
+                as u64,
             // One prefetch session can already fill every NNTP lane. More
             // sessions improve fairness, but cannot improve throughput once
             // their count reaches the connection ceiling.
@@ -805,7 +800,6 @@ impl EngineState {
                         observability::Level::Error,
                         "nntp.prefetch.failed",
                         "NNTP session prefetch failed",
-                        None,
                         &[observability::Field::token("error_code", code)],
                     );
                 }
@@ -817,7 +811,6 @@ impl EngineState {
                 observability::Level::Error,
                 "nntp.prefetch.failed",
                 "NNTP session prefetch failed",
-                None,
                 &[observability::Field::token(
                     "error_code",
                     "prefetch_thread_unavailable",
@@ -926,7 +919,6 @@ impl EngineState {
                     observability::Level::Info,
                     "nntp.provider.completed",
                     "NNTP provider prefetch completed",
-                    None,
                     &[
                         observability::Field::token(
                             "provider_name",
@@ -1211,9 +1203,7 @@ impl EngineState {
     }
 
     fn increment_by(counter: &AtomicU64, amount: u64) {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_add(amount))
-        });
+        counter.fetch_add(amount, Ordering::Relaxed);
     }
 
     fn report_disk_cache_failure(operation: &'static str, code: &'static str) {
@@ -1222,7 +1212,6 @@ impl EngineState {
             observability::Level::Error,
             "native.disk_cache.failed",
             "Native disk cache operation failed",
-            None,
             &[
                 observability::Field::token("operation", operation),
                 observability::Field::token("error_code", code),
@@ -1422,49 +1411,14 @@ impl EngineState {
                     PostingAttempt::Complete(Err("native_busy" | "nntp_singleflight_capacity")) => {
                         break;
                     }
-                    PostingAttempt::Complete(result) => {
-                        next += 1;
-                        self.consume_staged_posting(
-                            source,
-                            posting,
-                            result,
-                            allow_holes,
-                            cancelled,
-                            &mut consume,
-                        )?;
-                    }
                     attempt => {
                         pending.push_back((next, attempt));
                         next += 1;
                     }
                 }
             }
-            let ready = pending
-                .iter()
-                .enumerate()
-                .find_map(|(queue_index, (_, attempt))| {
-                    let PostingAttempt::Pending { flight, .. } = attempt else {
-                        return None;
-                    };
-                    flight.try_result().map(|result| (queue_index, result))
-                });
-            if let Some((index, attempt, ready)) = ready
-                .map(|(queue_index, result)| {
-                    let (index, attempt) = pending
-                        .remove(queue_index)
-                        .expect("ready staged posting remains queued");
-                    (index, attempt, Some(result))
-                })
-                .or_else(|| {
-                    pending
-                        .pop_front()
-                        .map(|(index, attempt)| (index, attempt, None))
-                })
-            {
-                let result = match ready {
-                    Some(result) => self.finish_ready_attempt(attempt, result),
-                    None => self.finish_posting_attempt(attempt, cancelled),
-                };
+            if let Some((index, attempt)) = pending.pop_front() {
+                let result = self.finish_posting_attempt(attempt, cancelled);
                 self.consume_staged_posting(
                     source,
                     &postings[index],
@@ -1562,15 +1516,15 @@ impl EngineState {
             .filter_map(|(index, state)| state.is_none().then_some(index))
             .collect::<Vec<_>>();
         let mut available = vec![false; postings.len()];
+        let alternatives = postings
+            .iter()
+            .map(|posting| posting.fallback_postings.len() + 1)
+            .max()
+            .unwrap_or(0);
         for (server_index, server) in source.provider_set.servers.iter().enumerate() {
             if unresolved.is_empty() {
                 break;
             }
-            let alternatives = postings
-                .iter()
-                .map(|posting| posting.fallback_postings.len() + 1)
-                .max()
-                .unwrap_or(0);
             for alternative in 0..alternatives {
                 let candidates = unresolved
                     .iter()
@@ -1646,7 +1600,6 @@ impl EngineState {
                 observability::Level::Info,
                 "nntp.repair_survey.started",
                 "NNTP repair availability survey started",
-                None,
                 &[
                     observability::Field::unsigned("article_count", article_count as u64),
                     observability::Field::unsigned("item_count", sources.len() as u64),
@@ -1714,7 +1667,6 @@ impl EngineState {
                 observability::Level::Info,
                 "nntp.repair_survey.completed",
                 "NNTP repair availability survey completed",
-                None,
                 &[
                     observability::Field::token("outcome", outcome),
                     observability::Field::unsigned("article_count", article_count as u64),
@@ -1751,19 +1703,16 @@ impl EngineState {
     }
 
     fn materialization_cache_share(&self, capacity: u64) -> u64 {
-        let active = u64::try_from(self.active_materializations.load(Ordering::Acquire).max(1))
-            .unwrap_or(u64::MAX);
+        let active = self.active_materializations.load(Ordering::Acquire).max(1) as u64;
         capacity / active
     }
 
     fn preparation_fits_memory_cache(&self, total_size: u64) -> bool {
-        let capacity = u64::try_from(
-            self.segment_cache
-                .lock()
-                .expect("segment cache lock")
-                .budget(),
-        )
-        .unwrap_or(u64::MAX);
+        let capacity = self
+            .segment_cache
+            .lock()
+            .expect("segment cache lock")
+            .budget() as u64;
         total_size <= self.materialization_cache_share(capacity)
     }
 
@@ -2085,7 +2034,6 @@ impl PostingFailureAggregate {
                 observability::Level::Warning,
                 "nntp.availability.inconclusive",
                 "NNTP availability check was inconclusive",
-                None,
                 &fields,
             );
         }
@@ -2099,15 +2047,6 @@ impl Drop for BackgroundPrefetchPermit {
             .background_prefetches
             .fetch_sub(1, Ordering::AcqRel);
         release_allocator_slack();
-    }
-}
-
-impl Drop for EngineState {
-    fn drop(&mut self) {
-        self.segment_cache
-            .get_mut()
-            .expect("segment cache lock")
-            .purge();
     }
 }
 
@@ -2270,9 +2209,6 @@ fn parse_nzb_with_metadata_limit(
     body: &[u8],
     maximum_metadata_bytes: usize,
 ) -> Result<String, &'static str> {
-    if body.len() > MAX_NZB_BYTES {
-        return Err("nzb_too_large");
-    }
     let manifest = nzb::parse(body)?;
     let segments: usize = manifest.files.iter().map(|file| file.postings.len()).sum();
     let payload = serde_json::to_string(&NzbParseResponse {
@@ -2379,10 +2315,9 @@ fn is_session_request(request: &str) -> bool {
 }
 
 fn provider_set_put_generation(request: &str) -> Option<&str> {
-    let generation = request
+    request
         .strip_prefix("PUT /v1/provider-sets/")?
-        .strip_suffix(" HTTP/1.1")?;
-    provider::valid_generation(generation).then_some(generation)
+        .strip_suffix(" HTTP/1.1")
 }
 
 fn is_native_work_request(request: &str) -> bool {
@@ -2583,11 +2518,8 @@ where
     let exact_size = ranges
         .iter()
         .flatten()
-        .try_fold(0u64, |total, (_offset, length)| {
-            total
-                .checked_add(*length)
-                .ok_or("repair_scope_exceeds_budget")
-        })?;
+        .map(|(_offset, length)| *length)
+        .sum();
     Ok((
         set,
         SelectedPar2Inputs {
@@ -2932,21 +2864,6 @@ where
     archive_group::plan_volumes(&inputs).map(|plan| (plan, file_identities))
 }
 
-fn validated_archive_passphrase(
-    passphrase: Option<String>,
-) -> Result<Option<Zeroizing<String>>, &'static str> {
-    match passphrase {
-        None => Ok(None),
-        Some(passphrase)
-            if passphrase.len() <= archive_runtime::MAX_ARCHIVE_PASSPHRASE_BYTES
-                && !passphrase.contains('\0') =>
-        {
-            Ok(Some(Zeroizing::new(passphrase)))
-        }
-        Some(_) => Err("archive_passphrase_invalid"),
-    }
-}
-
 fn verified_archive_parts<'a>(
     plan: &'a archive_group::VolumePlan,
     file_identities: &'a BTreeMap<String, materialization::ImmutableFileIdentity>,
@@ -3180,9 +3097,8 @@ where
     F: Fn() -> bool,
 {
     const INITIAL_HEADER_BYTES: u64 = 4 * 1024;
-    const MAX_HEADER_BYTES: u64 = 2 * 1024 * 1024;
 
-    let maximum = volume.exact_size.min(MAX_HEADER_BYTES);
+    let maximum = volume.exact_size.min(archive::MAX_HEADER_BYTES as u64);
     let mut length = maximum.min(INITIAL_HEADER_BYTES);
     let evidence = loop {
         let head = state.read_session_range_with_class(
@@ -3484,19 +3400,17 @@ fn seven_zip_archive_catalog(
         .filter_map(|member| {
             inspect::classify_path(&member.relative_path).map(|kind| (member, kind))
         })
-        .map(|(member, kind)| {
-            Ok(ArchiveCatalogMember {
-                member_id: archive_group::member_identity(
-                    &plan.set_identity,
-                    &member.relative_path,
-                    member.exact_size,
-                )?,
-                relative_path: member.relative_path.clone(),
-                exact_size: member.exact_size,
-                kind,
-            })
+        .map(|(member, kind)| ArchiveCatalogMember {
+            member_id: archive_group::member_identity(
+                &plan.set_identity,
+                &member.relative_path,
+                member.exact_size,
+            ),
+            relative_path: member.relative_path.clone(),
+            exact_size: member.exact_size,
+            kind,
         })
-        .collect::<Result<Vec<_>, &'static str>>()?;
+        .collect::<Vec<_>>();
     catalog.sort_by_cached_key(|member| {
         (
             member.relative_path.to_lowercase(),
@@ -3644,7 +3558,7 @@ where
             &outer_plan.set_identity,
             &relative_path,
             member.exact_size,
-        )?;
+        );
         let mut parts = Vec::new();
         for range in member.ranges {
             parts.extend(
@@ -3748,12 +3662,12 @@ fn plain_session_parts(
     offset: u64,
     length: u64,
 ) -> Result<Vec<raw_composite::RawCompositePart>, &'static str> {
-    let sessions = raw_composite::SessionSet::new(session_sources(volumes))?;
-    sessions
+    let sessions = raw_composite::SessionSet::new(session_sources(volumes));
+    Ok(sessions
         .ranges(offset, length)?
         .into_iter()
-        .map(|(session, source_offset, exact_size)| {
-            Ok(raw_composite::RawCompositePart {
+        .map(
+            |(session, source_offset, exact_size)| raw_composite::RawCompositePart {
                 content_identity: session.revision.clone(),
                 source_offset,
                 exact_size,
@@ -3763,9 +3677,9 @@ fn plain_session_parts(
                     exact_size: session.exact_size,
                     _retention: session.retention.clone(),
                 },
-            })
-        })
-        .collect()
+            },
+        )
+        .collect())
 }
 
 fn open_session_seven_zip_member(
@@ -3777,13 +3691,13 @@ fn open_session_seven_zip_member(
         &plan.set_identity,
         &member.relative_path,
         member.exact_size,
-    )?;
+    );
     let parts = match &member.source {
         seven_zip_direct::StoredSource::Plain { offset } => {
             plain_session_parts(volumes, *offset, member.exact_size)?
         }
         seven_zip_direct::StoredSource::Aes(source) => {
-            let sessions = Arc::new(raw_composite::SessionSet::new(session_sources(volumes))?);
+            let sessions = Arc::new(raw_composite::SessionSet::new(session_sources(volumes)));
             if source
                 .pack_offset
                 .checked_add(source.pack_size)
@@ -3825,21 +3739,19 @@ fn stored_archive_catalog(
             member.relative_path.clone(),
         )
     });
-    members
+    Ok(members
         .into_iter()
-        .map(|(member, kind)| {
-            Ok(ArchiveCatalogMember {
-                member_id: archive_group::member_identity(
-                    &plan.set_identity,
-                    &member.relative_path,
-                    member.exact_size,
-                )?,
-                relative_path: member.relative_path,
-                exact_size: member.exact_size,
-                kind,
-            })
+        .map(|(member, kind)| ArchiveCatalogMember {
+            member_id: archive_group::member_identity(
+                &plan.set_identity,
+                &member.relative_path,
+                member.exact_size,
+            ),
+            relative_path: member.relative_path,
+            exact_size: member.exact_size,
+            kind,
         })
-        .collect()
+        .collect())
 }
 
 #[derive(serde::Serialize)]
@@ -3996,8 +3908,7 @@ fn runtime_stats_body(state: &EngineState) -> String {
         nntp_queue_interactive: pool_stats.queued_interactive,
         nntp_queue_preparation: pool_stats.queued_preparation,
         nntp_queue_background: pool_stats.queued_background,
-        nntp_preparation_slots: u64::try_from(state.nntp_pools.preparation_slots())
-            .expect("NNTP preparation slot count fits u64"),
+        nntp_preparation_slots: state.nntp_pools.preparation_slots() as u64,
         nntp_reserved_commands: pool_stats.reserved_commands,
         nntp_reserved_encoded_bytes: pool_stats.reserved_encoded_bytes,
         nntp_reserved_decoded_bytes: pool_stats.reserved_decoded_bytes,
@@ -4211,9 +4122,7 @@ fn handle(
         return;
     };
     let body_start = header_end + 4;
-    let Some(request_length) = body_start.checked_add(content_length) else {
-        return;
-    };
+    let request_length = body_start + content_length;
     if request
         .try_reserve_exact(request_length.saturating_sub(request.len()))
         .is_err()
@@ -4403,8 +4312,7 @@ fn handle(
                         first.segment(),
                     )?));
                     let size = session.lock().expect("random access session lock").size();
-                    let budget = u64::try_from(inspect::MAX_STRUCTURAL_END_BYTES)
-                        .map_err(|_| "container_probe_budget")?;
+                    let budget = inspect::MAX_STRUCTURAL_END_BYTES as u64;
                     let head_length = size.min(budget);
                     let head = session::RandomAccessSession::read_at(
                         &session,
@@ -4457,17 +4365,15 @@ fn handle(
                         &cancelled,
                     )?;
                     if request.expected_size
-                        <= u64::try_from(inspect::MAX_STRUCTURAL_END_BYTES)
-                            .map_err(|_| "container_probe_budget")?
+                        <= inspect::MAX_STRUCTURAL_END_BYTES as u64
                     {
                         tail.clear();
                     }
                     let evidence = inspect::probe_container(&head, &tail)?;
                     let source = raw_composite::RawCompositeSource::from_materialization(
                         identity.to_owned(),
-                        request.expected_size,
                         file_identity,
-                    )?;
+                    );
                     let (source_identity, _) = state
                         .raw_composites
                         .lock()
@@ -4539,7 +4445,6 @@ fn handle(
                     let first =
                         state.fetch_posting(&source, &postings[0], &cancelled)?;
                     source.work_class = nntp::WorkClass::Interactive;
-                    let posting_count = postings.len();
                     let mut session = session::RandomAccessSession::new_with_degraded_playback(
                         identity,
                         postings,
@@ -4550,15 +4455,15 @@ fn handle(
                         .session_checkpoints
                         .lock()
                         .expect("session checkpoint store lock")
-                        .load(&recreation_key, posting_count, session.size())?;
-                    session.restore_checkpoints(&checkpoints)?;
-                    let checkpoint_count = session.pending_checkpoints().len();
-                    state
-                        .session_checkpoints
-                        .lock()
-                        .expect("session checkpoint store lock")
-                        .merge(&recreation_key, session.pending_checkpoints())?;
-                    session.commit_pending_checkpoints(checkpoint_count);
+                        .load(&recreation_key)?;
+                    if session.restore_checkpoints(&checkpoints).is_err() {
+                        state
+                            .session_checkpoints
+                            .lock()
+                            .expect("session checkpoint store lock")
+                            .discard(&recreation_key)?;
+                        return Err("session_checkpoint_corrupt");
+                    }
                     let (identity, size, asset_revision) = state
                         .sessions
                         .lock()
@@ -4687,7 +4592,7 @@ fn handle(
             match serde_json::from_slice::<SessionArchiveCatalogRequest>(body)
                 .map_err(|_| "archive_volume_invalid")
                 .and_then(|request| {
-                    let passphrase = validated_archive_passphrase(request.passphrase)?;
+                    let passphrase = request.passphrase.map(Zeroizing::new);
                     let _reservation = state.resources.reserve_archive_job()?;
                     let (plan, volumes) =
                         plan_session_archive(request.volumes, state, &cancelled)?;
@@ -4745,7 +4650,7 @@ fn handle(
                     }
                     let selected_path =
                         archive::normalize_archive_path(&request.selected_path)?;
-                    let passphrase = validated_archive_passphrase(request.passphrase)?;
+                    let passphrase = request.passphrase.map(Zeroizing::new);
                     let _reservation = state.resources.reserve_archive_job()?;
                     let (plan, volumes) =
                         plan_session_archive(request.volumes, state, &cancelled)?;
@@ -4761,7 +4666,7 @@ fn handle(
                             &plan.set_identity,
                             &selected_path,
                             request.expected_output_size,
-                        )?;
+                        );
                         if state
                             .raw_composites
                             .lock()
@@ -4822,7 +4727,7 @@ fn handle(
                         &plan.set_identity,
                         &member.relative_path,
                         member.exact_size,
-                    )?;
+                    );
                     let parts = member
                         .ranges
                         .into_iter()
@@ -4940,7 +4845,7 @@ fn handle(
                         &plan.set_identity,
                         &member.relative_path,
                         member.exact_size,
-                    )?;
+                    );
                     let parts = member
                         .ranges
                         .into_iter()
@@ -4997,7 +4902,7 @@ fn handle(
             match serde_json::from_slice::<ArchiveNestedCatalogRequest>(body)
                 .map_err(|_| "archive_volume_invalid")
                 .and_then(|request| {
-                    let passphrase = validated_archive_passphrase(request.passphrase)?;
+                    let passphrase = request.passphrase.map(Zeroizing::new);
                     let runtime = state
                         .archive_runtime
                         .as_ref()
@@ -5067,7 +4972,7 @@ fn handle(
             match serde_json::from_slice::<ArchiveNestedExtractionRequest>(body)
                 .map_err(|_| "archive_volume_invalid")
                 .and_then(|request| {
-                    let passphrase = validated_archive_passphrase(request.passphrase)?;
+                    let passphrase = request.passphrase.map(Zeroizing::new);
                     if request.expected_output_size == 0
                         || request.expected_output_size
                             > archive_runtime::MAX_ARCHIVE_OUTPUT_BYTES
@@ -5455,7 +5360,6 @@ fn handle(
                             observability::Level::Info,
                             "par2.staging.started",
                             "PAR2 source staging started",
-                            None,
                             &[observability::Field::unsigned(
                                 "item_count",
                                 partial_sources.len() as u64,
@@ -5473,25 +5377,20 @@ fn handle(
                             true,
                             &cancelled,
                             |segment| {
-                                processed_source_bytes = processed_source_bytes
-                                    .saturating_add(segment.bytes().len() as u64);
+                                processed_source_bytes += segment.bytes().len() as u64;
                                 if observe_staging && processed_source_bytes >= next_progress {
                                     observability::emit(
                                         observability::Detail::Normal,
                                         observability::Level::Info,
                                         "par2.staging.progress",
                                         "PAR2 source staging progressed",
-                                        None,
                                         &[observability::Field::unsigned(
                                             "transferred_bytes",
                                             processed_source_bytes,
                                         )],
                                     );
-                                    next_progress = processed_source_bytes
-                                        .checked_div(progress_step)
-                                        .unwrap_or(0)
-                                        .saturating_add(1)
-                                        .saturating_mul(progress_step);
+                                    next_progress =
+                                        (processed_source_bytes / progress_step + 1) * progress_step;
                                 }
                                 if partial_stage.is_none() {
                                     let exact_size = segment.total_size;
@@ -5543,9 +5442,6 @@ fn handle(
                                     continue;
                                 }
                                 let known = entry.get_mut();
-                                if known.len() != mapping.valid_slices.len() {
-                                    return Err("par2_source_evidence_invalid");
-                                }
                                 for (known, valid) in
                                     known.iter_mut().zip(&mapping.valid_slices)
                                 {
@@ -5564,7 +5460,6 @@ fn handle(
                             observability::Level::Info,
                             "par2.staging.completed",
                             "PAR2 source staging completed",
-                            None,
                             &[
                                 observability::Field::unsigned(
                                     "transferred_bytes",
@@ -5698,7 +5593,7 @@ fn handle(
                     let source = raw_composite::RawCompositeSource::from_plan(
                         plan.clone(),
                         file_identities,
-                    )?;
+                    );
                     let (identity, exact_size) = state
                         .raw_composites
                         .lock()
@@ -5796,8 +5691,7 @@ fn handle(
                     if request.expected_size != lease.source.exact_size() {
                         return Err("invalid_raw_composite_range");
                     }
-                    let budget = u64::try_from(inspect::MAX_STRUCTURAL_END_BYTES)
-                        .map_err(|_| "container_probe_budget")?;
+                    let budget = inspect::MAX_STRUCTURAL_END_BYTES as u64;
                     let read = |offset, length| {
                         lease.source.read_at(
                             offset,
@@ -6016,8 +5910,7 @@ fn handle(
                     );
                     EngineState::increment_by(
                         &state.salvage_holes_total,
-                        u64::try_from(salvaged_holes)
-                            .expect("session salvage hole count fits u64"),
+                        salvaged_holes as u64,
                     );
                     state.persist_session_checkpoints(
                         &lease.recreation_key,
@@ -6167,22 +6060,53 @@ struct RuntimePaths {
 }
 
 fn runtime_paths_from(arguments: &[String]) -> Result<RuntimePaths, ()> {
-    match arguments {
+    let [
+        socket_flag,
+        socket,
+        data_flag,
+        local_data,
+        artifact_flag,
+        artifact_data,
+        memory_cache_flag,
+        memory_cache_bytes,
+        disk_cache_flag,
+        disk_cache_bytes,
+        minimum_free_flag,
+        minimum_free_disk_bytes,
+        maximum_connections_flag,
+        maximum_nntp_connections,
+        tail @ ..,
+    ] = arguments
+    else {
+        return Err(());
+    };
+    if socket_flag != "--socket"
+        || data_flag != "--local-data-dir"
+        || artifact_flag != "--artifact-dir"
+        || memory_cache_flag != "--memory-cache-bytes"
+        || disk_cache_flag != "--disk-cache-bytes"
+        || minimum_free_flag != "--minimum-free-disk-bytes"
+        || maximum_connections_flag != "--maximum-nntp-connections"
+    {
+        return Err(());
+    }
+    let mut paths = RuntimePaths {
+        socket: socket.clone(),
+        local_data: local_data.clone(),
+        artifact_data: artifact_data.clone(),
+        memory_cache_bytes: memory_cache_bytes.parse().map_err(|_| ())?,
+        disk_cache_bytes: disk_cache_bytes.parse().map_err(|_| ())?,
+        minimum_free_disk_bytes: minimum_free_disk_bytes.parse().map_err(|_| ())?,
+        maximum_nntp_connections: maximum_nntp_connections.parse().map_err(|_| ())?,
+        maximum_spool_bytes: DEFAULT_SPOOL_BYTES,
+        maximum_archive_jobs: DEFAULT_ARCHIVE_JOBS,
+        maximum_repair_jobs: DEFAULT_REPAIR_JOBS,
+        par2_binary: None,
+        libarchive_library: None,
+        parser_only: true,
+    };
+    match tail {
         [
-            socket_flag,
-            socket,
-            data_flag,
-            local_data,
-            artifact_flag,
-            artifact_data,
-            memory_cache_flag,
-            memory_cache_bytes,
-            disk_cache_flag,
-            disk_cache_bytes,
-            minimum_free_flag,
-            minimum_free_disk_bytes,
-            maximum_connections_flag,
-            maximum_nntp_connections,
             spool_flag,
             maximum_spool_bytes,
             archive_jobs_flag,
@@ -6193,78 +6117,23 @@ fn runtime_paths_from(arguments: &[String]) -> Result<RuntimePaths, ()> {
             par2_binary,
             libarchive_flag,
             libarchive_library,
-        ] if socket_flag == "--socket"
-            && data_flag == "--local-data-dir"
-            && artifact_flag == "--artifact-dir"
-            && memory_cache_flag == "--memory-cache-bytes"
-            && disk_cache_flag == "--disk-cache-bytes"
-            && minimum_free_flag == "--minimum-free-disk-bytes"
-            && maximum_connections_flag == "--maximum-nntp-connections"
-            && spool_flag == "--spool-max-bytes"
+        ] if spool_flag == "--spool-max-bytes"
             && archive_jobs_flag == "--archive-jobs"
             && repair_jobs_flag == "--repair-jobs"
             && par2_flag == "--par2-binary"
             && libarchive_flag == "--libarchive-library" =>
         {
-            Ok(RuntimePaths {
-                socket: socket.clone(),
-                local_data: local_data.clone(),
-                artifact_data: artifact_data.clone(),
-                memory_cache_bytes: memory_cache_bytes.parse().map_err(|_| ())?,
-                disk_cache_bytes: disk_cache_bytes.parse().map_err(|_| ())?,
-                minimum_free_disk_bytes: minimum_free_disk_bytes.parse().map_err(|_| ())?,
-                maximum_nntp_connections: maximum_nntp_connections.parse().map_err(|_| ())?,
-                maximum_spool_bytes: maximum_spool_bytes.parse().map_err(|_| ())?,
-                maximum_archive_jobs: maximum_archive_jobs.parse().map_err(|_| ())?,
-                maximum_repair_jobs: maximum_repair_jobs.parse().map_err(|_| ())?,
-                par2_binary: Some(par2_binary.clone()),
-                libarchive_library: Some(libarchive_library.clone()),
-                parser_only: false,
-            })
+            paths.maximum_spool_bytes = maximum_spool_bytes.parse().map_err(|_| ())?;
+            paths.maximum_archive_jobs = maximum_archive_jobs.parse().map_err(|_| ())?;
+            paths.maximum_repair_jobs = maximum_repair_jobs.parse().map_err(|_| ())?;
+            paths.par2_binary = Some(par2_binary.clone());
+            paths.libarchive_library = Some(libarchive_library.clone());
+            paths.parser_only = false;
         }
-        [
-            socket_flag,
-            socket,
-            data_flag,
-            local_data,
-            artifact_flag,
-            artifact_data,
-            memory_cache_flag,
-            memory_cache_bytes,
-            disk_cache_flag,
-            disk_cache_bytes,
-            minimum_free_flag,
-            minimum_free_disk_bytes,
-            maximum_connections_flag,
-            maximum_nntp_connections,
-            parser_only,
-        ] if socket_flag == "--socket"
-            && data_flag == "--local-data-dir"
-            && artifact_flag == "--artifact-dir"
-            && memory_cache_flag == "--memory-cache-bytes"
-            && disk_cache_flag == "--disk-cache-bytes"
-            && minimum_free_flag == "--minimum-free-disk-bytes"
-            && maximum_connections_flag == "--maximum-nntp-connections"
-            && parser_only == "--parser-only" =>
-        {
-            Ok(RuntimePaths {
-                socket: socket.clone(),
-                local_data: local_data.clone(),
-                artifact_data: artifact_data.clone(),
-                memory_cache_bytes: memory_cache_bytes.parse().map_err(|_| ())?,
-                disk_cache_bytes: disk_cache_bytes.parse().map_err(|_| ())?,
-                minimum_free_disk_bytes: minimum_free_disk_bytes.parse().map_err(|_| ())?,
-                maximum_nntp_connections: maximum_nntp_connections.parse().map_err(|_| ())?,
-                maximum_spool_bytes: DEFAULT_SPOOL_BYTES,
-                maximum_archive_jobs: DEFAULT_ARCHIVE_JOBS,
-                maximum_repair_jobs: DEFAULT_REPAIR_JOBS,
-                par2_binary: None,
-                libarchive_library: None,
-                parser_only: true,
-            })
-        }
-        _ => Err(()),
+        [parser_only] if parser_only == "--parser-only" => {}
+        _ => return Err(()),
     }
+    Ok(paths)
 }
 
 fn main() {
@@ -6308,7 +6177,6 @@ fn main() {
             observability::Level::Critical,
             "native.startup.failed",
             "Native engine startup failed",
-            None,
             &[observability::Field::token(
                 "error_code",
                 "invalid_arguments",
@@ -6322,7 +6190,6 @@ fn main() {
             observability::Level::Critical,
             "native.startup.failed",
             "Native engine startup failed",
-            None,
             &[observability::Field::token(
                 "error_code",
                 "initialization_failure",
@@ -6413,7 +6280,6 @@ fn run_engine(paths: RuntimePaths) -> Result<(), ()> {
                     observability::Level::Error,
                     "native.socket.failed",
                     "Native engine socket failed",
-                    None,
                     &[observability::Field::token("error_code", "socket_failure")],
                 );
                 state.draining.store(true, Ordering::Release);
@@ -6432,7 +6298,6 @@ fn run_engine(paths: RuntimePaths) -> Result<(), ()> {
                 observability::Level::Error,
                 "native.worker.failed",
                 "Native engine worker failed",
-                None,
                 &[observability::Field::token("error_code", "worker_panic")],
             );
         }
@@ -6443,7 +6308,6 @@ fn run_engine(paths: RuntimePaths) -> Result<(), ()> {
             observability::Level::Warning,
             "native.shutdown.timeout",
             "Native engine shutdown timed out",
-            None,
             &[
                 observability::Field::token("error_code", "detached_work_timeout"),
                 observability::Field::unsigned(
@@ -6524,11 +6388,11 @@ mod request_tests {
         is_par2_discovery_request, is_par2_repair_request, is_par2_source_map_request,
         is_raw_composite_open_request, is_session_archive_catalog_request,
         is_session_archive_open_request, materialization_native_inspect_identity,
-        maximum_request_body, observe_archive_probe_failure, parse_nzb,
+        maximum_request_body, missing_slice_count, observe_archive_probe_failure, parse_nzb,
         parse_nzb_with_metadata_limit, raw_composite_native_inspect_identity,
         raw_composite_read_identity, raw_composite_reader_close_identities,
         raw_composite_reader_open_identity, request_releases_allocator_slack, run_request_worker,
-        validate_par2_files, validated_archive_passphrase,
+        validate_par2_files,
     };
     use md5::Md5;
     use sha2::{Digest, Sha256};
@@ -7872,6 +7736,25 @@ mod request_tests {
     }
 
     #[test]
+    fn missing_slice_count_merges_overlapping_posting_ranges() {
+        let postings = [1, 1, 2, 4]
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| super::session::SessionPosting {
+                number: (index + 1) as u64,
+                declared_encoded_bytes: bytes,
+                message_id: String::new(),
+                fallback_postings: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            missing_slice_count(&postings, [true, false, true, true], 4),
+            Ok(2)
+        );
+    }
+
+    #[test]
     fn par2_validation_has_no_sixty_four_volume_shape_assumption() {
         let mut files = (0..65)
             .map(|index| ArchivePlanVolumeRequest {
@@ -8046,28 +7929,6 @@ mod request_tests {
     }
 
     #[test]
-    fn archive_passphrases_preserve_supported_utf8_bytes() {
-        assert_eq!(
-            validated_archive_passphrase(Some(String::new()))
-                .unwrap()
-                .as_ref()
-                .map(|value| value.as_str()),
-            Some("")
-        );
-        assert_eq!(
-            validated_archive_passphrase(Some("line one\nline two".to_owned()))
-                .unwrap()
-                .as_ref()
-                .map(|value| value.as_str()),
-            Some("line one\nline two")
-        );
-        assert_eq!(
-            validated_archive_passphrase(Some("bad\0secret".to_owned())).err(),
-            Some("archive_passphrase_invalid")
-        );
-    }
-
-    #[test]
     fn archive_requests_ignore_unconsumed_fields() {
         serde_json::from_value::<super::ArchiveNestedCatalogRequest>(serde_json::json!({
             "volumes": [],
@@ -8132,7 +7993,6 @@ mod request_tests {
             let identity = registered["provider_set_id"]
                 .as_str()
                 .expect("provider set random identity");
-            assert!(super::provider::valid_identity(identity));
             assert_eq!(registered["generation"], generation);
             identities.push(identity.to_owned());
         }
@@ -10699,12 +10559,16 @@ mod request_tests {
                 reader.read_line(&mut command).expect("read pipelined BODY");
                 commands.push(command);
             }
-            writer
-                .write_all(&yenc_part_article(b"DATA", 1, 8))
-                .expect("write first staging article");
-            writer
-                .write_all(&yenc_part_article(b"MORE", 5, 8))
-                .expect("write second staging article");
+            for command in &commands {
+                let (bytes, begin) = if command.contains("first@example.test") {
+                    (b"DATA".as_slice(), 1)
+                } else {
+                    (b"MORE".as_slice(), 5)
+                };
+                writer
+                    .write_all(&yenc_part_article(bytes, begin, 8))
+                    .expect("write staging article");
+            }
             commands
         });
         let root = temporary_directory("par2-staging-pipeline");
@@ -10771,13 +10635,15 @@ mod request_tests {
             .expect("stage pipelined postings");
 
         assert_eq!(staged, b"DATAMORE");
+        let mut commands = server
+            .join()
+            .expect("join staging NNTP server")
+            .into_iter()
+            .map(|command| command.trim().to_owned())
+            .collect::<Vec<_>>();
+        commands.sort_unstable();
         assert_eq!(
-            server
-                .join()
-                .expect("join staging NNTP server")
-                .iter()
-                .map(|command| command.trim())
-                .collect::<Vec<_>>(),
+            commands,
             ["BODY <first@example.test>", "BODY <second@example.test>"]
         );
         let mut consume = |_segment: &super::cache::VerifiedSegment| Ok(());

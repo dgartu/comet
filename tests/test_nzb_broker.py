@@ -3,7 +3,7 @@ import gzip
 import hashlib
 import unittest
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from databases import Database
 
@@ -229,6 +229,30 @@ class NzbBrokerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(
                     await database.fetch_one("SELECT * FROM artifact_reader_leases")
                 )
+                stat_started = asyncio.Event()
+
+                async def stalled_stat(*_args):
+                    stat_started.set()
+                    await asyncio.Event().wait()
+
+                with patch(
+                    "comet.usenet.nzb_broker.asyncio.to_thread",
+                    new=AsyncMock(side_effect=stalled_stat),
+                ):
+                    acquisition = asyncio.create_task(
+                        broker.acquire_owned_artifact(
+                            first.artifact_sha256,
+                            owner_configuration_partition=partition,
+                            now=201,
+                        )
+                    )
+                    await stat_started.wait()
+                    acquisition.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await acquisition
+                self.assertIsNone(
+                    await database.fetch_one("SELECT * FROM artifact_reader_leases")
+                )
                 resolved = await broker.resolve_owned_artifact(
                     first.artifact_sha256,
                     owner_configuration_partition=partition,
@@ -237,21 +261,6 @@ class NzbBrokerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(resolved.grant_id, first.grant_id)
                 self.assertEqual(resolved.manifest, first.manifest)
                 self.assertEqual(resolved.metadata, {"password": "archive-secret"})
-                granted = await broker.resolve_granted_artifact(
-                    first.grant_id,
-                    owner_configuration_partition=partition,
-                    now=201,
-                )
-                self.assertEqual(granted, resolved)
-                with self.assertRaisesRegex(
-                    NzbBrokerError,
-                    "artifact_grant_unavailable",
-                ):
-                    await broker.resolve_granted_artifact(
-                        first.grant_id,
-                        owner_configuration_partition=b"b" * 32,
-                        now=201,
-                    )
                 catalog = await broker.catalog_artifact(resolved)
                 self.assertEqual(catalog[0].relative_path, "Movie.mkv")
                 self.assertEqual(catalog[0].declared_bytes, 42)

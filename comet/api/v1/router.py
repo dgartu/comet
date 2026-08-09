@@ -14,7 +14,7 @@ from comet.api.cookie_policy import secure_session_cookie
 from comet.api.login_rate_limit import (
     LOGIN_RETRY_AFTER_SECONDS,
     admit_login_attempt,
-    valid_login_field,
+    login_field_bytes,
 )
 from comet.api.v1.cometnet import router as cometnet_router
 from comet.api.v1.contracts import (
@@ -185,7 +185,7 @@ def _decode_audit_cursor(cursor: str) -> tuple[float, str]:
         decoded = orjson.loads(base64.b64decode(padded, altchars=b"-_", validate=True))
         changed_at = decoded["changed_at"]
         identifier = decoded["id"]
-    except (KeyError, TypeError, ValueError, orjson.JSONDecodeError):
+    except (KeyError, TypeError, ValueError):
         raise ApiProblem(
             status_code=422,
             code="invalid_cursor",
@@ -221,9 +221,9 @@ async def login(request: Request, body: LoginRequest):
             message="Too many login attempts were made.",
             headers={"Retry-After": str(LOGIN_RETRY_AFTER_SECONDS)},
         )
-    if not valid_login_field(body.password) or not secrets.compare_digest(
-        body.password.encode("utf-8"),
-        settings.ADMIN_DASHBOARD_PASSWORD.encode("utf-8"),
+    password = login_field_bytes(body.password)
+    if password is None or not secrets.compare_digest(
+        password, settings.ADMIN_DASHBOARD_PASSWORD.encode("utf-8")
     ):
         raise ApiProblem(
             status_code=401,
@@ -292,9 +292,9 @@ async def configure_login(request: Request, body: LoginRequest):
             message="Too many login attempts were made.",
             headers={"Retry-After": str(LOGIN_RETRY_AFTER_SECONDS)},
         )
-    if not valid_login_field(body.password) or not secrets.compare_digest(
-        body.password.encode("utf-8"),
-        settings.CONFIGURE_PAGE_PASSWORD.encode("utf-8"),
+    password = login_field_bytes(body.password)
+    if password is None or not secrets.compare_digest(
+        password, settings.CONFIGURE_PAGE_PASSWORD.encode("utf-8")
     ):
         raise ApiProblem(
             status_code=401,

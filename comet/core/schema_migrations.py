@@ -115,10 +115,8 @@ async def run_schema_migrations(
     for version, migration in MIGRATIONS:
         if version in applied:
             continue
-        applied_migration = await migration(ctx)
+        await migration(ctx)
         await _checkpoint_sqlite(ctx)
-        if applied_migration is False:
-            break
         await _record_schema_migration(ctx, version)
         applied_count += 1
     return applied_count
@@ -420,9 +418,7 @@ async def _get_sqlite_journal_mode(ctx: MigrationContext) -> str | None:
         return ctx.sqlite_journal_mode
 
     row = await ctx.database.fetch_one("PRAGMA journal_mode", force_primary=True)
-    if row is None or row["journal_mode"] is None:
-        raise RuntimeError("SQLite journal mode is unavailable")
-    ctx.sqlite_journal_mode = str(row["journal_mode"]).lower()
+    ctx.sqlite_journal_mode = row["journal_mode"].lower()
     return ctx.sqlite_journal_mode
 
 
@@ -447,7 +443,7 @@ async def _execute_large_table_update(
     where_clauses: list[str],
     params: dict[str, object] | None = None,
 ):
-    params = {} if params is None else dict(params)
+    params = {} if params is None else params
     set_sql = ", ".join(set_clauses)
     where_sql = " OR ".join(where_clauses)
 
@@ -487,8 +483,6 @@ async def _execute_large_table_update(
             force_primary=True,
         )
 
-        if batch_row is None:
-            raise RuntimeError("SQLite migration batch query returned no row")
         if not batch_row["row_count"]:
             break
 
@@ -508,7 +502,7 @@ async def _execute_large_table_update(
             batch_params,
         )
 
-        last_rowid = int(batch_row["max_rowid"])
+        last_rowid = batch_row["max_rowid"]
         batches += 1
         if batches % SQLITE_LARGE_MUTATION_CHECKPOINT_INTERVAL == 0:
             await _checkpoint_sqlite(ctx)
@@ -802,7 +796,7 @@ async def _replace_table(
     table_name: str,
     create_sql: str,
     copy_sql: str,
-    index_sql: list[str] | None = None,
+    index_sql: tuple[str, ...] = (),
 ):
     temp_name = f"{table_name}__new"
     await ctx.database.execute(f"DROP TABLE IF EXISTS {temp_name}")
@@ -812,7 +806,7 @@ async def _replace_table(
         await ctx.database.execute(copy_sql.format(table_name=temp_name))
         await ctx.database.execute(f"DROP TABLE {table_name}")
         await ctx.database.execute(f"ALTER TABLE {temp_name} RENAME TO {table_name}")
-        for statement in index_sql or []:
+        for statement in index_sql:
             await ctx.database.execute(statement)
 
     ctx.table_exists_cache[temp_name] = False
@@ -831,7 +825,7 @@ async def _replace_managed_table(
         spec.table_name,
         spec.create_sql,
         copy_sql,
-        index_sql=list(_render_index_sql(spec)),
+        index_sql=_render_index_sql(spec),
     )
 
 
@@ -974,7 +968,6 @@ async def _migration_cleanup_legacy_storage(ctx: MigrationContext):
         await _drop_table_if_exists(ctx, table_name)
 
     await _cleanup_legacy_storage_columns(ctx)
-    return True
 
 
 async def _migration_remove_dead_kodi_columns(ctx: MigrationContext):
@@ -987,22 +980,18 @@ async def _migration_remove_dead_kodi_columns(ctx: MigrationContext):
 
     if dropped_any and ctx.is_sqlite:
         await _checkpoint_sqlite(ctx)
-    return True
 
 
 async def _migration_series_episode_index(ctx: MigrationContext):
     await _ensure_managed_table(ctx, SERIES_EPISODE_INDEX_TABLE_SPEC)
-    return True
 
 
 async def _migration_series_episode_index_refresh(ctx: MigrationContext):
     await _ensure_managed_table(ctx, SERIES_EPISODE_INDEX_REFRESH_TABLE_SPEC)
-    return True
 
 
 async def _migration_imdb_title_lookup(ctx: MigrationContext):
     await _ensure_managed_table(ctx, IMDB_TITLE_LOOKUP_TABLE_SPEC)
-    return True
 
 
 async def _migration_tmdb_title_aliases(ctx: MigrationContext):
@@ -1015,7 +1004,6 @@ async def _migration_tmdb_title_aliases(ctx: MigrationContext):
         """,
         {"imdb_prefix": "imdb:%"},
     )
-    return True
 
 
 async def _migration_original_indexer_titles(ctx: MigrationContext):
@@ -1029,23 +1017,20 @@ async def _migration_original_indexer_titles(ctx: MigrationContext):
         """,
         {"imdb_prefix": "imdb:%", "kitsu_prefix": "kitsu:%"},
     )
-    return True
 
 
 async def _migration_debrid_account_cleanup_index(ctx: MigrationContext):
     await _ensure_managed_table(ctx, TORRENTS_TABLE_SPEC)
-    return True
 
 
 async def _migration_media_demand_scrape_coverage(ctx: MigrationContext):
     await _ensure_managed_table(ctx, MEDIA_DEMAND_TABLE_SPEC)
-    return True
 
 
 async def _migration_remove_legacy_torrent_storage(ctx: MigrationContext):
     """Finish the homogeneous cutover to transport-neutral release storage."""
     if not await _table_exists(ctx, "torrents"):
-        return True
+        return
 
     await _ensure_managed_table(ctx, RELEASE_CANDIDATES_TABLE_SPEC)
     await _ensure_managed_table(ctx, CANDIDATE_IDENTITIES_TABLE_SPEC)
@@ -1073,10 +1058,6 @@ async def _migration_remove_legacy_torrent_storage(ctx: MigrationContext):
     await backfill_legacy_torrents(ctx.database)
     await _ensure_release_storage_indexes(ctx)
     await _drop_table_if_exists(ctx, "torrents")
-
-    if await _table_exists(ctx, "torrents"):
-        raise RuntimeError("legacy torrent storage still exists after cutover")
-    return True
 
 
 async def _ensure_release_storage_indexes(ctx: MigrationContext) -> None:
@@ -1182,7 +1163,6 @@ async def _migration_usenet_release_schema(ctx: MigrationContext):
     await _ensure_operator_schema(ctx)
     await _ensure_operations_schema(ctx)
     await _upgrade_download_link_cache(ctx)
-    return True
 
 
 async def _migration_candidate_identity_scope(ctx: MigrationContext):
@@ -1279,7 +1259,6 @@ async def _migration_candidate_identity_scope(ctx: MigrationContext):
     for index_sql in _render_index_sql(CANDIDATE_IDENTITIES_TABLE_SPEC):
         await _ensure_index(ctx, index_sql)
     await _migration_remove_legacy_torrent_storage(ctx)
-    return True
 
 
 async def _migration_active_connection_timestamps(ctx: MigrationContext):
@@ -1294,7 +1273,6 @@ async def _migration_active_connection_timestamps(ctx: MigrationContext):
                     USING updated_at::DOUBLE PRECISION
             """
         )
-    return True
 
 
 async def _migration_private_torrent_flag(ctx: MigrationContext):
@@ -1304,7 +1282,41 @@ async def _migration_private_torrent_flag(ctx: MigrationContext):
         "is_private",
         "is_private BOOLEAN NOT NULL DEFAULT FALSE",
     )
-    return True
+
+
+async def _migration_debrid_media_info(ctx: MigrationContext):
+    await _add_column_if_missing(
+        ctx,
+        "debrid_availability",
+        "media_info_json",
+        "media_info_json TEXT",
+    )
+
+
+async def _migration_remove_manual_nzb_imports(ctx: MigrationContext):
+    await ctx.database.execute(
+        """
+        DELETE FROM rendered_release_candidates
+        WHERE external_candidate_id LIKE :manual_prefix
+        """,
+        {"manual_prefix": "manual:%"},
+    )
+    await ctx.database.execute(
+        """
+        DELETE FROM release_candidates
+        WHERE candidate_id IN (
+            SELECT candidate_id
+            FROM release_locators
+            WHERE origin_kind IN ('manual_upload', 'manual_url')
+        )
+        """
+    )
+    await ctx.database.execute(
+        """
+        DELETE FROM provider_governor_windows
+        WHERE operation IN ('nzb_manual_import', 'nzb_manual_selection')
+        """
+    )
 
 
 MIGRATIONS = [
@@ -1338,4 +1350,6 @@ MIGRATIONS = [
         _migration_active_connection_timestamps,
     ),
     ("2026080801_private_torrent_flag", _migration_private_torrent_flag),
+    ("2026080802_remove_manual_nzb_imports", _migration_remove_manual_nzb_imports),
+    ("2026080901_debrid_media_info", _migration_debrid_media_info),
 ]

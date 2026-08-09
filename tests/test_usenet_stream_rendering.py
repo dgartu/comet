@@ -628,7 +628,7 @@ class UsenetStreamRenderingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(intent.candidate_id, candidate_id)
         self.assertEqual(intent.provider_configuration_id, provider_id)
-        self.assertEqual(intent.locator_ids, rendered_locator_ids[:3])
+        self.assertEqual(intent.locator_ids, rendered_locator_ids)
         resolve_artifact.assert_not_awaited()
 
     def test_renders_only_a_committed_valid_nzbdav_provider_option(self):

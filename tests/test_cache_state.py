@@ -20,7 +20,6 @@ class CacheStateManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, CacheState.FIRST_SEARCH)
         self.assertEqual(result.decision, ScrapeDecision.SCRAPE_FOREGROUND)
         self.assertTrue(result.has_cached_torrents)
-        self.assertIsNone(result.scope_scraped_at)
 
     async def test_fresh_exact_scope_uses_reusable_results(self):
         manager = CacheStateManager("tt123:2")
@@ -33,7 +32,6 @@ class CacheStateManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, CacheState.FRESH)
         self.assertEqual(result.decision, ScrapeDecision.USE_CACHE)
-        self.assertEqual(result.scope_scraped_at, 1_000)
 
     async def test_stale_exact_scope_refreshes_in_background(self):
         manager = CacheStateManager("tt123:2")

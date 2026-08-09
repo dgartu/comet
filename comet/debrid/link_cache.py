@@ -11,6 +11,7 @@ from comet.core.database import (
     build_scope_params,
 )
 from comet.observability import log
+from comet.utils.text import has_ascii_control
 
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _MAX_DOWNLOAD_URL_BYTES = 8 * 1024
@@ -63,10 +64,8 @@ def valid_download_url(value: object) -> str | None:
         parsed = urlsplit(value)
         if (
             not 1 <= len(encoded) <= _MAX_DOWNLOAD_URL_BYTES
-            or any(
-                character.isspace() or ord(character) < 32 or ord(character) == 127
-                for character in value
-            )
+            or has_ascii_control(value)
+            or any(character.isspace() for character in value)
             or "\\" in value
             or _MALFORMED_PERCENT.search(value)
             or parsed.scheme not in {"http", "https"}
@@ -76,7 +75,7 @@ def valid_download_url(value: object) -> str | None:
         ):
             return None
         _ = parsed.port
-    except (ValueError, UnicodeError):
+    except ValueError:
         return None
     return value
 

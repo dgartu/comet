@@ -1,6 +1,5 @@
 import base64
 import json
-from functools import cache
 
 from comet.core.models import settings
 from comet.core.provider_json import is_success_status
@@ -8,7 +7,6 @@ from comet.discovery.torrent_base import TorrentDiscoveryAdapter
 from comet.discovery.torrent_models import ScrapeRequest
 
 
-@cache
 def _encoded_user_data(api_password: str, live_search: bool | None) -> str:
     config = {
         "ap": api_password,
@@ -25,12 +23,11 @@ class MediaFusionScraper(TorrentDiscoveryAdapter):
 
     def __init__(
         self,
-        manager,
         session,
         url: str,
         password: str | None = None,
     ):
-        super().__init__(manager, session, url)
+        super().__init__(session, url)
         self.headers = {
             "encoded_user_data": _encoded_user_data(
                 "" if password is None else password,

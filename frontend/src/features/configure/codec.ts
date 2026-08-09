@@ -1,9 +1,12 @@
 import { deflateSync, inflateSync } from "fflate";
 import { z } from "zod";
-import { CONFIGURATION_DICTIONARY_V1, type ConfigModel } from "../../api/generated/contracts";
+import {
+  CONFIGURATION_DICTIONARY_V1,
+  type ConfigModel,
+  MAX_CONFIG_JSON_BYTES,
+  MAX_CONFIG_SEGMENT_BYTES,
+} from "../../api/generated/contracts";
 
-const MAX_JSON_BYTES = 24 * 1024;
-const MAX_ENCODED_BYTES = 32 * 1024;
 const COMPRESSED_PREFIX = "z1.";
 const COMPRESSION_DICTIONARY = new TextEncoder().encode(CONFIGURATION_DICTIONARY_V1);
 const configurationDocument = z.looseObject({
@@ -35,7 +38,7 @@ export function encodeConfiguration(
   configuration: SerializableConfiguration,
 ): EncodedConfiguration {
   const bytes = new TextEncoder().encode(JSON.stringify(configuration));
-  if (bytes.length > MAX_JSON_BYTES) {
+  if (bytes.length > MAX_CONFIG_JSON_BYTES) {
     throw new Error("configuration_too_large");
   }
   const legacy = encodeBase64Url(bytes);
@@ -43,23 +46,20 @@ export function encodeConfiguration(
     deflateSync(bytes, { dictionary: COMPRESSION_DICTIONARY, level: 9 }),
   )}`;
   const encoded = compressed.length < legacy.length ? compressed : legacy;
-  if (encoded.length > MAX_ENCODED_BYTES) {
-    throw new Error("configuration_too_large");
-  }
   return { encoded, warnAboutRequestLine: encoded.length > 8 * 1024 };
 }
 
 export function decodeConfiguration(value: string): ConfigModel {
-  if (value.length > MAX_ENCODED_BYTES) {
+  if (value.length > MAX_CONFIG_SEGMENT_BYTES) {
     throw new Error("configuration_too_large");
   }
   const bytes = value.startsWith(COMPRESSED_PREFIX)
     ? inflateSync(decodeBase64(value.slice(COMPRESSED_PREFIX.length)), {
         dictionary: COMPRESSION_DICTIONARY,
-        out: new Uint8Array(MAX_JSON_BYTES + 1),
+        out: new Uint8Array(MAX_CONFIG_JSON_BYTES + 1),
       })
     : decodeBase64(value);
-  if (bytes.length > MAX_JSON_BYTES) {
+  if (bytes.length > MAX_CONFIG_JSON_BYTES) {
     throw new Error("configuration_too_large");
   }
   const document: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));

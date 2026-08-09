@@ -1,25 +1,10 @@
-import asyncio
 import unittest
 from unittest.mock import patch
 
-from comet.utils.memory import periodic_memory_trim, trim_process_memory
+from comet.utils.memory import trim_process_memory
 
 
-class MemoryUtilityLifecycleTests(unittest.IsolatedAsyncioTestCase):
-    async def test_disabled_periodic_trim_returns_without_spawning_work(self):
-        with patch("comet.utils.memory.asyncio.to_thread") as to_thread:
-            await periodic_memory_trim(0)
-
-        to_thread.assert_not_called()
-
-    async def test_periodic_trim_propagates_cancellation(self):
-        task = asyncio.create_task(periodic_memory_trim(3_600))
-        await asyncio.sleep(0)
-        task.cancel()
-
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-
+class MemoryUtilityLifecycleTests(unittest.TestCase):
     def test_active_mimalloc_precedes_platform_fallback(self):
         with (
             patch("comet.utils.memory.gc.collect") as collect,

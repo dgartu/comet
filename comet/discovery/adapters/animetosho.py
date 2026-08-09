@@ -9,9 +9,10 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
-from comet.core.provider_json import is_success_status
+from comet.core.provider_json import MAX_PROVIDER_JSON_BYTES, is_success_status
 from comet.core.sources import (
     MAX_REMOTE_GUID_LENGTH,
+    MAX_SIGNED_BIGINT,
     TORRENT_PROVIDER_KINDS,
     LocatorKind,
     LocatorPolicy,
@@ -24,6 +25,7 @@ from comet.discovery.adapters.newznab import (
     NewznabFeedItem,
     _bounded_decimal,
     _parse_caps,
+    _read_bounded,
     map_newznab_nzb_item,
     newznab_item_published_at_ms,
     newznab_item_size,
@@ -31,53 +33,22 @@ from comet.discovery.adapters.newznab import (
 )
 from comet.discovery.models import DiscoveryBatch, DiscoveryContext, MediaQuery
 from comet.playback.base import Actionability, ProviderStatus, Readiness
+from comet.usenet.limits import MAX_NZB_DOCUMENT_BYTES
 from comet.usenet.outbound import OutboundUrlError, fetch_http_bytes
+from comet.utils.text import has_ascii_control
 
 _FEED_URL = "https://feed.animetosho.org/api"
-_MAX_NZB_BYTES = 150 * 1024 * 1024
 _INFO_HASH = re.compile(r"[0-9a-fA-F]{40}$")
-_MAX_SEEDERS = (1 << 31) - 1
 PUBLIC_GOVERNOR_SCOPE = hashlib.sha256(b"comet-public-provider-v1\0animetosho").digest()
 
 
 @dataclass(frozen=True, slots=True)
 class AnimeToshoConfiguration:
     configuration_id: str
-    max_results: int = 150
-    page_size: int = 75
-
-    def __post_init__(self):
-        if (
-            not isinstance(self.configuration_id, str)
-            or not 1 <= len(self.configuration_id) <= 64
-            or any(ord(character) < 32 for character in self.configuration_id)
-        ):
-            raise ValueError("AnimeTosho configuration ID is invalid")
-        if (
-            isinstance(self.max_results, bool)
-            or not isinstance(self.max_results, int)
-            or not 1 <= self.max_results <= 200
-        ):
-            raise ValueError("AnimeTosho result limit is invalid")
-        if (
-            isinstance(self.page_size, bool)
-            or not isinstance(self.page_size, int)
-            or not 1 <= self.page_size <= min(200, self.max_results)
-        ):
-            raise ValueError("AnimeTosho page size is invalid")
 
 
-def animetosho_configuration(
-    configuration_id: str,
-    options: object,
-) -> AnimeToshoConfiguration:
-    if not isinstance(options, dict):
-        raise ValueError("AnimeTosho options must be an object")
-    return AnimeToshoConfiguration(
-        configuration_id,
-        max_results=options.get("maxResults", 150),
-        page_size=options.get("pageSize", 75),
-    )
+_MAX_RESULTS = 150
+_PAGE_SIZE = 75
 
 
 class AnimeToshoAdapter:
@@ -92,10 +63,6 @@ class AnimeToshoAdapter:
         self._configuration = configuration
         self._governor = governor
         self._feed_cache: tuple[str, float, tuple[NewznabFeedItem, ...]] | None = None
-        self._feed_tasks: dict[
-            tuple[str, float | None, asyncio.Event | None],
-            asyncio.Task[tuple[tuple[NewznabFeedItem, ...], bool]],
-        ] = {}
 
     async def validate_config(self) -> ProviderStatus:
         try:
@@ -138,7 +105,7 @@ class AnimeToshoAdapter:
         if search_text is None:
             return DiscoveryBatch(coverage=frozenset(branches))
 
-        items, complete = await self._feed_items(search_text, context)
+        items, complete = await self._feed_items(search_text)
         candidates = []
         for item in items:
             if "bittorrent" in branches:
@@ -156,61 +123,36 @@ class AnimeToshoAdapter:
 
     async def grab(self, remote_guid: str) -> bytes:
         url = _nzb_url(remote_guid)
-        document = await self._request_url(
+        return await self._request_url(
             url,
-            maximum=_MAX_NZB_BYTES,
+            maximum=MAX_NZB_DOCUMENT_BYTES,
             accept="application/x-nzb, application/xml, text/xml",
             operation="animetosho_grab",
             request_limit=8,
         )
-        return document
 
     async def _feed_items(
         self,
         search_text: str,
-        context: DiscoveryContext,
     ) -> tuple[tuple[NewznabFeedItem, ...], bool]:
         loop = asyncio.get_running_loop()
-        if context.cancelled() or (
-            context.hard_deadline is not None and loop.time() >= context.hard_deadline
-        ):
-            return (), False
         cached = self._feed_cache
         if cached is not None and cached[0] == search_text and loop.time() < cached[1]:
             return cached[2], True
-        task_key = (search_text, context.hard_deadline, context.cancellation)
-        task = self._feed_tasks.get(task_key)
-        if task is None:
-            task = asyncio.create_task(self._load_feed_items(search_text, context))
-            self._feed_tasks[task_key] = task
-
-            def discard(completed):
-                self._feed_tasks.pop(task_key, None)
-                if not completed.cancelled():
-                    completed.exception()
-
-            task.add_done_callback(discard)
-        return await asyncio.shield(task)
+        return await self._load_feed_items(search_text)
 
     async def _load_feed_items(
         self,
         search_text: str,
-        context: DiscoveryContext,
     ) -> tuple[tuple[NewznabFeedItem, ...], bool]:
         loop = asyncio.get_running_loop()
         results = []
         offset = 0
         complete = True
-        while offset < self._configuration.max_results:
-            if context.cancelled() or (
-                context.hard_deadline is not None
-                and loop.time() >= context.hard_deadline
-            ):
-                complete = False
-                break
+        while offset < _MAX_RESULTS:
             limit = min(
-                self._configuration.page_size,
-                self._configuration.max_results - offset,
+                _PAGE_SIZE,
+                _MAX_RESULTS - offset,
             )
             payload = await self._request(
                 {
@@ -261,7 +203,7 @@ class AnimeToshoAdapter:
             f"animetosho:torrent:{normalized_hash}".encode()
         ).hexdigest()
         seeders_text = item.attributes.get("seeders")
-        seeders = _bounded_decimal(seeders_text, maximum=_MAX_SEEDERS)
+        seeders = _bounded_decimal(seeders_text, maximum=MAX_SIGNED_BIGINT)
         return ReleaseCandidate(
             candidate_id=f"at1:torrent:{digest}",
             media_id=query.media_id,
@@ -315,6 +257,7 @@ class AnimeToshoAdapter:
     ) -> bytes:
         return await self._request_url(
             _FEED_URL,
+            maximum=MAX_PROVIDER_JSON_BYTES,
             params=params,
             accept="application/xml, text/xml, application/rss+xml",
             operation="animetosho_search",
@@ -325,7 +268,7 @@ class AnimeToshoAdapter:
         self,
         url: str,
         *,
-        maximum: int = _MAX_NZB_BYTES,
+        maximum: int = MAX_NZB_DOCUMENT_BYTES,
         accept: str,
         operation: str,
         request_limit: int,
@@ -346,6 +289,7 @@ class AnimeToshoAdapter:
                     url,
                     max_bytes=maximum,
                     headers={"Accept": accept, "User-Agent": "Comet"},
+                    timeout=None,
                 )
             except OutboundUrlError as exc:
                 raise _outbound_error(exc.http_status) from exc
@@ -365,17 +309,17 @@ class AnimeToshoAdapter:
                 raise NewznabError("provider_unavailable", retryable=True)
             if not is_success_status(response.status):
                 raise NewznabError("provider_response_invalid")
-            return await response.read()
+            return await _read_bounded(response, maximum)
 
 
 def _nzb_token(value: object) -> str | None:
-    if not isinstance(value, str) or not 1 <= len(value) <= 4_096:
+    if not isinstance(value, str) or not value:
         return None
     try:
         parsed = urlsplit(value)
         _ = parsed.port
         encoded = base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
-    except (UnicodeError, ValueError):
+    except ValueError:
         return None
     if (
         parsed.scheme not in {"http", "https"}
@@ -383,10 +327,8 @@ def _nzb_token(value: object) -> str | None:
         or parsed.username is not None
         or parsed.password is not None
         or parsed.fragment
-        or any(
-            character.isspace() or ord(character) < 32 or ord(character) == 127
-            for character in value
-        )
+        or has_ascii_control(value)
+        or any(character.isspace() for character in value)
     ):
         return None
     token = f"atn1:{encoded}"
@@ -394,22 +336,8 @@ def _nzb_token(value: object) -> str | None:
 
 
 def _nzb_url(token: object) -> str:
-    if not isinstance(token, str) or not token.startswith("atn1:") or not token[5:]:
-        raise ValueError("AnimeTosho NZB reference is invalid")
     encoded = token[5:]
-    if any(
-        character
-        not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-        for character in encoded
-    ):
-        raise ValueError("AnimeTosho NZB reference is invalid")
-    try:
-        decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise ValueError("AnimeTosho NZB reference is invalid") from exc
-    if _nzb_token(decoded) != token:
-        raise ValueError("AnimeTosho NZB reference is invalid")
-    return decoded
+    return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
 
 
 def _outbound_error(status: int | None) -> NewznabError:

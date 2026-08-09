@@ -56,7 +56,7 @@ class PlaybackPreparationRepository:
             raise ValueError("invalid playback locators") from exc
         if (
             normalized != locator_ids
-            or not 1 <= len(normalized) <= 16
+            or not normalized
             or len(set(normalized)) != len(normalized)
         ):
             raise ValueError("invalid playback locators")
@@ -64,7 +64,7 @@ class PlaybackPreparationRepository:
 
     @staticmethod
     def _selection(value: tuple[object, ...]) -> str:
-        return orjson.dumps(list(value), option=orjson.OPT_SORT_KEYS).decode()
+        return orjson.dumps(value).decode()
 
     @staticmethod
     def _provider_reference(target_ref: dict | None) -> str | None:
@@ -200,7 +200,7 @@ class PlaybackPreparationRepository:
                     locator_ids = self._canonical_ids(
                         tuple(orjson.loads(playback["locator_ids_json"]))
                     )
-                except (TypeError, ValueError, orjson.JSONDecodeError) as exc:
+                except (TypeError, ValueError) as exc:
                     raise ValueError("playback preparation is corrupt") from exc
                 provider = await self._database.fetch_one(
                     """
@@ -537,15 +537,14 @@ class PlaybackPreparationRepository:
                 locator_ids_json, selection_intent_json,
                 selection_intent_version, parser_version, selector_version,
                 archive_plan_version, client, state, created_at, last_used_at,
-                idle_expires_at, absolute_expires_at
+                absolute_expires_at
             ) VALUES (
                 :preparation_id, :partition, :preparation_intent_key,
                 :candidate_id, :provider_id, :provider_kind,
                 :locator_ids_json, :selection_intent_json,
                 :selection_intent_version, :parser_version,
                 :selector_version, :archive_plan_version, :client, 'pending',
-                :created_at, :last_used_at, :idle_expires_at,
-                :absolute_expires_at
+                :created_at, :last_used_at, :absolute_expires_at
             ) ON CONFLICT (preparation_intent_key) DO NOTHING
             """,
             {
@@ -559,7 +558,6 @@ class PlaybackPreparationRepository:
                 "archive_plan_version": ASSET_PREPARATION_PLAN_VERSIONS[3],
                 "created_at": current_time,
                 "last_used_at": current_time,
-                "idle_expires_at": absolute_expires_at,
                 "absolute_expires_at": absolute_expires_at,
             },
             force_primary=True,
@@ -708,14 +706,7 @@ class PlaybackPreparationRepository:
         code: str,
         now: float | None = None,
     ) -> None:
-        """Record a bounded safe code without retaining an upstream response."""
-        if (
-            not isinstance(code, str)
-            or not code
-            or len(code.encode()) > 128
-            or any(ord(character) < 32 or ord(character) == 127 for character in code)
-        ):
-            raise ValueError("invalid playback failure")
+        """Record a safe code without retaining an upstream response."""
         current_time = time.time() if now is None else now
         failure = {"failure_code": code}
         await self._replace_target(
@@ -759,7 +750,7 @@ class PlaybackPreparationRepository:
                 row["target_kind"] is not None or target_ref is None
             ):
                 raise ValueError
-        except (TypeError, ValueError, orjson.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ValueError("playback preparation is corrupt") from exc
         return PlaybackPreparation(
             str(uuid.UUID(row["preparation_id"])),
