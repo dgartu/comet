@@ -99,6 +99,29 @@ class LoggingContractTests(unittest.TestCase):
                 generated_secret="bad\nvalue",
             )
 
+    def test_runtime_identity_has_an_explicit_log_contract(self):
+        self.configure("normal")
+        instance_id = "a" * 32
+        payload = json.loads(
+            self.render(
+                lambda: log.warning(
+                    "system.runtime.restart_requested",
+                    "Supervised runtime restart requested",
+                    operation="restart",
+                    instance_id=instance_id,
+                )
+            )[0]
+        )
+
+        self.assertEqual(payload["instance_id"], instance_id)
+        with self.assertRaises(LogValidationError):
+            log.warning(
+                "system.runtime.restart_requested",
+                "Supervised runtime restart requested",
+                operation="restart",
+                instance_id="invalid",
+            )
+
     def test_invalid_configuration_log_explains_cross_field_failure(self):
         self.configure("normal")
         try:

@@ -130,6 +130,7 @@ _FIELD_LABELS = {
     "generated_secret": "secret",
     "http_method": "method",
     "http_status": "status",
+    "instance_id": "instance",
     "item_count": "items",
     "last_error_code": "last_error",
     "log_profile": "profile",
@@ -339,6 +340,7 @@ _COUNT_FIELDS = (
     "provider_count",
     "result_count",
     "requested_count",
+    "salvaged_holes",
     "success_count",
     "suppressed_count",
     "torrent_count",
@@ -346,6 +348,7 @@ _COUNT_FIELDS = (
 )
 _BYTE_FIELDS = (
     "response_bytes",
+    "salvaged_bytes",
     "transferred_bytes",
 )
 _DURATION_FIELDS = (
@@ -382,6 +385,7 @@ FIELD_SPECS: dict[str, Callable[[object], object]] = {
     "failure_reason": _validate_token,
     "http_method": _enum("delete", "get", "head", "options", "patch", "post", "put"),
     "http_status": _validate_non_negative,
+    "instance_id": _validate_identifier,
     "log_format": _enum("pretty", "json"),
     "log_profile": _enum("quiet", "normal", "verbose", "debug"),
     "last_error_code": _validate_token,
@@ -917,7 +921,7 @@ def _pretty_field(name: str, value: object) -> str:
         return _pretty_value(value)
     if name in _DURATION_FIELDS and type(value) in {int, float}:
         return f"{label}={value:.1f}ms"
-    if name in {"request_id", "run_id"} and isinstance(value, str):
+    if name in {"instance_id", "request_id", "run_id"} and isinstance(value, str):
         return f"{label}={value[:8]}"
     return f"{label}={_pretty_value(value)}"
 
