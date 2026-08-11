@@ -94,51 +94,100 @@ class CacheCheckResult:
 class CacheStateManager:
     """Tracks reusable results separately from exact-scope scrape coverage."""
 
-    def __init__(self, media_id: str):
+    def __init__(self, media_id: str, release_at: float | None = None):
         self.media_id = media_id
+        self.release_at = release_at
 
     async def register_demand(self) -> float | None:
         """Record demand and return the last scrape for this exact media ID."""
         return await _upsert_scope_demand(self.media_id, scraped=False)
 
     @staticmethod
-    def _is_scope_fresh(last_scraped_at: float | None) -> bool:
+    def _crossed_release(
+        last_scraped_at: float | None,
+        release_at: float | None,
+        now: float,
+    ) -> bool:
+        return (
+            last_scraped_at is not None
+            and release_at is not None
+            and last_scraped_at < release_at <= now
+        )
+
+    @staticmethod
+    def _scope_ttl(last_scraped_at: float, release_at: float | None) -> int:
+        ttl = settings.LIVE_TORRENT_CACHE_TTL
+        recent_ttl = settings.LIVE_TORRENT_CACHE_RECENT_TTL
+        if (
+            recent_ttl >= 0
+            and release_at is not None
+            and release_at <= last_scraped_at < release_at + ttl
+        ):
+            return min(ttl, recent_ttl)
+        return ttl
+
+    @classmethod
+    def _is_scope_fresh(
+        cls,
+        last_scraped_at: float | None,
+        release_at: float | None,
+        now: float,
+        crossed_release: bool,
+    ) -> bool:
         if last_scraped_at is None:
             return False
         if settings.LIVE_TORRENT_CACHE_TTL < 0:
             return True
-        return last_scraped_at >= time.time() - settings.LIVE_TORRENT_CACHE_TTL
+        if crossed_release:
+            return False
+        return last_scraped_at + cls._scope_ttl(last_scraped_at, release_at) >= now
 
-    @classmethod
+    @staticmethod
     def _determine_state(
-        cls,
         torrent_count: int,
         last_scraped_at: float | None,
+        scope_fresh: bool,
     ) -> CacheState:
         has_cached_torrents = torrent_count > 0
 
         if last_scraped_at is None:
             return CacheState.FIRST_SEARCH if has_cached_torrents else CacheState.EMPTY
-        if cls._is_scope_fresh(last_scraped_at):
+        if scope_fresh:
             return CacheState.FRESH
         return CacheState.STALE if has_cached_torrents else CacheState.EMPTY
 
     @staticmethod
     def _determine_decision(
         state: CacheState,
+        crossed_release: bool,
     ) -> ScrapeDecision:
         if state is CacheState.FRESH:
             return ScrapeDecision.USE_CACHE
-        if state is CacheState.STALE:
+        if state is CacheState.STALE and not crossed_release:
             return ScrapeDecision.SCRAPE_BACKGROUND
         return ScrapeDecision.SCRAPE_FOREGROUND
 
     async def check_and_decide(self, torrent_count: int) -> CacheCheckResult:
         last_scraped_at = await self.register_demand()
-        state = self._determine_state(torrent_count, last_scraped_at)
+        now = time.time()
+        crossed_release = (
+            settings.LIVE_TORRENT_CACHE_RECENT_TTL >= 0
+            and self._crossed_release(
+                last_scraped_at,
+                self.release_at,
+                now,
+            )
+        )
+        scope_fresh = self._is_scope_fresh(
+            last_scraped_at,
+            self.release_at,
+            now,
+            crossed_release,
+        )
+        state = self._determine_state(torrent_count, last_scraped_at, scope_fresh)
 
         return CacheCheckResult(
             state=state,
-            decision=self._determine_decision(state),
+            decision=self._determine_decision(state, crossed_release),
             has_cached_torrents=torrent_count > 0,
         )

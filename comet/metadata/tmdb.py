@@ -26,7 +26,7 @@ _MEDIA_CONFIG = {
 }
 
 
-def _extract_upcoming_release_date(payload) -> str | None:
+def _extract_home_release_date(payload) -> str | None:
     release_dates = []
     for result in payload.get("results") or []:
         if result is None:
@@ -161,9 +161,9 @@ class TMDBApi:
             return None
         return response.payload
 
-    async def get_upcoming_movie_release_date(self, tmdb_id: str):
+    async def get_home_release_date(self, tmdb_id: str):
         data = await self._get_json(f"movie/{tmdb_id}/release_dates")
-        return None if data is None else _extract_upcoming_release_date(data)
+        return None if data is None else _extract_home_release_date(data)
 
     async def get_episode_air_date(self, tmdb_id: str, season: int, episode: int):
         data = await self._get_json(f"tv/{tmdb_id}/season/{season}/episode/{episode}")
@@ -204,9 +204,3 @@ class TMDBApi:
         if data is None:
             return None
         return _extract_all_title_aliases(data, config)
-
-    async def has_watch_providers(self, tmdb_id: str):
-        data = await self._get_json(f"movie/{tmdb_id}/watch/providers")
-        if data is None:
-            return None
-        return bool(data.get("results"))

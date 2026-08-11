@@ -7,6 +7,7 @@ from comet.core.capabilities import CapabilityPlan
 from comet.core.capability_states import EffectiveCapabilityState
 from comet.discovery.manager import DiscoveryResult
 from comet.metadata.manager import MetadataFetchResult, MetadataFetchStatus
+from comet.metadata.release_date import ReleaseInfo
 from comet.services.cache_state import (
     CacheCheckResult,
     CacheState,
@@ -29,6 +30,51 @@ def _metadata_result(metadata: dict) -> MetadataFetchResult:
 
 
 class UsenetOnlyMediaSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_known_future_release_stops_before_discovery(self):
+        config = {
+            "schemaVersion": 2,
+            "enabledTransports": ("usenet",),
+            "_debridEntries": [],
+            "_enableTorrent": False,
+            "scrapeDebridAccountTorrents": False,
+        }
+        metadata = {
+            "title": "Upcoming",
+            "year": 2027,
+            "year_end": None,
+            "season": None,
+            "episode": None,
+        }
+        with (
+            patch(
+                "comet.services.media_search.http_client_manager.get_session",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "comet.services.media_search.MetadataScraper.fetch_metadata_and_aliases",
+                new=AsyncMock(return_value=_metadata_result(metadata)),
+            ),
+            patch(
+                "comet.services.media_search.release_dates.resolve",
+                new=AsyncMock(return_value=ReleaseInfo("2027-01-01", 2_000)),
+            ),
+            patch("comet.services.media_search.time.time", return_value=1_000),
+            patch(
+                "comet.services.media_search._search_configured_sources",
+                new=AsyncMock(),
+            ) as discovery,
+            patch(
+                "comet.services.media_search.settings.DIGITAL_RELEASE_FILTER",
+                True,
+            ),
+        ):
+            result = await search_media(
+                "movie", "tt1234567", config, "", lambda *_args, **_kwargs: None
+            )
+
+        self.assertEqual(result.status, MediaSearchStatus.UNRELEASED)
+        discovery.assert_not_awaited()
+
     def test_discovery_aliases_use_normalized_metadata_without_revalidation(self):
         long_title = "A" * 300
         aliases = {"lang:fr": [long_title, *(str(index) for index in range(70))]}
@@ -510,6 +556,10 @@ class UsenetOnlyMediaSearchTests(unittest.IsolatedAsyncioTestCase):
                 "comet.services.media_search.settings.DIGITAL_RELEASE_FILTER",
                 False,
             ),
+            patch(
+                "comet.services.media_search.settings.LIVE_TORRENT_CACHE_RECENT_TTL",
+                -1,
+            ),
         ):
             result_with_usenet = await search_media(
                 "movie",
@@ -591,6 +641,10 @@ class UsenetOnlyMediaSearchTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "comet.services.media_search.settings.DIGITAL_RELEASE_FILTER",
                 False,
+            ),
+            patch(
+                "comet.services.media_search.settings.LIVE_TORRENT_CACHE_RECENT_TTL",
+                -1,
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "torrent cache failed"):

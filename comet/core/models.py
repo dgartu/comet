@@ -218,6 +218,7 @@ class AppSettings(ServerSettings):
     METADATA_CACHE_TTL: int = 2592000  # 30 days
     TORRENT_CACHE_TTL: int = 2592000  # 30 days
     LIVE_TORRENT_CACHE_TTL: int = 604800  # 7 days
+    LIVE_TORRENT_CACHE_RECENT_TTL: int = 21600  # 6 hours
     DEBRID_CACHE_TTL: int = 86400  # 1 day
     METRICS_CACHE_TTL: int = 60  # 1 minute
     DEBRID_CACHE_CHECK_RATIO: float = 0.0  # 0.0 to 1.0

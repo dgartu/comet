@@ -45,6 +45,98 @@ class CacheStateManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, CacheState.STALE)
         self.assertEqual(result.decision, ScrapeDecision.SCRAPE_BACKGROUND)
 
+    async def test_pre_release_scrape_expires_at_release_in_foreground(self):
+        manager = CacheStateManager("tt123:1:2", release_at=2_000)
+
+        with (
+            patch.object(manager, "register_demand", return_value=1_900),
+            patch("comet.services.cache_state.time.time", return_value=2_000),
+        ):
+            result = await manager.check_and_decide(torrent_count=3)
+
+        self.assertEqual(result.state, CacheState.STALE)
+        self.assertEqual(result.decision, ScrapeDecision.SCRAPE_FOREGROUND)
+
+    async def test_pre_release_scrape_remains_fresh_before_release(self):
+        manager = CacheStateManager("tt123:1:2", release_at=2_000)
+
+        with (
+            patch.object(manager, "register_demand", return_value=1_900),
+            patch("comet.services.cache_state.time.time", return_value=1_999),
+        ):
+            result = await manager.check_and_decide(torrent_count=3)
+
+        self.assertEqual(result.state, CacheState.FRESH)
+        self.assertEqual(result.decision, ScrapeDecision.USE_CACHE)
+
+    async def test_recent_release_uses_shorter_ttl(self):
+        manager = CacheStateManager("tt123", release_at=1_000)
+
+        with (
+            patch.object(manager, "register_demand", return_value=1_100),
+            patch("comet.services.cache_state.time.time", return_value=1_201),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_TTL", 1_000),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_RECENT_TTL", 100),
+        ):
+            result = await manager.check_and_decide(torrent_count=3)
+
+        self.assertEqual(result.state, CacheState.STALE)
+        self.assertEqual(result.decision, ScrapeDecision.SCRAPE_BACKGROUND)
+
+    async def test_old_release_uses_normal_ttl(self):
+        manager = CacheStateManager("tt123", release_at=1_000)
+
+        with (
+            patch.object(manager, "register_demand", return_value=2_100),
+            patch("comet.services.cache_state.time.time", return_value=2_500),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_TTL", 1_000),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_RECENT_TTL", 100),
+        ):
+            result = await manager.check_and_decide(torrent_count=3)
+
+        self.assertEqual(result.state, CacheState.FRESH)
+        self.assertEqual(result.decision, ScrapeDecision.USE_CACHE)
+
+    async def test_recent_policy_can_be_disabled(self):
+        manager = CacheStateManager("tt123", release_at=1_000)
+
+        with (
+            patch.object(manager, "register_demand", return_value=1_100),
+            patch("comet.services.cache_state.time.time", return_value=1_500),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_TTL", 1_000),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_RECENT_TTL", -1),
+        ):
+            result = await manager.check_and_decide(torrent_count=3)
+
+        self.assertEqual(result.state, CacheState.FRESH)
+
+    async def test_disabled_recent_policy_ignores_release_boundary(self):
+        manager = CacheStateManager("tt123", release_at=2_000)
+
+        with (
+            patch.object(manager, "register_demand", return_value=1_900),
+            patch("comet.services.cache_state.time.time", return_value=2_000),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_TTL", 1_000),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_RECENT_TTL", -1),
+        ):
+            result = await manager.check_and_decide(torrent_count=3)
+
+        self.assertEqual(result.state, CacheState.FRESH)
+        self.assertEqual(result.decision, ScrapeDecision.USE_CACHE)
+
+    async def test_global_never_refresh_setting_wins_at_release_boundary(self):
+        manager = CacheStateManager("tt123", release_at=2_000)
+
+        with (
+            patch.object(manager, "register_demand", return_value=1_900),
+            patch("comet.services.cache_state.time.time", return_value=2_000),
+            patch.object(cache_state.settings, "LIVE_TORRENT_CACHE_TTL", -1),
+        ):
+            result = await manager.check_and_decide(torrent_count=3)
+
+        self.assertEqual(result.state, CacheState.FRESH)
+        self.assertEqual(result.decision, ScrapeDecision.USE_CACHE)
+
     async def test_demand_write_failure_propagates(self):
         manager = CacheStateManager("tt123:2")
 

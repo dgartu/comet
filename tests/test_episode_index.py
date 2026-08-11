@@ -2,11 +2,91 @@ import unittest
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
+from comet.core.models import settings
 from comet.metadata.episode_index import EpisodeIndexService, database
 from comet.metadata.http import MetadataHttpResponse
 
 
 class EpisodeIndexRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_negative_metadata_ttl_reuses_cached_historical_air_date(self):
+        service = EpisodeIndexService(session=None)
+        cached_lookup = AsyncMock(
+            return_value={
+                "air_date": "2020-01-01",
+                "updated_at": 1_600_000_000,
+            }
+        )
+        with (
+            patch.object(settings, "METADATA_CACHE_TTL", -1),
+            patch.object(service, "_get_cached_air_date", new=cached_lookup),
+            patch.object(
+                service,
+                "_refresh_from_cinemeta",
+                new=AsyncMock(),
+            ) as cinemeta_refresh,
+            patch.object(
+                service,
+                "_refresh_single_episode_from_tmdb",
+                new=AsyncMock(),
+            ) as tmdb_refresh,
+        ):
+            air_date = await service.get_target_air_date("tt1234567", 1, 2)
+
+        self.assertEqual(air_date, "2020-01-01")
+        self.assertIsNone(cached_lookup.await_args.args[3])
+        cinemeta_refresh.assert_not_awaited()
+        tmdb_refresh.assert_not_awaited()
+
+    async def test_future_air_date_is_reused_within_unstable_ttl(self):
+        service = EpisodeIndexService(session=None)
+        with (
+            patch("comet.metadata.episode_index.time.time", return_value=100_000),
+            patch.object(
+                service,
+                "_get_cached_air_date",
+                new=AsyncMock(
+                    return_value={
+                        "air_date": "1970-01-03",
+                        "updated_at": 90_000,
+                    }
+                ),
+            ),
+            patch.object(
+                service,
+                "_refresh_single_episode_from_tmdb",
+                new=AsyncMock(),
+            ) as refresh,
+        ):
+            air_date = await service.get_target_air_date("tt1234567", 1, 2)
+
+        self.assertEqual(air_date, "1970-01-03")
+        refresh.assert_not_awaited()
+
+    async def test_air_date_is_revalidated_at_release_boundary(self):
+        service = EpisodeIndexService(session=None)
+        with (
+            patch("comet.metadata.episode_index.time.time", return_value=172_800),
+            patch.object(
+                service,
+                "_get_cached_air_date",
+                new=AsyncMock(
+                    return_value={
+                        "air_date": "1970-01-03",
+                        "updated_at": 160_000,
+                    }
+                ),
+            ),
+            patch.object(
+                service,
+                "_refresh_single_episode_from_tmdb",
+                new=AsyncMock(return_value="1970-01-04"),
+            ) as refresh,
+        ):
+            air_date = await service.get_target_air_date("tt1234567", 1, 2)
+
+        self.assertEqual(air_date, "1970-01-04")
+        refresh.assert_awaited_once_with("tt1234567", 1, 2)
+
     async def test_unexpected_tmdb_failure_surfaces(self):
         service = EpisodeIndexService(session=None)
         with patch(
