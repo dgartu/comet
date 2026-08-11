@@ -38,12 +38,11 @@ from comet.discovery.torrent_repository import (
     TorrentReleaseRepository,
     torrent_candidate_from_runtime,
 )
-from comet.metadata.episode_index import EpisodeIndexService
-from comet.metadata.filter import release_filter
 from comet.metadata.manager import (
     MetadataFetchStatus,
     MetadataScraper,
 )
+from comet.metadata.release_date import release_dates
 from comet.observability import current_request_id, log, metrics
 from comet.playback.presentation import (
     ProviderOption,
@@ -651,7 +650,7 @@ def episode_matching_policy(
     *,
     has_debrid: bool,
     enable_torrent: bool,
-) -> tuple[bool, bool]:
+) -> bool:
     is_imdb_episode_request = (
         media_type == "series"
         and search_season is not None
@@ -661,10 +660,7 @@ def episode_matching_policy(
     allow_debrid_season_packs = (
         is_imdb_episode_request and has_debrid and not enable_torrent
     )
-    reject_unknown_episode_files = (
-        is_imdb_episode_request and not allow_debrid_season_packs
-    )
-    return is_imdb_episode_request, reject_unknown_episode_files
+    return is_imdb_episode_request and not allow_debrid_season_packs
 
 
 def merge_service_cache_status(target: dict, incoming: dict):
@@ -1087,25 +1083,30 @@ async def _search_media(
     session = await http_client_manager.get_session()
     user_session = await http_client_manager.get_user_session()
     metadata_scraper = MetadataScraper(session)
-
-    if settings.DIGITAL_RELEASE_FILTER:
-        is_released = await release_filter.check_is_released(
-            session, media_type, media_id, season, episode
-        )
-        if not is_released:
-            return MediaSearchResult(
-                MediaSearchStatus.UNRELEASED,
-                media_scope=media_scope,
-                media_only_id=media_only_id,
-                search_season=season,
-                search_episode=episode,
-                is_torrent_only=is_torrent_only,
-                use_account_scrape=use_account_scrape,
-            )
-
-    metadata_result = await metadata_scraper.fetch_metadata_and_aliases(
-        media_type, media_id, media_only_id, season, episode
+    is_kitsu = media_id.startswith("kitsu:")
+    release_lookup_enabled = settings.DIGITAL_RELEASE_FILTER or (
+        bittorrent_enabled
+        and settings.LIVE_TORRENT_CACHE_TTL >= 0
+        and settings.LIVE_TORRENT_CACHE_RECENT_TTL >= 0
     )
+    release_info = None
+    if release_lookup_enabled and not is_kitsu:
+        metadata_result, release_info = await _gather_owned(
+            metadata_scraper.fetch_metadata_and_aliases(
+                media_type, media_id, media_only_id, season, episode
+            ),
+            release_dates.resolve(
+                session,
+                media_type,
+                media_only_id,
+                season,
+                episode,
+            ),
+        )
+    else:
+        metadata_result = await metadata_scraper.fetch_metadata_and_aliases(
+            media_type, media_id, media_only_id, season, episode
+        )
     metadata = metadata_result.metadata
     aliases = metadata_result.aliases
     metadata_status = metadata_result.status
@@ -1131,7 +1132,6 @@ async def _search_media(
     season = metadata["season"]
     episode = metadata["episode"]
 
-    is_kitsu = media_id.startswith("kitsu:")
     search_episode = episode
     search_season = season
 
@@ -1146,6 +1146,42 @@ async def _search_media(
                 new_episode = from_episode + episode - 1
                 if new_episode != episode:
                     search_episode = new_episode
+
+    anime_mapping_loaded = anime_mapper.is_loaded()
+    mapped_imdb_id = (
+        await anime_mapper.get_imdb_from_kitsu(media_only_id)
+        if is_kitsu and anime_mapping_loaded
+        else None
+    )
+    if release_lookup_enabled and is_kitsu:
+        release_info = await release_dates.resolve(
+            session,
+            media_type,
+            mapped_imdb_id,
+            search_season,
+            search_episode,
+        )
+    if (
+        settings.DIGITAL_RELEASE_FILTER
+        and release_info is not None
+        and release_info.timestamp > time.time()
+    ):
+        return MediaSearchResult(
+            MediaSearchStatus.UNRELEASED,
+            metadata=metadata,
+            aliases=aliases,
+            media_scope=media_scope,
+            media_only_id=media_only_id,
+            search_season=search_season,
+            search_episode=search_episode,
+            is_torrent_only=is_torrent_only,
+            use_account_scrape=use_account_scrape,
+        )
+    target_air_date = (
+        release_info.date
+        if media_type == "series" and release_info is not None
+        else None
+    )
 
     presentation_scope = (
         "anime_episode"
@@ -1177,7 +1213,7 @@ async def _search_media(
             aliases=aliases,
             year=year,
             year_end=year_end,
-            air_date=None,
+            air_date=target_air_date,
             absolute_episode=search_episode if is_kitsu else None,
             search_scope=presentation_scope,
             add_background_task=add_background_task,
@@ -1230,11 +1266,10 @@ async def _search_media(
         )
 
     cache_media_ids = [media_only_id]
-    if anime_mapper.is_loaded():
+    if anime_mapping_loaded:
         if is_kitsu:
-            imdb_id = await anime_mapper.get_imdb_from_kitsu(media_only_id)
-            if imdb_id:
-                cache_media_ids.append(imdb_id)
+            if mapped_imdb_id:
+                cache_media_ids.append(mapped_imdb_id)
         elif anime_mapper.is_anime_content(media_id, media_only_id):
             kitsu_ids = anime_mapper.get_kitsu_ids_from_imdb(media_only_id)
             if kitsu_ids:
@@ -1243,7 +1278,7 @@ async def _search_media(
             if kitsu_id:
                 cache_media_ids.append(kitsu_id)
 
-    is_imdb_episode_request, reject_unknown_episode_files = episode_matching_policy(
+    reject_unknown_episode_files = episode_matching_policy(
         media_type,
         media_only_id,
         search_season,
@@ -1251,14 +1286,6 @@ async def _search_media(
         has_debrid=bool(debrid_entries),
         enable_torrent=enable_torrent,
     )
-    target_air_date = None
-    if is_imdb_episode_request:
-        target_air_date = await EpisodeIndexService(session).get_target_air_date(
-            media_only_id,
-            search_season,
-            search_episode,
-        )
-
     torrent_manager = TorrentResultAccumulator(
         media_type,
         media_id,
@@ -1293,7 +1320,10 @@ async def _search_media(
     )
     initial_info_hashes = set(torrent_manager.torrents)
 
-    cache_manager = CacheStateManager(media_id)
+    cache_manager = CacheStateManager(
+        media_id,
+        None if release_info is None else release_info.timestamp,
+    )
     cache_result = await cache_manager.check_and_decide(torrent_count)
     force_scrape_now = not torrent_manager.primary_cached
     account_snapshot_ready = False

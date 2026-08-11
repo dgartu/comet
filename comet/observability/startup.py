@@ -161,6 +161,7 @@ def log_startup_configuration(settings, *, workers: int, server_name: str) -> No
             f"batch={settings.DATABASE_BATCH_SIZE} metadata_ttl={settings.METADATA_CACHE_TTL}s "
             f"torrent_ttl={settings.TORRENT_CACHE_TTL}s "
             f"live_torrent_ttl={settings.LIVE_TORRENT_CACHE_TTL}s "
+            f"live_torrent_recent_ttl={settings.LIVE_TORRENT_CACHE_RECENT_TTL}s "
             f"debrid_ttl={settings.DEBRID_CACHE_TTL}s "
             f"debrid_refresh_ratio={settings.DEBRID_CACHE_CHECK_RATIO}"
         ),

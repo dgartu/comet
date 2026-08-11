@@ -5,13 +5,14 @@ import aiohttp
 
 from comet.core.models import database, settings
 from comet.metadata.http import MetadataHttpError, get_metadata_json
+from comet.metadata.release_policy import release_cache_is_fresh, utc_date_timestamp
 from comet.metadata.tmdb import TMDBApi
 from comet.metadata.validation import episode_coordinate
 
 _CINEMETA_SERIES_META_URL = "https://v3-cinemeta.strem.io/meta/series/{series_id}.json"
 
 _TARGET_EPISODE_AIR_DATE_QUERY = """
-    SELECT air_date
+    SELECT air_date, updated_at
     FROM series_episode_index
     WHERE series_id = :series_id
       AND season = CAST(:season AS INTEGER)
@@ -102,8 +103,8 @@ class EpisodeIndexService:
         season: int,
         episode: int,
         min_timestamp: float | None,
-    ) -> str | None:
-        row = await database.fetch_one(
+    ):
+        return await database.fetch_one(
             _TARGET_EPISODE_AIR_DATE_QUERY,
             {
                 "series_id": series_id,
@@ -112,9 +113,6 @@ class EpisodeIndexService:
                 "min_timestamp": min_timestamp,
             },
         )
-        if row is None:
-            return None
-        return row["air_date"]
 
     async def _get_cached_episode(
         self,
@@ -268,19 +266,30 @@ class EpisodeIndexService:
 
         min_timestamp = time.time() - settings.METADATA_CACHE_TTL
 
-        cached_air_date = await self._get_cached_air_date(
+        cached_row = await self._get_cached_air_date(
             series_id, season, episode, min_timestamp
         )
-        if cached_air_date is not None:
-            return cached_air_date
+        if cached_row is not None:
+            cached_air_date = cached_row["air_date"]
+            if release_cache_is_fresh(
+                utc_date_timestamp(cached_air_date),
+                cached_row["updated_at"],
+                time.time(),
+                settings.METADATA_CACHE_TTL,
+            ):
+                return cached_air_date
+            refreshed_air_date = await self._refresh_single_episode_from_tmdb(
+                series_id, season, episode
+            )
+            return refreshed_air_date or cached_air_date
 
         if not await self._is_series_index_fresh(series_id, min_timestamp):
             await self._refresh_from_cinemeta(series_id)
-            cached_air_date = await self._get_cached_air_date(
+            cached_row = await self._get_cached_air_date(
                 series_id, season, episode, min_timestamp
             )
-            if cached_air_date is not None:
-                return cached_air_date
+            if cached_row is not None:
+                return cached_row["air_date"]
 
         tmdb_air_date = await self._refresh_single_episode_from_tmdb(
             series_id, season, episode
@@ -288,7 +297,8 @@ class EpisodeIndexService:
         if tmdb_air_date is not None:
             return tmdb_air_date
 
-        return await self._get_cached_air_date(series_id, season, episode, None)
+        cached_row = await self._get_cached_air_date(series_id, season, episode, None)
+        return None if cached_row is None else cached_row["air_date"]
 
     async def get_episode_by_air_date(
         self,

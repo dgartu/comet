@@ -27,7 +27,7 @@ class StreamScrapeContextTests(unittest.IsolatedAsyncioTestCase):
                 has_debrid=True,
                 enable_torrent=False,
             ),
-            (True, False),
+            False,
         )
 
     def test_direct_episode_search_requires_an_explicit_episode(self):
@@ -40,7 +40,7 @@ class StreamScrapeContextTests(unittest.IsolatedAsyncioTestCase):
                 has_debrid=True,
                 enable_torrent=True,
             ),
-            (True, True),
+            True,
         )
 
     async def test_inflight_timeout_keeps_the_stremio_retry_notice(self):

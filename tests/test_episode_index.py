@@ -7,6 +7,56 @@ from comet.metadata.http import MetadataHttpResponse
 
 
 class EpisodeIndexRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_future_air_date_is_reused_within_unstable_ttl(self):
+        service = EpisodeIndexService(session=None)
+        with (
+            patch("comet.metadata.episode_index.time.time", return_value=100_000),
+            patch.object(
+                service,
+                "_get_cached_air_date",
+                new=AsyncMock(
+                    return_value={
+                        "air_date": "1970-01-03",
+                        "updated_at": 90_000,
+                    }
+                ),
+            ),
+            patch.object(
+                service,
+                "_refresh_single_episode_from_tmdb",
+                new=AsyncMock(),
+            ) as refresh,
+        ):
+            air_date = await service.get_target_air_date("tt1234567", 1, 2)
+
+        self.assertEqual(air_date, "1970-01-03")
+        refresh.assert_not_awaited()
+
+    async def test_air_date_is_revalidated_at_release_boundary(self):
+        service = EpisodeIndexService(session=None)
+        with (
+            patch("comet.metadata.episode_index.time.time", return_value=172_800),
+            patch.object(
+                service,
+                "_get_cached_air_date",
+                new=AsyncMock(
+                    return_value={
+                        "air_date": "1970-01-03",
+                        "updated_at": 160_000,
+                    }
+                ),
+            ),
+            patch.object(
+                service,
+                "_refresh_single_episode_from_tmdb",
+                new=AsyncMock(return_value="1970-01-04"),
+            ) as refresh,
+        ):
+            air_date = await service.get_target_air_date("tt1234567", 1, 2)
+
+        self.assertEqual(air_date, "1970-01-04")
+        refresh.assert_awaited_once_with("tt1234567", 1, 2)
+
     async def test_unexpected_tmdb_failure_surfaces(self):
         service = EpisodeIndexService(session=None)
         with patch(

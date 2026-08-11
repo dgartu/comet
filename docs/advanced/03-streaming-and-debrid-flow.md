@@ -22,6 +22,8 @@
 - Optional digital-release blocking (`DIGITAL_RELEASE_FILTER`).
 - Metadata+aliases retrieval and caching.
 - Cache-state decision: immediate scrape, background scrape, or wait message.
+- Release-aware scrape freshness: pre-release coverage expires at release, then
+  uses `LIVE_TORRENT_CACHE_RECENT_TTL` during the normal live-cache horizon.
 - Multi-debrid availability checks and per-service cached state.
 - Optional debrid account snapshot enrichment (`scrapeDebridAccountTorrents`).
 - RTN filtering/ranking with user config.

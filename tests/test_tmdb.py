@@ -5,8 +5,8 @@ import orjson
 from comet.metadata.tmdb import (
     TMDBApi,
     _extract_all_title_aliases,
+    _extract_home_release_date,
     _extract_title_aliases,
-    _extract_upcoming_release_date,
 )
 
 
@@ -161,7 +161,7 @@ class TmdbMetadataTests(unittest.TestCase):
             ]
         }
 
-        self.assertEqual(_extract_upcoming_release_date(payload), "2026-06-01")
+        self.assertEqual(_extract_home_release_date(payload), "2026-06-01")
 
 
 class TmdbApiTests(unittest.IsolatedAsyncioTestCase):
@@ -208,9 +208,19 @@ class TmdbApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(aliases)
 
-    async def test_watch_provider_result_reports_availability(self):
-        empty_session = _Session(_Response(200, {"results": {}}))
-        populated_session = _Session(_Response(200, {"results": {"FR": {}}}))
+    async def test_home_release_lookup_uses_release_dates_endpoint(self):
+        session = _Session(
+            _Response(
+                200,
+                {
+                    "results": [
+                        {"release_dates": [{"type": 4, "release_date": "2026-06-01"}]}
+                    ]
+                },
+            )
+        )
 
-        self.assertFalse(await TMDBApi(empty_session).has_watch_providers("123"))
-        self.assertTrue(await TMDBApi(populated_session).has_watch_providers("123"))
+        self.assertEqual(
+            await TMDBApi(session).get_home_release_date("123"), "2026-06-01"
+        )
+        self.assertTrue(session.requests[0][0].endswith("movie/123/release_dates"))
