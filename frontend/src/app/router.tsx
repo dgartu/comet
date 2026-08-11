@@ -23,17 +23,20 @@ const ConfigureRoute = lazyRouteComponent(
   "ConfigureRoute",
 );
 
-const configureRoute = createRoute({
-  component: ConfigureRoute,
-  getParentRoute: () => rootRoute,
-  path: "/configure",
-});
+function configureRoute<const Path extends string>(path: Path) {
+  return createRoute({
+    component: ConfigureRoute,
+    getParentRoute: () => rootRoute,
+    path,
+  });
+}
 
-const encodedConfigureRoute = createRoute({
-  component: ConfigureRoute,
-  getParentRoute: () => rootRoute,
-  path: "/$b64config/configure",
-});
+const configureRoutes = [
+  configureRoute("/configure"),
+  configureRoute("/$b64config/configure"),
+  configureRoute("/s/$publicApiToken/configure"),
+  configureRoute("/s/$publicApiToken/$b64config/configure"),
+];
 
 const AdminRoute = lazyRouteComponent(() => import("../features/admin/Route"), "AdminRoute");
 
@@ -98,8 +101,7 @@ const adminPageRoutes = adminPages.map(({ component, path }) =>
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
-  configureRoute,
-  encodedConfigureRoute,
+  ...configureRoutes,
   adminRoute.addChildren([adminIndexRoute, ...adminPageRoutes]),
 ]);
 

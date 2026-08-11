@@ -1171,6 +1171,46 @@ test("public and admin route families render independently", async ({ page }) =>
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 });
 
+test("protected prefixed configure links keep their configuration after login", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/auth/configure/session", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      status: 401,
+      body: JSON.stringify({
+        error: {
+          code: "configure_authentication_required",
+          message: "Authentication required",
+          request_id: "playwright-request",
+        },
+      }),
+    }),
+  );
+  await page.route("**/api/v1/auth/configure/login", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(
+        envelope({
+          protected: true,
+          authenticated: true,
+          csrf_token: "configure-csrf",
+          expires_in: 3600,
+        }),
+      ),
+    }),
+  );
+
+  const encoded = btoa('{"schemaVersion":1}').replaceAll("=", "");
+  const path = `/s/public-token/${encoded}/configure`;
+  await page.goto(path);
+  await page.getByLabel("Password").fill("configure-secret");
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  await expect(page.getByRole("button", { name: "Copy link" })).toBeVisible();
+  await expect(page).toHaveURL(path);
+});
+
 test("configurator copies the public manifest when defaults are untouched", async ({ page }) => {
   await page.goto("/configure");
   const origin = new URL(page.url()).origin;
