@@ -3,6 +3,8 @@ import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from websockets.exceptions import WebSocketException
+
 from comet.cometnet.protocol import HandshakeMessage, PingMessage
 from comet.cometnet.transport import ConnectionManager, NodeIdentity, PeerConnection
 
@@ -354,6 +356,22 @@ class CometNetTransportTests(unittest.IsolatedAsyncioTestCase):
 
         validate.assert_awaited_once_with(ping, "peer", None, None)
         handle_ping.assert_not_awaited()
+
+    async def test_receive_loop_handles_transport_disconnect(self):
+        manager = ConnectionManager(_Identity())
+        manager._running = True
+        websocket = AsyncMock()
+        websocket.recv.side_effect = WebSocketException
+        connection = PeerConnection(
+            node_id="peer",
+            address="ws://peer",
+            websocket=websocket,
+        )
+        manager._connections["peer"] = connection
+
+        await manager._receive_loop(connection)
+
+        self.assertNotIn("peer", manager._connections)
 
     async def test_duplicate_inbound_handshake_releases_reserved_ip_slot(self):
         manager = ConnectionManager(_Identity())

@@ -3,6 +3,9 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from starlette.websockets import WebSocket
+from websockets.exceptions import WebSocketException
+
 from comet.cometnet.manager import CometNetService
 from comet.cometnet.pools import MemberRole, PoolManifest, PoolMember, PoolStore
 from comet.cometnet.protocol import (
@@ -26,6 +29,58 @@ class CometNetManagerTests(unittest.IsolatedAsyncioTestCase):
                     role=MemberRole.CREATOR,
                     added_by="creator-key",
                 )
+            ],
+        )
+
+    async def test_asgi_websocket_uses_transport_connection_contract(self):
+        incoming = iter(
+            [
+                {"type": "websocket.connect"},
+                {"type": "websocket.receive", "bytes": b"peer-handshake"},
+                {"type": "websocket.disconnect", "code": 1000},
+            ]
+        )
+        outgoing = []
+
+        async def receive():
+            return next(incoming)
+
+        async def send(message):
+            outgoing.append(message)
+
+        websocket = WebSocket(
+            {
+                "type": "websocket",
+                "headers": [],
+                "client": ("203.0.113.1", 49152),
+            },
+            receive,
+            send,
+        )
+        await websocket.accept()
+
+        async def handle_connection(connection, client_ip):
+            self.assertEqual(client_ip, "203.0.113.1")
+            self.assertEqual(await connection.recv(), b"peer-handshake")
+            await connection.send(b"local-handshake")
+            with self.assertRaises(WebSocketException):
+                await connection.recv()
+            await connection.close()
+
+        service = CometNetService(enabled=True)
+        service._running = True
+        service.transport = Mock(
+            handle_incoming_connection=AsyncMock(side_effect=handle_connection)
+        )
+
+        await service.handle_websocket_connection(websocket)
+
+        self.assertEqual(
+            outgoing,
+            [
+                {"type": "websocket.accept", "subprotocol": None, "headers": []},
+                {"type": "websocket.send", "bytes": b"local-handshake"},
+                {"type": "websocket.close", "code": 1000, "reason": ""},
             ],
         )
 

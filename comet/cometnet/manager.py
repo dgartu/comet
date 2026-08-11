@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import aiofiles
+from starlette.websockets import WebSocket, WebSocketDisconnect
+from websockets.exceptions import WebSocketException
 
 from comet.cometnet.crypto import NodeIdentity
 from comet.cometnet.discovery import (
@@ -44,7 +46,7 @@ from comet.cometnet.protocol import (
 )
 from comet.cometnet.reputation import ReputationStore
 from comet.cometnet.state import validate_state
-from comet.cometnet.transport import ConnectionManager
+from comet.cometnet.transport import ConnectionManager, WebSocketConnection
 from comet.cometnet.utils import (
     check_advertise_url_reachability,
     check_system_clock_sync,
@@ -60,6 +62,32 @@ from comet.utils.network import get_client_ip_any
 
 class CometNetStartupError(RuntimeError):
     """Category-only startup rejection owned by the service boundary."""
+
+
+class _StarletteWebSocketAdapter:
+    """Expose a Starlette WebSocket through the CometNet transport contract."""
+
+    def __init__(self, websocket: WebSocket):
+        self._websocket = websocket
+
+    async def recv(self) -> bytes | str:
+        message = await self._websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            raise WebSocketException
+        data = message.get("bytes")
+        return data if data is not None else message["text"]
+
+    async def send(self, data: bytes) -> None:
+        try:
+            await self._websocket.send_bytes(data)
+        except WebSocketDisconnect as exc:
+            raise WebSocketException from exc
+
+    async def close(self) -> None:
+        try:
+            await self._websocket.close()
+        except WebSocketDisconnect:
+            pass
 
 
 class CometNetService(CometNetBackend):
@@ -907,7 +935,7 @@ class CometNetService(CometNetBackend):
         """Broadcast a torrent to the network."""
         await self.broadcast_torrents([metadata])
 
-    async def handle_websocket_connection(self, websocket) -> None:
+    async def handle_websocket_connection(self, websocket: WebSocket) -> None:
         """
         Handle an incoming WebSocket connection from FastAPI /cometnet/ws endpoint.
         """
@@ -917,7 +945,8 @@ class CometNetService(CometNetBackend):
 
         client_ip = get_client_ip_any(websocket)
 
-        node_id = await self.transport.handle_incoming_connection(websocket, client_ip)
+        connection: WebSocketConnection = _StarletteWebSocketAdapter(websocket)
+        node_id = await self.transport.handle_incoming_connection(connection, client_ip)
 
         if node_id:
             # Record in discovery for future PEX

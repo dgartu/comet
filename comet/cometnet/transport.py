@@ -16,10 +16,10 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Protocol
 
 import websockets
-from websockets.client import WebSocketClientProtocol
-from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
+from websockets.exceptions import InvalidStatus, WebSocketException
 from websockets.http11 import Response
 
 from comet.cometnet.crypto import NodeIdentity
@@ -68,6 +68,16 @@ class WebSocketHeadFilter(logging.Filter):
 logging.getLogger("websockets.server").addFilter(WebSocketHeadFilter())
 
 
+class WebSocketConnection(Protocol):
+    """WebSocket operations used by the CometNet transport."""
+
+    async def recv(self) -> bytes | str: ...
+
+    async def send(self, data: bytes) -> None: ...
+
+    async def close(self) -> None: ...
+
+
 async def resolve_effective_peer_address(
     public_url: str | None,
     connectable_address: str | None,
@@ -95,7 +105,7 @@ class PeerConnection:
 
     node_id: str
     address: str  # WebSocket URL
-    websocket: WebSocketClientProtocol
+    websocket: WebSocketConnection
     client_ip: str | None = None  # The actual IP address (for rate limiting)
     alias: str | None = None  # Friendly name
     public_key: str = ""
@@ -520,7 +530,7 @@ class ConnectionManager:
 
     async def handle_incoming_connection(
         self,
-        websocket: WebSocketClientProtocol,
+        websocket: WebSocketConnection,
         client_ip: str,
         connectable_address: str | None = None,
     ) -> str | None:
@@ -609,7 +619,7 @@ class ConnectionManager:
 
     async def _perform_handshake(
         self,
-        websocket: WebSocketClientProtocol,
+        websocket: WebSocketConnection,
         client_ip: str,
         connectable_address: str | None,
         is_outbound: bool,
@@ -778,7 +788,7 @@ class ConnectionManager:
                         handler = self._handlers.get(message.type)
                         if handler:
                             await handler(conn.node_id, message)
-                except ConnectionClosed:
+                except WebSocketException:
                     break
         finally:
             self._release_connection(conn.node_id, conn)
