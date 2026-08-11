@@ -170,10 +170,13 @@ class CacheStateManager:
     async def check_and_decide(self, torrent_count: int) -> CacheCheckResult:
         last_scraped_at = await self.register_demand()
         now = time.time()
-        crossed_release = self._crossed_release(
-            last_scraped_at,
-            self.release_at,
-            now,
+        crossed_release = (
+            settings.LIVE_TORRENT_CACHE_RECENT_TTL >= 0
+            and self._crossed_release(
+                last_scraped_at,
+                self.release_at,
+                now,
+            )
         )
         scope_fresh = self._is_scope_fresh(
             last_scraped_at,

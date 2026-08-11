@@ -93,6 +93,11 @@ def _normalize_air_date(raw_value) -> str | None:
     return candidate
 
 
+def _metadata_min_timestamp() -> float | None:
+    ttl = settings.METADATA_CACHE_TTL
+    return None if ttl < 0 else time.time() - ttl
+
+
 class EpisodeIndexService:
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
@@ -133,7 +138,7 @@ class EpisodeIndexService:
         return row["season"], row["episode"]
 
     async def _is_series_index_fresh(
-        self, series_id: str, min_timestamp: float
+        self, series_id: str, min_timestamp: float | None
     ) -> bool:
         last_refreshed = await database.fetch_val(
             _SERIES_INDEX_LAST_REFRESH_QUERY,
@@ -141,7 +146,7 @@ class EpisodeIndexService:
         )
         if last_refreshed is None:
             return False
-        return float(last_refreshed) >= min_timestamp
+        return min_timestamp is None or float(last_refreshed) >= min_timestamp
 
     async def _upsert_series_air_dates(self, rows: list[dict]) -> None:
         if not rows:
@@ -264,7 +269,7 @@ class EpisodeIndexService:
         season = season_value
         episode = episode_value
 
-        min_timestamp = time.time() - settings.METADATA_CACHE_TTL
+        min_timestamp = _metadata_min_timestamp()
 
         cached_row = await self._get_cached_air_date(
             series_id, season, episode, min_timestamp
@@ -309,7 +314,7 @@ class EpisodeIndexService:
         if normalized_air_date is None:
             return None
 
-        min_timestamp = time.time() - settings.METADATA_CACHE_TTL
+        min_timestamp = _metadata_min_timestamp()
         cached_episode = await self._get_cached_episode(
             series_id, normalized_air_date, min_timestamp
         )
