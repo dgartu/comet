@@ -177,3 +177,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
