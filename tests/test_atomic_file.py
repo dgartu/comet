@@ -1,9 +1,14 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from comet.utils.atomic_file import write_text_atomic
+
+# Directory fsync is POSIX-only; on Windows os.O_DIRECTORY does not exist and
+# the second fsync is skipped.
+_EXPECTED_FSYNC_COUNT = 2 if hasattr(os, "O_DIRECTORY") else 1
 
 
 class AtomicFileTests(unittest.IsolatedAsyncioTestCase):
@@ -66,5 +71,5 @@ class AtomicFileTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await write_text_atomic(path, "complete")
 
-            self.assertEqual(events, ["fsync", "replace", "fsync"])
+            self.assertEqual(events, ["fsync"] * _EXPECTED_FSYNC_COUNT + ["replace"])
             self.assertEqual(path.read_text(), "complete")

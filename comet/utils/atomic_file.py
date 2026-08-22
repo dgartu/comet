@@ -7,6 +7,10 @@ import aiofiles
 
 
 def _fsync_directory(directory: Path) -> None:
+    # Directory fsync is a POSIX durability guarantee; os.O_DIRECTORY does not
+    # exist on Windows, where os.replace() is already atomic.
+    if not hasattr(os, "O_DIRECTORY"):
+        return
     directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(directory_fd)
